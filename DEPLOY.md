@@ -36,12 +36,19 @@ DOCKER_SOCKET=unix:///var/run/docker.sock
 ### 3. Build and start
 
 ```bash
+# Docker Compose v2 (plugin):
 docker compose -f docker-compose.prod.yml up -d --build
+
+# Docker Compose v1 (standalone binary, common on Unraid):
+docker-compose -f docker-compose.prod.yml up -d --build
 ```
+
+> **Tip**: If you get `unknown shorthand flag: 'f'`, you have the v1 binary —
+> use `docker-compose` (hyphenated) instead of `docker compose` (subcommand).
 
 ### 4. Access the setup wizard
 
-Open `http://<unraid-ip>:8080` in your browser. The first-time setup wizard will walk you through:
+Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will walk you through:
 
 1. **Account** — create your admin username and password
 2. **Domain** — enter your base domain (e.g. `mydomain.com`)
@@ -52,7 +59,7 @@ Open `http://<unraid-ip>:8080` in your browser. The first-time setup wizard will
 
 ### 5. Verify
 
-- Check the dashboard at `http://<unraid-ip>:8080`
+- Check the dashboard at `http://<unraid-ip>:6780`
 - Go to **Discover** to see your running containers
 - Use **Expose** to create your first service
 
@@ -124,7 +131,8 @@ The `/data` volume contains everything persistent. Back it up regularly.
 ```bash
 cd /mnt/user/appdata/tailbale
 git pull
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml up -d --build   # v2
+# or: docker-compose -f docker-compose.prod.yml up -d --build  # v1
 ```
 
 Your data in `/data` is preserved across rebuilds.
