@@ -31,7 +31,6 @@ COPY --from=frontend-build /app/frontend/dist ./static
 VOLUME /data
 ENV DATA_DIR=/data
 ENV PORT=8080
-ENV JWT_SECRET=change-me-in-production
 
 EXPOSE 8080
 

@@ -18,22 +18,7 @@ git clone <your-repo-url> tailbale
 cd tailbale
 ```
 
-### 2. Create your `.env` file
-
-```bash
-cp backend/.env.example .env
-```
-
-Edit `.env` and set at minimum:
-
-```env
-JWT_SECRET=<generate with: python -c "import secrets; print(secrets.token_urlsafe(32))">
-PORT=8080
-DATA_DIR=/data
-DOCKER_SOCKET=unix:///var/run/docker.sock
-```
-
-### 3. Build and start
+### 2. Build and start
 
 ```bash
 # Docker Compose v2 (plugin):
@@ -45,8 +30,9 @@ docker-compose -f docker-compose.prod.yml up -d --build
 
 > **Tip**: If you get `unknown shorthand flag: 'f'`, you have the v1 binary —
 > use `docker-compose` (hyphenated) instead of `docker compose` (subcommand).
+> If neither works, use **Option B** below.
 
-### 4. Access the setup wizard
+### 3. Access the setup wizard
 
 Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will walk you through:
 
@@ -57,7 +43,7 @@ Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will
 5. **Tailscale** — your reusable auth key
 6. **Docker** — socket path (default is correct for Unraid)
 
-### 5. Verify
+### 4. Verify
 
 - Check the dashboard at `http://<unraid-ip>:6780`
 - Go to **Discover** to see your running containers
@@ -88,17 +74,16 @@ docker build -t tailbale-edge:latest ./edge
 docker run -d \
   --name tailbale \
   --restart unless-stopped \
-  -p 8080:8080 \
+  -p 6780:8080 \
   -v /mnt/user/appdata/tailbale/data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
-  -e JWT_SECRET="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')" \
   -e DATA_DIR=/data \
   -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
 ```
 
-Then open `http://<unraid-ip>:8080` to complete setup.
+Then open `http://<unraid-ip>:6780` to complete setup.
 
 ---
 
@@ -111,20 +96,24 @@ Then open `http://<unraid-ip>:8080` to complete setup.
 
 The `/data` volume contains everything persistent. Back it up regularly.
 
+## Security
+
+The JWT signing secret is **auto-generated on first startup** and stored in
+`/data/secrets/.jwt_secret`. It never needs to be configured manually. To
+invalidate all sessions, delete that file and restart the container — a new
+secret will be generated automatically.
+
 ## Environment Variables Reference
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `JWT_SECRET` | **Yes** | `change-me-in-production` | Secret for signing session tokens |
 | `JWT_EXPIRY_HOURS` | No | `24` | Session duration in hours |
 | `COOKIE_SECURE` | No | `false` | Set `true` if behind HTTPS |
 | `CORS_ORIGINS` | No | `*` | Comma-separated allowed origins |
-| `PORT` | No | `8080` | Listen port |
+| `PORT` | No | `8080` | Container listen port |
 | `HOST` | No | `0.0.0.0` | Listen address |
 | `DATA_DIR` | No | `/data` | Data directory |
 | `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path |
-| `BASE_DOMAIN` | No | `example.com` | Also set via setup wizard |
-| `ACME_EMAIL` | No | `you@example.com` | Also set via setup wizard |
 
 ## Updating
 
@@ -155,8 +144,8 @@ Then update the edge image reference in the orchestrator's container_manager to 
 
 ## Troubleshooting
 
-- **"change-me-in-production" warning**: Set `JWT_SECRET` in your `.env` file
 - **Can't connect to Docker**: Ensure `/var/run/docker.sock` is mounted and the container user has access
 - **Edge container won't start**: Check Tailscale auth key is valid and reusable
 - **Certs not issuing**: Verify Cloudflare API token has DNS:Edit permission for your zone
 - **DNS records not updating**: Check Cloudflare zone ID matches your domain
+- **Invalidate all sessions**: Delete `/data/secrets/.jwt_secret` and restart the container

@@ -1,6 +1,18 @@
+import secrets
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
+
+
+def _load_or_create_jwt_secret(data_dir: Path) -> str:
+    """Read JWT secret from data dir, or generate and persist one on first run."""
+    secret_file = data_dir / "secrets" / ".jwt_secret"
+    if secret_file.exists():
+        return secret_file.read_text(encoding="utf-8").strip()
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    secret = secrets.token_urlsafe(64)
+    secret_file.write_text(secret, encoding="utf-8")
+    return secret
 
 
 class Settings(BaseSettings):
@@ -19,7 +31,7 @@ class Settings(BaseSettings):
     docker_socket: str = "unix:///var/run/docker.sock"
 
     # Auth
-    jwt_secret: str = "change-me-in-production"
+    jwt_secret: str = ""  # Auto-generated on first run; see _load_or_create_jwt_secret
     jwt_expiry_hours: int = 24
     cookie_secure: bool = False  # Set True in production with HTTPS
 
@@ -66,3 +78,5 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+if not settings.jwt_secret:
+    settings.jwt_secret = _load_or_create_jwt_secret(settings.data_dir)
