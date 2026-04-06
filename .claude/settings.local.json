@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C /c/Users/yichen/Programs/CurrentProjects/tailBale status)",
+      "Bash(git config:*)"
+    ]
+  }
+}
