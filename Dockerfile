@@ -27,6 +27,9 @@ COPY backend/app ./app
 # Copy built frontend into static directory
 COPY --from=frontend-build /app/frontend/dist ./static
 
+# Bundle edge image build context so orchestrator can build it via Docker API
+COPY edge/ ./edge-image/
+
 # Data volume for db, secrets, certs, generated configs, tailscale state
 VOLUME /data
 ENV DATA_DIR=/data

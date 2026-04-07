@@ -127,6 +127,24 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
     if existing:
         raise HTTPException(status_code=409, detail=f"Hostname '{body.hostname}' is already in use")
 
+    # Validate hostname belongs to configured base domain
+    from app.settings_store import get_setting
+    configured_domain = get_setting(db, "base_domain")
+    if configured_domain and not body.hostname.endswith(f".{configured_domain}"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Hostname '{body.hostname}' must end with '.{configured_domain}'",
+        )
+
+    # Check upstream container exists (non-blocking warning via initial status message)
+    container_warning = None
+    try:
+        import docker as docker_lib
+        client = docker_lib.DockerClient.from_env()
+        client.containers.get(body.upstream_container_id)
+    except Exception:
+        container_warning = f"Container '{body.upstream_container_id}' not found — reconciliation will start once it appears"
+
     slug = _unique_slug(db, body.name)
     svc = Service(
         name=body.name,
@@ -149,7 +167,8 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
     db.flush()  # Generate ID
 
     # Create initial status
-    status = ServiceStatus(service_id=svc.id, phase="pending", message="Awaiting first reconciliation")
+    initial_msg = container_warning or "Awaiting first reconciliation"
+    status = ServiceStatus(service_id=svc.id, phase="pending", message=initial_msg)
     db.add(status)
 
     _emit_event(db, svc.id, "service_created", f"Service '{svc.name}' created for {svc.hostname}")
@@ -219,6 +238,14 @@ async def disable_service(service_id: str, db: Session = Depends(get_db)):
 
     svc.enabled = False
     _emit_event(db, svc.id, "service_disabled", f"Service '{svc.name}' disabled")
+
+    # Best-effort: stop the edge container so it stops serving traffic
+    from app.edge.container_manager import stop_edge
+    try:
+        stop_edge(svc.id, svc.edge_container_name)
+    except Exception:
+        pass  # Edge may not exist yet
+
     db.commit()
     db.refresh(svc)
     status = db.get(ServiceStatus, service_id)
@@ -240,6 +267,21 @@ async def delete_service(
     if not svc:
         raise HTTPException(status_code=404, detail="Service not found")
 
+    # Best-effort: remove edge container and Docker network
+    import shutil
+    from app.config import settings as app_settings
+    from app.edge.container_manager import remove_edge
+    from app.edge.network_manager import remove_network
+
+    try:
+        remove_edge(svc.id, svc.edge_container_name)
+    except Exception:
+        pass
+    try:
+        remove_network(svc.network_name)
+    except Exception:
+        pass
+
     # Optionally clean up DNS record in Cloudflare before deleting
     if cleanup_dns:
         from app.adapters.dns_reconciler import cleanup_dns_record
@@ -253,6 +295,15 @@ async def delete_service(
                 cleanup_dns_record(db, svc, cf_token, zone_id)
             except Exception:
                 pass  # Best-effort; service deletion proceeds regardless
+
+    # Clean up generated configs, certs, and Tailscale state on disk
+    for subdir in [
+        app_settings.generated_dir / svc.id,
+        app_settings.certs_dir / svc.hostname,
+        app_settings.tailscale_state_dir / svc.edge_container_name,
+    ]:
+        if subdir.exists():
+            shutil.rmtree(subdir, ignore_errors=True)
 
     name = svc.name
     _emit_event(db, None, "service_deleted", f"Service '{name}' ({service_id}) deleted")
@@ -387,11 +438,20 @@ async def reconcile_service_endpoint(service_id: str, db: Session = Depends(get_
     """Trigger manual reconciliation for a single service."""
     import asyncio
 
+    from app.database import SessionLocal
     from app.reconciler.reconcile_loop import reconcile_one
 
     _get_service_or_404(service_id, db)
+
+    def _run() -> dict:
+        thread_db = SessionLocal()
+        try:
+            return reconcile_one(thread_db, service_id)
+        finally:
+            thread_db.close()
+
     try:
-        result = await asyncio.to_thread(reconcile_one, db, service_id)
+        result = await asyncio.to_thread(_run)
         return {"success": True, "phase": result["phase"], "error": result.get("error")}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from None
@@ -405,3 +465,55 @@ async def get_edge_logs(service_id: str, tail: int = 100, db: Session = Depends(
     svc = _get_service_or_404(service_id, db)
     logs = fetch_logs(svc.id, svc.edge_container_name, tail=tail)
     return {"logs": logs}
+
+
+@router.post("/{service_id}/health-check-full")
+async def full_health_check(service_id: str, db: Session = Depends(get_db)):
+    """Run an extensive health check including live Cloudflare DNS verification.
+
+    This is manual-only (not part of the reconcile loop) to avoid API rate limits.
+    """
+    from app.config import settings as app_settings
+    from app.health.health_checker import run_health_checks
+    from app.models.dns_record import DnsRecord
+    from app.secrets import CLOUDFLARE_TOKEN, read_secret
+    from app.settings_store import get_runtime_paths, get_setting
+
+    svc = _get_service_or_404(service_id, db)
+    runtime = get_runtime_paths(db)
+
+    # Run standard health checks
+    checks = run_health_checks(
+        db, svc,
+        runtime["generated_dir"], runtime["certs_dir"],
+        runtime.get("docker_socket"),
+    )
+
+    # Extended: live Cloudflare DNS verification
+    extended: dict[str, object] = {}
+    cf_token = read_secret(CLOUDFLARE_TOKEN)
+    zone_id = get_setting(db, "cf_zone_id")
+    status = db.get(ServiceStatus, svc.id)
+    current_ip = status.tailscale_ip if status else None
+
+    if cf_token and zone_id:
+        try:
+            from app.adapters.cloudflare_api import find_record
+            live_record = find_record(cf_token, zone_id, svc.hostname, "A")
+            extended["cf_record_exists"] = live_record is not None
+            if live_record:
+                extended["cf_record_ip"] = live_record.get("content")
+                extended["cf_ip_matches_tailscale"] = live_record.get("content") == current_ip
+            else:
+                extended["cf_record_ip"] = None
+                extended["cf_ip_matches_tailscale"] = False
+        except Exception as e:
+            extended["cf_error"] = str(e)
+    else:
+        extended["cf_error"] = "Cloudflare token or zone ID not configured"
+
+    return {
+        "checks": checks,
+        "extended": extended,
+        "tailscale_ip": current_ip,
+    }

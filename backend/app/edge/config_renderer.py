@@ -18,7 +18,9 @@ def render_caddyfile(service: Service) -> str:
     - reverse_proxy to upstream container via Docker DNS
     """
     preserve_host_block = ""
-    if service.preserve_host_header:
+    if not service.preserve_host_header:
+        # Caddy preserves the original Host by default. When the user opts OUT,
+        # rewrite Host to the upstream container address so the app sees its own name.
         preserve_host_block = "    header_up Host {upstream_hostport}"
 
     custom_snippet = ""

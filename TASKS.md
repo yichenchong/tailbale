@@ -344,6 +344,66 @@ Reference: [unraid-edge-orchestrator-detailed-spec.md](./unraid-edge-orchestrato
 
 ---
 
+## Milestone 10: Bug Fixes & Hardening (from code review)
+
+### Blockers / High Priority
+
+- [ ] **10.1** Edge image auto-build from orchestrator
+  - `container_manager.py` hardcodes `tailbale-edge:latest` but nothing builds it in production
+  - Bundle `edge/Dockerfile` + `edge/entrypoint.sh` into the orchestrator image
+  - Add startup/lazy check: if `tailbale-edge:latest` doesn't exist locally, build it from the bundled context via Docker API
+  - Removes the need for users to manually build the edge image
+
+- [ ] **10.2** Fix preserve_host_header logic (inverted)
+  - `config_renderer.py` emits `header_up Host {upstream_hostport}` when `preserve_host_header=True`
+  - Caddy already preserves the original request Host by default
+  - `{upstream_hostport}` resolves to the upstream container:port, which *overwrites* the host — the opposite of "preserve"
+  - Fix: emit the `header_up Host` line only when `preserve_host_header=False`
+
+- [ ] **10.3** Fix manual reconcile thread safety
+  - `POST /api/services/{id}/reconcile` passes request-scoped `db` session into `asyncio.to_thread()`
+  - SQLAlchemy sessions are not thread-safe
+  - Fix: create a fresh `SessionLocal()` inside the thread closure (same pattern as `reconcile_loop`)
+
+- [ ] **10.4** Remove `tailscale logout` from edge entrypoint shutdown handler
+  - `edge/entrypoint.sh` line 11: `tailscale logout` deregisters the node on every container stop
+  - Defeats persistent Tailscale state — forces re-auth on restart, may get new IP
+  - With one-use auth keys, container can never re-auth after restart
+  - Fix: remove the logout call, just kill tailscaled gracefully
+
+### Medium Priority
+
+- [ ] **10.5** Add resource cleanup to disable/delete
+  - `disable_service()` only flips `enabled=False` — edge container keeps running and serving traffic
+  - `delete_service()` only cleans DNS + deletes DB rows — edge container, Docker network, cert files, generated configs, and Tailscale state are orphaned
+  - Fix disable: call `stop_edge()` after setting `enabled=False`
+  - Fix delete: call `remove_edge()`, optionally remove Docker network, clean up disk artifacts before deleting DB rows
+
+- [ ] **10.6** Wire DB-backed settings into runtime code
+  - Settings UI persists `docker_socket_path`, `generated_root`, `cert_root`, `tailscale_state_root` to DB
+  - But reconciler, container_manager, cert_manager, health_checker all read from `app.config.settings` (env vars frozen at startup)
+  - Fix: read these from DB via `get_setting()` with `app.config.settings` as fallback default
+
+### Low Priority
+
+- [ ] **10.7** Validate upstream container exists on service creation
+  - `create_service()` doesn't verify the Docker container exists or that the port is exposed
+  - Reconciler catches this later, but user gets no immediate feedback
+  - Fix: attempt Docker API lookup, return warning (not hard error) if container not found
+
+- [ ] **10.8** Validate hostname belongs to configured base_domain
+  - Schema validates hostname syntax but not that it ends with the base_domain
+  - Can create `foo.otherdomain.com` when base is `mydomain.com` → DNS goes to wrong zone
+  - Fix: verify hostname ends with `.{base_domain}` in `create_service()`, return 422 if mismatch
+
+- [ ] **10.9** Add extensive manual health check endpoint with live Cloudflare query
+  - Current health checks only compare DB state internally
+  - If someone edits/deletes the Cloudflare record externally, health still shows green
+  - Fix: add `POST /api/services/{id}/health-check-full` that runs standard checks PLUS live Cloudflare API query
+  - Manual-only (not in reconcile loop) to avoid API rate limits
+
+---
+
 ## Key Architecture Decisions (Reference)
 
 | Decision | Choice | Rationale |

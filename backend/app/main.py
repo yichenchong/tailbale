@@ -25,6 +25,17 @@ async def lifespan(app: FastAPI):
     settings.ensure_dirs()
     Base.metadata.create_all(bind=engine)
 
+    # Ensure edge image is built (runs in thread to avoid blocking startup)
+    from app.edge.image_builder import ensure_edge_image
+    try:
+        await asyncio.to_thread(ensure_edge_image)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Could not build edge image at startup — will retry on first service reconcile",
+            exc_info=True,
+        )
+
     # Start background tasks
     from app.certs.renewal_task import cert_renewal_loop
     from app.reconciler.reconcile_loop import reconcile_loop

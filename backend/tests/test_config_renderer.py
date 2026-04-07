@@ -33,20 +33,22 @@ class TestRenderCaddyfile:
         assert "header_up X-Real-IP {remote_host}" in result
 
     def test_preserve_host_header_enabled(self):
+        """When True, Caddy's default behavior preserves the original Host — no override emitted."""
         from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(preserve_host_header=True)
         result = render_caddyfile(svc)
 
-        assert "header_up Host {upstream_hostport}" in result
+        assert "header_up Host {upstream_hostport}" not in result
 
     def test_preserve_host_header_disabled(self):
+        """When False, rewrite Host to upstream address so the app sees its own name."""
         from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(preserve_host_header=False)
         result = render_caddyfile(svc)
 
-        assert "header_up Host {upstream_hostport}" not in result
+        assert "header_up Host {upstream_hostport}" in result
 
     def test_https_upstream_scheme(self):
         from app.edge.config_renderer import render_caddyfile

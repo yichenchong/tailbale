@@ -58,7 +58,9 @@ def client(tmp_data_dir, db_engine):
     import app.database as database_module
 
     original_engine = database_module.engine
+    original_session_local = database_module.SessionLocal
     database_module.engine = db_engine
+    database_module.SessionLocal = sessionmaker(bind=db_engine)
 
     TestSession = sessionmaker(bind=db_engine)
 
@@ -85,3 +87,4 @@ def client(tmp_data_dir, db_engine):
         yield c
     app.dependency_overrides.clear()
     database_module.engine = original_engine
+    database_module.SessionLocal = original_session_local

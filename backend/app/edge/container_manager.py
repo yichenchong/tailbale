@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-EDGE_IMAGE = "tailbale-edge:latest"
+from app.edge.image_builder import EDGE_IMAGE, ensure_edge_image
 
 
 def _get_client(socket_path: str | None = None) -> docker.DockerClient:
@@ -52,6 +52,7 @@ def create_edge_container(
     edge_image: str = EDGE_IMAGE,
 ) -> str:
     """Create an edge container for a service. Returns the container ID."""
+    ensure_edge_image(socket_path)
     client = _get_client(socket_path)
 
     # Prepare mount paths

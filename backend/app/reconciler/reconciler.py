@@ -87,9 +87,12 @@ def reconcile_service(
         if not ts_authkey:
             raise ReconcileError("Tailscale auth key not configured")
 
-        generated_dir = Path(app_settings.generated_dir)
-        certs_dir = Path(app_settings.certs_dir)
-        ts_state_dir = Path(app_settings.tailscale_state_dir)
+        # Read paths from DB settings (user-configurable) with env fallback
+        from app.settings_store import get_runtime_paths
+        runtime = get_runtime_paths(db)
+        generated_dir = Path(runtime["generated_dir"])
+        certs_dir = Path(runtime["certs_dir"])
+        ts_state_dir = Path(runtime["tailscale_state_dir"])
 
         # ── Step 2: Ensure generated directories ──
         (generated_dir / service.id).mkdir(parents=True, exist_ok=True)

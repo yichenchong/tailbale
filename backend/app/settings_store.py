@@ -38,6 +38,23 @@ def set_setting(db: Session, key: str, value: str) -> None:
         db.add(Setting(key=key, value=value))
 
 
+def get_runtime_paths(db: Session) -> dict[str, str]:
+    """Get runtime paths from DB settings, falling back to app.config.settings."""
+    from app.config import settings as app_settings
+
+    generated = get_setting(db, "generated_root")
+    certs = get_setting(db, "cert_root")
+    ts_state = get_setting(db, "tailscale_state_root")
+    docker = get_setting(db, "docker_socket_path")
+
+    return {
+        "generated_dir": generated or str(app_settings.generated_dir),
+        "certs_dir": certs or str(app_settings.certs_dir),
+        "tailscale_state_dir": ts_state or str(app_settings.tailscale_state_dir),
+        "docker_socket": docker or app_settings.docker_socket,
+    }
+
+
 def get_all_settings(db: Session) -> dict[str, str]:
     """Get all settings as a dict, filling in defaults."""
     stored = {row.key: row.value for row in db.query(Setting).all()}

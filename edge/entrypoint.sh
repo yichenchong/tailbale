@@ -8,7 +8,7 @@ cleanup() {
         kill "$CADDY_PID" 2>/dev/null || true
         wait "$CADDY_PID" 2>/dev/null || true
     fi
-    tailscale logout 2>/dev/null || true
+    tailscale down --socket=/var/run/tailscale/tailscaled.sock 2>/dev/null || true
     if [ -n "$TAILSCALED_PID" ]; then
         kill "$TAILSCALED_PID" 2>/dev/null || true
         wait "$TAILSCALED_PID" 2>/dev/null || true

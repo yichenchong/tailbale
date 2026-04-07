@@ -59,7 +59,8 @@ async def reconcile_loop() -> None:
                 db = SessionLocal()
                 try:
                     iv = int(get_setting(db, "reconcile_interval_seconds") or "60")
-                    cnt = reconcile_all(db)
+                    docker_socket = get_setting(db, "docker_socket_path") or None
+                    cnt = reconcile_all(db, socket_path=docker_socket)
                     return cnt, iv
                 finally:
                     db.close()
