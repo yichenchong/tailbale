@@ -53,10 +53,26 @@ def build_edge_image(socket_path: str | None = None) -> str:
 
 
 def ensure_edge_image(socket_path: str | None = None) -> None:
-    """Build the edge image if it doesn't exist yet."""
-    if edge_image_exists(socket_path):
-        logger.debug("Edge image %s already exists", EDGE_IMAGE)
-        return
+    """Build the edge image if it doesn't exist or is outdated.
+
+    Checks the ``tailbale.version`` label on the existing image.  If it
+    doesn't match the current orchestrator version, the image is rebuilt
+    so that containers created from it carry the correct code.
+    """
+    client = _get_client(socket_path)
+    try:
+        image = client.images.get(EDGE_IMAGE)
+        image_version = (image.labels or {}).get("tailbale.version")
+        if image_version == __version__:
+            logger.debug("Edge image %s already at version %s", EDGE_IMAGE, __version__)
+            return
+        logger.info(
+            "Edge image version mismatch (image=%s, orchestrator=%s), rebuilding...",
+            image_version, __version__,
+        )
+    except docker.errors.ImageNotFound:
+        logger.info("Edge image %s not found, building...", EDGE_IMAGE)
+
     build_edge_image(socket_path)
 
 

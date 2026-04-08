@@ -75,19 +75,60 @@ class TestBuildEdgeImage:
 
 class TestEnsureEdgeImage:
     @patch("app.edge.image_builder.build_edge_image")
-    @patch("app.edge.image_builder.edge_image_exists")
-    def test_skips_build_if_exists(self, mock_exists, mock_build):
+    @patch("app.edge.image_builder._get_client")
+    def test_skips_build_if_exists_and_current(self, mock_get_client, mock_build):
+        """If image exists and version label matches, no rebuild."""
         from app.edge.image_builder import ensure_edge_image
+        from app.version import __version__
 
-        mock_exists.return_value = True
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_image = MagicMock()
+        mock_image.labels = {"tailbale.version": __version__}
+        mock_client.images.get.return_value = mock_image
+
         ensure_edge_image()
         mock_build.assert_not_called()
 
     @patch("app.edge.image_builder.build_edge_image")
-    @patch("app.edge.image_builder.edge_image_exists")
-    def test_builds_if_missing(self, mock_exists, mock_build):
+    @patch("app.edge.image_builder._get_client")
+    def test_builds_if_missing(self, mock_get_client, mock_build):
+        """If image does not exist, it should be built."""
         from app.edge.image_builder import ensure_edge_image
 
-        mock_exists.return_value = False
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_client.images.get.side_effect = docker.errors.ImageNotFound("not found")
+
+        ensure_edge_image()
+        mock_build.assert_called_once()
+
+    @patch("app.edge.image_builder.build_edge_image")
+    @patch("app.edge.image_builder._get_client")
+    def test_rebuilds_if_version_mismatch(self, mock_get_client, mock_build):
+        """If image exists but version label is outdated, rebuild."""
+        from app.edge.image_builder import ensure_edge_image
+
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_image = MagicMock()
+        mock_image.labels = {"tailbale.version": "0.0.1-old"}
+        mock_client.images.get.return_value = mock_image
+
+        ensure_edge_image()
+        mock_build.assert_called_once()
+
+    @patch("app.edge.image_builder.build_edge_image")
+    @patch("app.edge.image_builder._get_client")
+    def test_rebuilds_if_no_version_label(self, mock_get_client, mock_build):
+        """If image exists but has no version label, rebuild."""
+        from app.edge.image_builder import ensure_edge_image
+
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_image = MagicMock()
+        mock_image.labels = {}
+        mock_client.images.get.return_value = mock_image
+
         ensure_edge_image()
         mock_build.assert_called_once()

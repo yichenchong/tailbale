@@ -46,13 +46,17 @@ def _find_edge_container(
 def create_edge_container(
     service: Service,
     ts_authkey: str,
-    generated_dir: Path,
-    certs_dir: Path,
-    tailscale_state_dir: Path,
+    generated_dir: str | Path,
+    certs_dir: str | Path,
+    tailscale_state_dir: str | Path,
     socket_path: str | None = None,
     edge_image: str = EDGE_IMAGE,
 ) -> str:
     """Create an edge container for a service. Returns the container ID."""
+    generated_dir = Path(generated_dir)
+    certs_dir = Path(certs_dir)
+    tailscale_state_dir = Path(tailscale_state_dir)
+
     ensure_edge_image(socket_path)
     client = _get_client(socket_path)
 
@@ -151,9 +155,9 @@ def remove_edge(
 def recreate_edge(
     service: Service,
     ts_authkey: str,
-    generated_dir: Path,
-    certs_dir: Path,
-    tailscale_state_dir: Path,
+    generated_dir: str | Path,
+    certs_dir: str | Path,
+    tailscale_state_dir: str | Path,
     socket_path: str | None = None,
     edge_image: str = EDGE_IMAGE,
 ) -> str:

@@ -277,6 +277,34 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
                 status_code=422,
                 detail=f"Hostname '{body.hostname}' must end with '.{configured_domain}'",
             )
+
+        old_hostname = svc.hostname
+
+        # Clean up old Cloudflare DNS record (best-effort) before losing the handle
+        from app.adapters.dns_reconciler import cleanup_dns_record
+        from app.secrets import CLOUDFLARE_TOKEN, read_secret
+        cf_token = read_secret(CLOUDFLARE_TOKEN)
+        zone_id = get_setting(db, "cf_zone_id")
+        if cf_token and zone_id:
+            try:
+                cleanup_dns_record(db, svc, cf_token, zone_id)
+            except Exception:
+                pass  # Best-effort; proceed with hostname change
+
+        # Update Certificate row hostname (if exists) so cert renewal targets new hostname
+        cert = db.get(Certificate, svc.id)
+        if cert:
+            cert.hostname = body.hostname
+
+        # Remove old cert files from disk
+        import shutil
+        from pathlib import Path
+        from app.settings_store import get_runtime_paths
+        runtime = get_runtime_paths(db)
+        old_cert_dir = Path(runtime["certs_dir"]) / old_hostname
+        if old_cert_dir.exists():
+            shutil.rmtree(old_cert_dir, ignore_errors=True)
+
         changes["hostname"] = body.hostname
         svc.hostname = body.hostname
 
@@ -315,6 +343,14 @@ async def disable_service(
         raise HTTPException(status_code=404, detail="Service not found")
 
     svc.enabled = False
+
+    # Update status to "disabled" so the UI doesn't show stale "healthy"
+    status = db.get(ServiceStatus, svc.id)
+    if status:
+        status.phase = "disabled"
+        status.message = "Service disabled by user"
+        status.health_checks = None  # Stale checks are misleading
+
     _emit_event(db, svc.id, "service_disabled", f"Service '{svc.name}' disabled")
 
     # Best-effort: stop the edge container so it stops serving traffic

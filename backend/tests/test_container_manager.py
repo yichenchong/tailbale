@@ -66,8 +66,9 @@ class TestFindEdgeContainer:
 
 
 class TestCreateEdgeContainer:
+    @patch("app.edge.container_manager.ensure_edge_image")
     @patch("app.edge.container_manager.docker.DockerClient")
-    def test_creates_container(self, mock_cls, tmp_path):
+    def test_creates_container(self, mock_cls, mock_ensure, tmp_path):
         from app.edge.container_manager import create_edge_container
 
         mock_client = MagicMock()
@@ -103,8 +104,9 @@ class TestCreateEdgeContainer:
         assert call_kwargs.kwargs["environment"]["TS_AUTHKEY"] == "tskey-auth-test"
         assert call_kwargs.kwargs["environment"]["TS_HOSTNAME"] == "edge-nextcloud"
 
+    @patch("app.edge.container_manager.ensure_edge_image")
     @patch("app.edge.container_manager.docker.DockerClient")
-    def test_creates_host_directories(self, mock_cls, tmp_path):
+    def test_creates_host_directories(self, mock_cls, mock_ensure, tmp_path):
         from app.edge.container_manager import create_edge_container
 
         mock_client = MagicMock()

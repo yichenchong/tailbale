@@ -133,8 +133,9 @@ class TestUpdateEdgeEndpoint:
 
 
 class TestContainerVersionLabel:
+    @patch("app.edge.container_manager.ensure_edge_image")
     @patch("app.edge.container_manager.docker.DockerClient")
-    def test_create_stamps_version_label(self, mock_cls, tmp_path):
+    def test_create_stamps_version_label(self, mock_cls, mock_ensure, tmp_path):
         from app.edge.container_manager import create_edge_container
         from app.version import __version__
 
