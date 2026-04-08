@@ -1090,6 +1090,25 @@ Each service should have at least these booleans:
 - `caddy_config_present`
 - `https_probe_ok`
 
+#### Design note: `dns_matches_ip` uses stored state
+
+The regular health check compares the stored `DnsRecord.value` in the database
+against the current Tailscale IP.  It does **not** make a live Cloudflare API
+call on every reconcile cycle.  This is a deliberate trade-off:
+
+- **Avoids Cloudflare API rate limits** — the reconciler runs every 60 seconds
+  for every enabled service.
+- **Stored state is authoritative** — the orchestrator is the only actor that
+  creates or updates these DNS records.  External drift (someone manually
+  editing Cloudflare) is an unusual edge case.
+- **Live verification is available on demand** — the manual
+  `POST /api/services/:id/health-check-full` endpoint performs a live Cloudflare
+  API lookup and reports whether the live record matches the expected IP.
+
+If external DNS mutations become a concern, a periodic (e.g. hourly) full-health
+sweep could be added as a background task without impacting the per-minute
+reconcile loop.
+
 ### 18.2 Aggregate status rules
 
 #### Healthy

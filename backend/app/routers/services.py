@@ -27,6 +27,74 @@ router = APIRouter(
 )
 
 
+def _validate_upstream(db: Session, container_id: str, port: int) -> None:
+    """Validate that the upstream container exists and the port is plausible.
+
+    Raises HTTPException on failure (422 if container/port invalid, 503 if
+    Docker is unreachable).
+    """
+    import docker as docker_lib
+
+    socket = _get_docker_socket(db)
+    try:
+        client = (
+            docker_lib.DockerClient(base_url=socket)
+            if socket
+            else docker_lib.DockerClient.from_env()
+        )
+        upstream = client.containers.get(container_id)
+    except docker_lib.errors.NotFound:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Upstream container '{container_id}' not found",
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Cannot connect to Docker to validate upstream container: {exc}",
+        )
+
+    _validate_upstream_port(upstream, port)
+
+
+def _validate_upstream_port(container, requested_port: int) -> None:
+    """Check that *requested_port* is plausible for *container*.
+
+    We inspect the container's exposed ports (from its image/config) and, if
+    there are any explicit port definitions, verify the requested port is among
+    them.  If the container has *no* exposed ports at all we let it through —
+    the user may know better.
+    """
+    try:
+        # container.attrs["Config"]["ExposedPorts"] → {"80/tcp": {}, "443/tcp": {}}
+        exposed = container.attrs.get("Config", {}).get("ExposedPorts") or {}
+        # Also check host-published ports under NetworkSettings
+        port_bindings = (
+            container.attrs.get("HostConfig", {}).get("PortBindings") or {}
+        )
+        # Merge both sets of known ports
+        known_ports: set[int] = set()
+        for spec in list(exposed.keys()) + list(port_bindings.keys()):
+            try:
+                known_ports.add(int(spec.split("/")[0]))
+            except (ValueError, IndexError):
+                continue
+
+        if known_ports and requested_port not in known_ports:
+            available = ", ".join(str(p) for p in sorted(known_ports))
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Port {requested_port} is not exposed by container "
+                    f"'{container.name}'. Available ports: {available}"
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # If we can't inspect ports, allow the request through
+
+
 def _slugify(name: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return slug or "service"
@@ -136,15 +204,8 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
             detail=f"Hostname '{body.hostname}' must end with '.{configured_domain}'",
         )
 
-    # Check upstream container exists (non-blocking warning via initial status message)
-    container_warning = None
-    try:
-        import docker as docker_lib
-        socket = _get_docker_socket(db)
-        client = docker_lib.DockerClient(base_url=socket) if socket else docker_lib.DockerClient.from_env()
-        client.containers.get(body.upstream_container_id)
-    except Exception:
-        container_warning = f"Container '{body.upstream_container_id}' not found — reconciliation will start once it appears"
+    # Validate upstream container + port (spec §17 steps 2-3) — hard failure
+    _validate_upstream(db, body.upstream_container_id, body.upstream_port)
 
     slug = _unique_slug(db, body.name)
     svc = Service(
@@ -168,8 +229,7 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
     db.flush()  # Generate ID
 
     # Create initial status
-    initial_msg = container_warning or "Awaiting first reconciliation"
-    status = ServiceStatus(service_id=svc.id, phase="pending", message=initial_msg)
+    status = ServiceStatus(service_id=svc.id, phase="pending", message="Awaiting first reconciliation")
     db.add(status)
 
     _emit_event(db, svc.id, "service_created", f"Service '{svc.name}' created for {svc.hostname}")
@@ -239,8 +299,17 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
 
 
 @router.post("/{service_id}/disable", response_model=ServiceResponse)
-async def disable_service(service_id: str, db: Session = Depends(get_db)):
-    """Disable a service without deleting it."""
+async def disable_service(
+    service_id: str,
+    cleanup_dns: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Disable a service without deleting it.
+
+    Query params:
+        cleanup_dns: If true, also remove the Cloudflare DNS record so the
+            hostname stops resolving to the (now-stopped) Tailscale IP.
+    """
     svc = db.get(Service, service_id)
     if not svc:
         raise HTTPException(status_code=404, detail="Service not found")
@@ -254,6 +323,21 @@ async def disable_service(service_id: str, db: Session = Depends(get_db)):
         stop_edge(svc.id, svc.edge_container_name, _get_docker_socket(db))
     except Exception:
         pass  # Edge may not exist yet
+
+    # Optionally clean up the DNS record (spec §7.4)
+    if cleanup_dns:
+        from app.adapters.dns_reconciler import cleanup_dns_record
+        from app.secrets import CLOUDFLARE_TOKEN, read_secret
+        from app.settings_store import get_setting
+
+        cf_token = read_secret(CLOUDFLARE_TOKEN)
+        zone_id = get_setting(db, "cf_zone_id")
+        if cf_token and zone_id:
+            try:
+                cleanup_dns_record(db, svc, cf_token, zone_id)
+                _emit_event(db, svc.id, "dns_removed", f"DNS record removed on disable for '{svc.name}'")
+            except Exception:
+                pass  # Best-effort
 
     db.commit()
     db.refresh(svc)
@@ -495,9 +579,7 @@ async def full_health_check(service_id: str, db: Session = Depends(get_db)):
 
     This is manual-only (not part of the reconcile loop) to avoid API rate limits.
     """
-    from app.config import settings as app_settings
     from app.health.health_checker import run_health_checks
-    from app.models.dns_record import DnsRecord
     from app.secrets import CLOUDFLARE_TOKEN, read_secret
     from app.settings_store import get_runtime_paths, get_setting
 
@@ -570,7 +652,6 @@ async def update_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
     """
     import asyncio
 
-    from app.config import settings as app_settings
     from app.database import SessionLocal
     from app.edge.container_manager import get_edge_version, recreate_edge
     from app.edge.image_builder import ensure_edge_image

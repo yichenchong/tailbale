@@ -1,3 +1,5 @@
+from unittest.mock import MagicMock, patch
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -88,3 +90,37 @@ def client(tmp_data_dir, db_engine):
     app.dependency_overrides.clear()
     database_module.engine = original_engine
     database_module.SessionLocal = original_session_local
+
+
+def _make_fake_container(name: str = "fakecontainer", exposed_ports=None, **attrs_overrides):
+    """Build a MagicMock that looks like a Docker container.
+
+    If *exposed_ports* is None (default), the container reports no exposed
+    ports, so port validation is permissive (any port is accepted).
+    Pass a dict like ``{"80/tcp": {}}`` to restrict to specific ports.
+    """
+    c = MagicMock()
+    c.name = name
+    c.attrs = {
+        "Config": {
+            "ExposedPorts": exposed_ports or {},
+        },
+        "HostConfig": {"PortBindings": {}},
+    }
+    c.attrs.update(attrs_overrides)
+    c.status = "running"
+    c.labels = {}
+    return c
+
+
+@pytest.fixture(autouse=True)
+def _mock_upstream_validation():
+    """Auto-mock upstream container/port validation in create_service.
+
+    This is autouse because almost every test that creates a service via the API
+    would otherwise fail with a 422/503 (upstream container not found).
+    Individual tests that need to exercise the real validation can simply
+    override this fixture or patch ``_validate_upstream`` at a narrower scope.
+    """
+    with patch("app.routers.services._validate_upstream"):
+        yield

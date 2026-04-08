@@ -37,6 +37,7 @@ CRITICAL_CHECKS = frozenset({
 WARNING_CHECKS = frozenset({
     "cert_not_expiring",
     "dns_matches_ip",
+    "https_probe_ok",
 })
 
 
@@ -72,6 +73,7 @@ def run_health_checks(
             "dns_record_present": False,
             "dns_matches_ip": False,
             "caddy_config_present": _check_caddy_config(service, generated_dir),
+            "https_probe_ok": False,
         }
 
     # --- Upstream container ---
@@ -109,6 +111,9 @@ def run_health_checks(
 
     # --- Caddy config ---
     checks["caddy_config_present"] = _check_caddy_config(service, generated_dir)
+
+    # --- HTTPS probe (spec §18.1) ---
+    checks["https_probe_ok"] = _check_https_probe(service, current_ip, certs_dir)
 
     return checks
 
@@ -184,6 +189,40 @@ def _check_cert_not_expiring(service: Service, certs_dir: str | Path) -> bool:
 
 def _check_caddy_config(service: Service, generated_dir: str | Path) -> bool:
     return (Path(generated_dir) / service.id / "Caddyfile").exists()
+
+
+def _check_https_probe(
+    service: "Service", tailscale_ip: str | None, certs_dir: str | Path,
+) -> bool:
+    """Attempt an actual HTTPS request to the edge container via its Tailscale IP.
+
+    We verify the TLS handshake succeeds and the server returns a non-5xx
+    response.  We disable hostname verification (the cert is for the public
+    hostname, not the IP) and set a short timeout.
+    """
+    if not tailscale_ip:
+        return False
+
+    cert_path = Path(certs_dir) / service.hostname
+    if not (cert_path / "fullchain.pem").exists():
+        return False
+
+    try:
+        import httpx
+
+        # Probe via Tailscale IP, setting Host header so Caddy routes correctly
+        url = f"https://{tailscale_ip}:443/"
+        resp = httpx.get(
+            url,
+            headers={"Host": service.hostname},
+            verify=False,  # cert is for the hostname, not the IP
+            timeout=5.0,
+            follow_redirects=True,
+        )
+        # Any response that isn't a 5xx means the edge is serving
+        return resp.status_code < 500
+    except Exception:
+        return False
 
 
 def aggregate_status(checks: dict[str, bool]) -> str:
