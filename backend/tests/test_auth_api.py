@@ -53,6 +53,11 @@ def _setup_user(client, username="admin", password="securepassword123"):
     return resp
 
 
+def _set_auth_cookie(client, cookie_value):
+    """Set the access_token cookie on the client instance (avoids per-request deprecation)."""
+    client.cookies.set("access_token", cookie_value)
+
+
 class TestSetupUser:
     def test_create_first_user(self, auth_client):
         resp = _setup_user(auth_client)
@@ -88,6 +93,7 @@ class TestSetupUser:
 class TestLogin:
     def test_successful_login(self, auth_client):
         _setup_user(auth_client)
+        auth_client.cookies.clear()
         resp = auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "securepassword123"},
@@ -98,6 +104,7 @@ class TestLogin:
 
     def test_wrong_password(self, auth_client):
         _setup_user(auth_client)
+        auth_client.cookies.clear()
         resp = auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "wrongpassword"},
@@ -121,17 +128,15 @@ class TestLogout:
     def test_logout_clears_cookie(self, auth_client):
         _setup_user(auth_client)
         # Login first to get a cookie
+        auth_client.cookies.clear()
         login_resp = auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "securepassword123"},
         )
-        cookie = login_resp.cookies["access_token"]
+        _set_auth_cookie(auth_client, login_resp.cookies["access_token"])
 
         # Logout
-        resp = auth_client.post(
-            "/api/auth/logout",
-            cookies={"access_token": cookie},
-        )
+        resp = auth_client.post("/api/auth/logout")
         assert resp.status_code == 200
 
     def test_logout_without_auth_returns_401(self, auth_client):
@@ -142,9 +147,9 @@ class TestLogout:
 class TestMe:
     def test_me_with_valid_cookie(self, auth_client):
         setup_resp = _setup_user(auth_client)
-        cookie = setup_resp.cookies["access_token"]
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
 
-        resp = auth_client.get("/api/auth/me", cookies={"access_token": cookie})
+        resp = auth_client.get("/api/auth/me")
         assert resp.status_code == 200
         assert resp.json()["username"] == "admin"
         assert resp.json()["role"] == "admin"
@@ -154,9 +159,8 @@ class TestMe:
         assert resp.status_code == 401
 
     def test_me_with_invalid_token(self, auth_client):
-        resp = auth_client.get(
-            "/api/auth/me", cookies={"access_token": "invalid-token"}
-        )
+        _set_auth_cookie(auth_client, "invalid-token")
+        resp = auth_client.get("/api/auth/me")
         assert resp.status_code == 401
 
 
@@ -170,9 +174,9 @@ class TestAuthStatus:
 
     def test_after_user_setup_with_cookie(self, auth_client):
         setup_resp = _setup_user(auth_client)
-        cookie = setup_resp.cookies["access_token"]
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
 
-        resp = auth_client.get("/api/auth/status", cookies={"access_token": cookie})
+        resp = auth_client.get("/api/auth/status")
         assert resp.status_code == 200
         data = resp.json()
         assert data["setup_complete"] is False  # setup_complete not yet set
@@ -180,19 +184,17 @@ class TestAuthStatus:
 
     def test_after_setup_complete_not_logged_in(self, auth_client):
         _setup_user(auth_client)
-        # Mark setup complete using the cookie from setup
-        cookie = auth_client.post(
+        # Login to get a cookie
+        auth_client.cookies.clear()
+        login_resp = auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "securepassword123"},
-        ).cookies["access_token"]
-
-        auth_client.put(
-            "/api/settings/setup-complete",
-            json={},
-            cookies={"access_token": cookie},
         )
+        _set_auth_cookie(auth_client, login_resp.cookies["access_token"])
 
-        # Clear cookies on the client, then check status
+        auth_client.put("/api/settings/setup-complete", json={})
+
+        # Clear cookies, then check status
         auth_client.cookies.clear()
         resp = auth_client.get("/api/auth/status")
         data = resp.json()
@@ -227,9 +229,9 @@ class TestProtectedEndpoints:
 
     def test_protected_route_works_with_auth(self, auth_client):
         setup_resp = _setup_user(auth_client)
-        cookie = setup_resp.cookies["access_token"]
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
 
-        resp = auth_client.get("/api/settings", cookies={"access_token": cookie})
+        resp = auth_client.get("/api/settings")
         assert resp.status_code == 200
 
 
@@ -239,6 +241,7 @@ class TestPasswordSalt:
     def test_salt_is_generated_on_first_user(self, auth_client):
         _setup_user(auth_client)
         # Login works, proving the salt was consistent between hash and verify
+        auth_client.cookies.clear()
         resp = auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "securepassword123"},
@@ -248,7 +251,7 @@ class TestPasswordSalt:
     def test_password_not_stored_as_plaintext(self, auth_client):
         """The password hash should not contain the plain password."""
         _setup_user(auth_client, password="mysecretpass123")
-        # Access the user directly via the me endpoint
+        auth_client.cookies.clear()
         auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "mysecretpass123"},
@@ -256,6 +259,7 @@ class TestPasswordSalt:
 
         # The password hash is not exposed via API, but we can verify
         # login with wrong password fails (proves it's actually hashed)
+        auth_client.cookies.clear()
         resp = auth_client.post(
             "/api/auth/login",
             json={"username": "admin", "password": "mysecretpass123-wrong"},

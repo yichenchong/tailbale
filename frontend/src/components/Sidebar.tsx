@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react"
 import { NavLink } from "react-router-dom"
 import {
   LayoutDashboard,
@@ -7,6 +8,7 @@ import {
   Settings,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { api } from "@/lib/api"
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -17,6 +19,12 @@ const navItems = [
 ]
 
 export function Sidebar() {
+  const [version, setVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    api.get<{ version: string }>("/version").then((r) => setVersion(r.version)).catch(() => {})
+  }, [])
+
   return (
     <aside className="flex h-screen w-56 flex-col border-r border-zinc-200 bg-zinc-50">
       <div className="flex h-14 items-center gap-2 border-b border-zinc-200 px-4">
@@ -42,6 +50,11 @@ export function Sidebar() {
           </NavLink>
         ))}
       </nav>
+      {version && (
+        <div className="border-t border-zinc-200 px-4 py-2">
+          <span className="text-xs text-zinc-400">v{version}</span>
+        </div>
+      )}
     </aside>
   )
 }

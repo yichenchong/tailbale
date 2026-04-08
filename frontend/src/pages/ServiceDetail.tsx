@@ -16,6 +16,7 @@ import {
   Play,
   CheckCircle2,
   XCircle,
+  AlertTriangle,
 } from "lucide-react"
 
 const PHASE_STYLES: Record<string, string> = {
@@ -69,6 +70,8 @@ export default function ServiceDetail() {
   const [confirmRecreate, setConfirmRecreate] = useState(false)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
   const [logsTab, setLogsTab] = useState<"edge" | "events">("edge")
+  const [edgeVersion, setEdgeVersion] = useState<{ orchestrator_version: string; edge_version: string | null; up_to_date: boolean } | null>(null)
+  const [updatingEdge, setUpdatingEdge] = useState(false)
 
   // Edit form state
   const [editName, setEditName] = useState("")
@@ -97,7 +100,29 @@ export default function ServiceDetail() {
     }
   }
 
-  useEffect(() => { load() }, [id])
+  const loadEdgeVersion = async () => {
+    try {
+      const v = await api.get<{ orchestrator_version: string; edge_version: string | null; up_to_date: boolean }>(`/services/${id}/edge-version`)
+      setEdgeVersion(v)
+    } catch { /* ignore */ }
+  }
+
+  const handleUpdateEdge = async () => {
+    setUpdatingEdge(true)
+    try {
+      await api.post(`/services/${id}/update-edge`)
+      await loadEdgeVersion()
+      load()
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setActionMsg(msg)
+      setTimeout(() => setActionMsg(null), 4000)
+    } finally {
+      setUpdatingEdge(false)
+    }
+  }
+
+  useEffect(() => { load(); loadEdgeVersion() }, [id])
 
   const handleSave = async () => {
     setSaving(true)
@@ -316,7 +341,19 @@ export default function ServiceDetail() {
             <Row label="Phase" value={phase} />
             <Row label="Message" value={service.status?.message || "—"} />
             <Row label="Last Reconciled" value={service.status?.last_reconciled_at || "Never"} />
+            {edgeVersion && (
+              <>
+                <Row label="Edge Version" value={edgeVersion.edge_version || "unknown"} />
+                <Row label="App Version" value={edgeVersion.orchestrator_version} />
+              </>
+            )}
           </dl>
+          {edgeVersion && !edgeVersion.up_to_date && (
+            <div className="mt-3 flex items-center gap-2 rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-700">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              Edge container is outdated ({edgeVersion.edge_version || "unknown"} vs {edgeVersion.orchestrator_version})
+            </div>
+          )}
         </div>
       </div>
 
@@ -403,6 +440,13 @@ export default function ServiceDetail() {
             </button>
           )}
 
+          {edgeVersion && !edgeVersion.up_to_date && (
+            <button onClick={handleUpdateEdge} disabled={updatingEdge}
+              className="inline-flex items-center gap-1.5 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-1.5 text-sm font-medium text-yellow-700 hover:bg-yellow-100 disabled:opacity-50">
+              {updatingEdge ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              Update Edge
+            </button>
+          )}
           <button onClick={() => handleAction("/renew-cert")}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
             <ShieldCheck className="h-4 w-4" /> Force Renew Cert

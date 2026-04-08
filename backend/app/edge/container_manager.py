@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 from app.edge.image_builder import EDGE_IMAGE, ensure_edge_image
+from app.version import __version__
 
 
 def _get_client(socket_path: str | None = None) -> docker.DockerClient:
@@ -78,6 +79,7 @@ def create_edge_container(
     labels = {
         "tailbale.managed": "true",
         "tailbale.service_id": service.id,
+        "tailbale.version": __version__,
     }
 
     container = client.containers.create(
@@ -163,6 +165,22 @@ def recreate_edge(
     )
     start_edge(service.id, service.edge_container_name, socket_path)
     return container_id
+
+
+def get_edge_version(
+    service_id: str,
+    edge_container_name: str,
+    socket_path: str | None = None,
+) -> str | None:
+    """Read the tailbale.version label from an edge container.
+
+    Returns the version string, or None if the container doesn't exist
+    or has no version label.
+    """
+    container = _find_edge_container(service_id, edge_container_name, socket_path)
+    if not container:
+        return None
+    return container.labels.get("tailbale.version")
 
 
 def get_edge_logs(

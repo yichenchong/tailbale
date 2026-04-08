@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.database import Base, engine
+from app.version import __version__
 import app.models
 from app.routers.auth import router as auth_router
 from app.routers.dashboard import router as dashboard_router
@@ -55,7 +56,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="tailBale",
     description="UnRAID + Tailscale + Cloudflare edge orchestrator",
-    version="0.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 
@@ -81,6 +82,11 @@ app.include_router(profiles_router)
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/version")
+async def version():
+    return {"version": __version__}
 
 
 # --- Static file serving for production (frontend SPA) ---

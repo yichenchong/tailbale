@@ -15,7 +15,6 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.certs.cert_manager import get_cert_expiry, issue_cert, renew_cert
-from app.config import settings
 from app.database import SessionLocal
 from app.models.certificate import Certificate
 from app.models.event import Event
@@ -47,12 +46,10 @@ def _emit_event(
     db.add(event)
 
 
-def _get_lego_dir() -> Path:
-    return settings.certs_dir / ".lego"
-
-
-def _get_cert_dir(hostname: str) -> Path:
-    return settings.certs_dir / hostname
+def _get_certs_root(db: Session) -> Path:
+    """Resolve the certs root directory from DB settings, falling back to config."""
+    from app.settings_store import get_runtime_paths
+    return Path(get_runtime_paths(db)["certs_dir"])
 
 
 def process_service_cert(db: Session, svc: Service) -> None:
@@ -65,8 +62,9 @@ def process_service_cert(db: Session, svc: Service) -> None:
     acme_email = get_setting(db, "acme_email")
     renewal_window = int(get_setting(db, "cert_renewal_window_days") or "30")
 
-    cert_dir = _get_cert_dir(svc.hostname)
-    lego_dir = _get_lego_dir()
+    certs_root = _get_certs_root(db)
+    cert_dir = certs_root / svc.hostname
+    lego_dir = certs_root / ".lego"
     fullchain_path = cert_dir / "fullchain.pem"
 
     # Get or create cert record

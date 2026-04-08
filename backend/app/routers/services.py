@@ -140,7 +140,8 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
     container_warning = None
     try:
         import docker as docker_lib
-        client = docker_lib.DockerClient.from_env()
+        socket = _get_docker_socket(db)
+        client = docker_lib.DockerClient(base_url=socket) if socket else docker_lib.DockerClient.from_env()
         client.containers.get(body.upstream_container_id)
     except Exception:
         container_warning = f"Container '{body.upstream_container_id}' not found — reconciliation will start once it appears"
@@ -208,6 +209,14 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
         ).first()
         if existing:
             raise HTTPException(status_code=409, detail=f"Hostname '{body.hostname}' is already in use")
+        # Validate hostname belongs to configured base domain
+        from app.settings_store import get_setting
+        configured_domain = get_setting(db, "base_domain")
+        if configured_domain and not body.hostname.endswith(f".{configured_domain}"):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Hostname '{body.hostname}' must end with '.{configured_domain}'",
+            )
         changes["hostname"] = body.hostname
         svc.hostname = body.hostname
 
@@ -242,7 +251,7 @@ async def disable_service(service_id: str, db: Session = Depends(get_db)):
     # Best-effort: stop the edge container so it stops serving traffic
     from app.edge.container_manager import stop_edge
     try:
-        stop_edge(svc.id, svc.edge_container_name)
+        stop_edge(svc.id, svc.edge_container_name, _get_docker_socket(db))
     except Exception:
         pass  # Edge may not exist yet
 
@@ -269,16 +278,19 @@ async def delete_service(
 
     # Best-effort: remove edge container and Docker network
     import shutil
-    from app.config import settings as app_settings
+    from pathlib import Path
+
     from app.edge.container_manager import remove_edge
     from app.edge.network_manager import remove_network
+    from app.settings_store import get_runtime_paths
 
+    socket = _get_docker_socket(db)
     try:
-        remove_edge(svc.id, svc.edge_container_name)
+        remove_edge(svc.id, svc.edge_container_name, socket)
     except Exception:
         pass
     try:
-        remove_network(svc.network_name)
+        remove_network(svc.network_name, socket)
     except Exception:
         pass
 
@@ -297,10 +309,11 @@ async def delete_service(
                 pass  # Best-effort; service deletion proceeds regardless
 
     # Clean up generated configs, certs, and Tailscale state on disk
+    runtime = get_runtime_paths(db)
     for subdir in [
-        app_settings.generated_dir / svc.id,
-        app_settings.certs_dir / svc.hostname,
-        app_settings.tailscale_state_dir / svc.edge_container_name,
+        Path(runtime["generated_dir"]) / svc.id,
+        Path(runtime["certs_dir"]) / svc.hostname,
+        Path(runtime["tailscale_state_dir"]) / svc.edge_container_name,
     ]:
         if subdir.exists():
             shutil.rmtree(subdir, ignore_errors=True)
@@ -321,6 +334,12 @@ def _get_service_or_404(service_id: str, db: Session) -> Service:
     return svc
 
 
+def _get_docker_socket(db: Session) -> str | None:
+    """Read the user-configured Docker socket path from DB settings."""
+    from app.settings_store import get_setting
+    return get_setting(db, "docker_socket_path") or None
+
+
 @router.post("/{service_id}/reload")
 async def reload_service(service_id: str, db: Session = Depends(get_db)):
     """Reload Caddy config inside edge container."""
@@ -328,7 +347,7 @@ async def reload_service(service_id: str, db: Session = Depends(get_db)):
 
     svc = _get_service_or_404(service_id, db)
     try:
-        output = reload_caddy(svc.id, svc.edge_container_name)
+        output = reload_caddy(svc.id, svc.edge_container_name, _get_docker_socket(db))
         _emit_event(db, svc.id, "caddy_reloaded", f"Caddy reloaded for '{svc.name}'")
         db.commit()
         return {"success": True, "message": "Caddy config reloaded", "output": output}
@@ -343,7 +362,7 @@ async def restart_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
 
     svc = _get_service_or_404(service_id, db)
     try:
-        restart_edge(svc.id, svc.edge_container_name)
+        restart_edge(svc.id, svc.edge_container_name, _get_docker_socket(db))
         _emit_event(db, svc.id, "edge_restarted", f"Edge container restarted for '{svc.name}'")
         db.commit()
         return {"success": True, "message": "Edge container restarted"}
@@ -355,8 +374,8 @@ async def restart_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
 async def recreate_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
     """Destroy and recreate edge container."""
     from app.edge.container_manager import recreate_edge as do_recreate
-    from app.config import settings
-    from app.secrets import read_secret, TAILSCALE_AUTH_KEY
+    from app.secrets import TAILSCALE_AUTH_KEY, read_secret
+    from app.settings_store import get_runtime_paths
 
     svc = _get_service_or_404(service_id, db)
     try:
@@ -364,9 +383,11 @@ async def recreate_edge_endpoint(service_id: str, db: Session = Depends(get_db))
         if not ts_authkey:
             raise HTTPException(status_code=400, detail="Tailscale auth key not configured")
 
+        runtime = get_runtime_paths(db)
         container_id = do_recreate(
             svc, ts_authkey,
-            settings.generated_dir, settings.certs_dir, settings.tailscale_state_dir,
+            runtime["generated_dir"], runtime["certs_dir"], runtime["tailscale_state_dir"],
+            _get_docker_socket(db),
         )
 
         # Update status with new container ID
@@ -442,11 +463,12 @@ async def reconcile_service_endpoint(service_id: str, db: Session = Depends(get_
     from app.reconciler.reconcile_loop import reconcile_one
 
     _get_service_or_404(service_id, db)
+    socket = _get_docker_socket(db)
 
     def _run() -> dict:
         thread_db = SessionLocal()
         try:
-            return reconcile_one(thread_db, service_id)
+            return reconcile_one(thread_db, service_id, socket_path=socket)
         finally:
             thread_db.close()
 
@@ -463,7 +485,7 @@ async def get_edge_logs(service_id: str, tail: int = 100, db: Session = Depends(
     from app.edge.container_manager import get_edge_logs as fetch_logs
 
     svc = _get_service_or_404(service_id, db)
-    logs = fetch_logs(svc.id, svc.edge_container_name, tail=tail)
+    logs = fetch_logs(svc.id, svc.edge_container_name, tail=tail, socket_path=_get_docker_socket(db))
     return {"logs": logs}
 
 
@@ -498,7 +520,7 @@ async def full_health_check(service_id: str, db: Session = Depends(get_db)):
 
     if cf_token and zone_id:
         try:
-            from app.adapters.cloudflare_api import find_record
+            from app.adapters.cloudflare_adapter import find_record
             live_record = find_record(cf_token, zone_id, svc.hostname, "A")
             extended["cf_record_exists"] = live_record is not None
             if live_record:
@@ -517,3 +539,96 @@ async def full_health_check(service_id: str, db: Session = Depends(get_db)):
         "extended": extended,
         "tailscale_ip": current_ip,
     }
+
+
+@router.get("/{service_id}/edge-version")
+async def get_edge_version_endpoint(service_id: str, db: Session = Depends(get_db)):
+    """Check the version of a service's edge container vs the orchestrator version."""
+    from app.edge.container_manager import get_edge_version
+    from app.version import __version__
+
+    svc = _get_service_or_404(service_id, db)
+    edge_version = None
+    try:
+        edge_version = get_edge_version(svc.id, svc.edge_container_name, _get_docker_socket(db))
+    except Exception:
+        pass
+
+    return {
+        "orchestrator_version": __version__,
+        "edge_version": edge_version,
+        "up_to_date": edge_version == __version__,
+    }
+
+
+@router.post("/{service_id}/update-edge")
+async def update_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
+    """Recreate an edge container with the current orchestrator version.
+
+    This rebuilds the edge image if needed and recreates the container,
+    stamping it with the current version label.
+    """
+    import asyncio
+
+    from app.config import settings as app_settings
+    from app.database import SessionLocal
+    from app.edge.container_manager import get_edge_version, recreate_edge
+    from app.edge.image_builder import ensure_edge_image
+    from app.secrets import TAILSCALE_AUTH_KEY, read_secret
+    from app.settings_store import get_runtime_paths
+    from app.version import __version__
+
+    svc = _get_service_or_404(service_id, db)
+    socket = _get_docker_socket(db)
+
+    # Pre-check: already up to date?
+    try:
+        current = get_edge_version(svc.id, svc.edge_container_name, socket)
+        if current == __version__:
+            return {
+                "success": True,
+                "message": f"Edge container already at version {__version__}",
+                "version": __version__,
+            }
+    except Exception:
+        pass
+
+    def _run() -> str:
+        thread_db = SessionLocal()
+        try:
+            ts_authkey = read_secret(TAILSCALE_AUTH_KEY)
+            if not ts_authkey:
+                raise RuntimeError("Tailscale auth key not configured")
+
+            runtime = get_runtime_paths(thread_db)
+            ensure_edge_image(socket)
+            container_id = recreate_edge(
+                svc, ts_authkey,
+                runtime["generated_dir"], runtime["certs_dir"],
+                runtime["tailscale_state_dir"],
+                socket,
+            )
+
+            # Update status
+            status = thread_db.get(ServiceStatus, svc.id)
+            if status:
+                status.edge_container_id = container_id
+            _emit_event(
+                thread_db, svc.id, "edge_updated",
+                f"Edge container updated to v{__version__} for '{svc.name}'",
+            )
+            thread_db.commit()
+            return container_id
+        finally:
+            thread_db.close()
+
+    try:
+        container_id = await asyncio.to_thread(_run)
+        return {
+            "success": True,
+            "message": f"Edge container updated to version {__version__}",
+            "version": __version__,
+            "container_id": container_id,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from None

@@ -97,7 +97,7 @@ class TestDisableStopsEdge:
         }
         return client.post("/api/services", json=body)
 
-    @patch("app.routers.services.stop_edge")
+    @patch("app.edge.container_manager.stop_edge")
     def test_disable_calls_stop_edge(self, mock_stop, client):
         svc_id = self._create(client).json()["id"]
         resp = client.post(f"/api/services/{svc_id}/disable")
@@ -105,7 +105,7 @@ class TestDisableStopsEdge:
         assert resp.json()["enabled"] is False
         mock_stop.assert_called_once()
 
-    @patch("app.routers.services.stop_edge", side_effect=RuntimeError("no container"))
+    @patch("app.edge.container_manager.stop_edge", side_effect=RuntimeError("no container"))
     def test_disable_succeeds_even_if_stop_fails(self, mock_stop, client):
         svc_id = self._create(client).json()["id"]
         resp = client.post(f"/api/services/{svc_id}/disable")
@@ -130,8 +130,8 @@ class TestDeleteCleansUp:
         }
         return client.post("/api/services", json=body)
 
-    @patch("app.routers.services.remove_network")
-    @patch("app.routers.services.remove_edge")
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
     def test_delete_calls_remove_edge_and_network(self, mock_remove_edge, mock_remove_net, client):
         svc_id = self._create(client).json()["id"]
         resp = client.delete(f"/api/services/{svc_id}")
@@ -139,8 +139,8 @@ class TestDeleteCleansUp:
         mock_remove_edge.assert_called_once()
         mock_remove_net.assert_called_once()
 
-    @patch("app.routers.services.remove_network", side_effect=Exception("fail"))
-    @patch("app.routers.services.remove_edge", side_effect=Exception("fail"))
+    @patch("app.edge.network_manager.remove_network", side_effect=Exception("fail"))
+    @patch("app.edge.container_manager.remove_edge", side_effect=Exception("fail"))
     def test_delete_succeeds_even_if_cleanup_fails(self, mock_re, mock_rn, client):
         svc_id = self._create(client).json()["id"]
         resp = client.delete(f"/api/services/{svc_id}")
@@ -167,8 +167,8 @@ class TestFullHealthCheck:
         }
         return client.post("/api/services", json=body)
 
-    @patch("app.routers.services.run_health_checks")
-    @patch("app.routers.services.read_secret", return_value=None)
+    @patch("app.health.health_checker.run_health_checks")
+    @patch("app.secrets.read_secret", return_value=None)
     def test_full_health_check_without_cloudflare(self, mock_secret, mock_checks, client):
         mock_checks.return_value = {"edge_container_present": True}
         svc_id = self._create(client).json()["id"]

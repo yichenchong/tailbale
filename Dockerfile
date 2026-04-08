@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code
+# Copy version file and backend code
+COPY VERSION ./VERSION
 COPY backend/app ./app
 
 # Copy built frontend into static directory

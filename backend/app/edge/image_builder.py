@@ -7,6 +7,8 @@ from pathlib import Path
 
 import docker
 
+from app.version import __version__
+
 logger = logging.getLogger(__name__)
 
 EDGE_IMAGE = "tailbale-edge:latest"
@@ -38,6 +40,7 @@ def build_edge_image(socket_path: str | None = None) -> str:
         path=str(_EDGE_CONTEXT),
         tag=EDGE_IMAGE,
         rm=True,
+        labels={"tailbale.version": __version__},
     )
     for chunk in build_logs:
         if "stream" in chunk:

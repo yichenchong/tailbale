@@ -45,6 +45,7 @@ class TestBuildEdgeImage:
     @patch("app.edge.image_builder.docker.DockerClient")
     def test_builds_and_returns_id(self, mock_cls, mock_ctx):
         from app.edge.image_builder import build_edge_image
+        from app.version import __version__
 
         mock_ctx.is_dir.return_value = True
         mock_ctx.__str__ = lambda _: "/app/edge-image"
@@ -60,6 +61,7 @@ class TestBuildEdgeImage:
             path="/app/edge-image",
             tag="tailbale-edge:latest",
             rm=True,
+            labels={"tailbale.version": __version__},
         )
 
     @patch("app.edge.image_builder._EDGE_CONTEXT")
