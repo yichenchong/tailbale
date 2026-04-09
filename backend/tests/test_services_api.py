@@ -1275,3 +1275,174 @@ class TestDeleteDnsCleanupStructured:
         events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
         assert len(events) >= 1
         assert "orphaned" in events[-1].message.lower()
+
+
+# ---------------------------------------------------------------------------
+# Delete creates orphan-cleanup Job for surviving DnsRecord
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteOrphanJob:
+    """Delete should persist orphaned DNS record info in a Job row before CASCADE."""
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_creates_orphan_job_on_cleanup_failure(
+        self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
+    ):
+        """When cleanup_dns fails, an orphan Job should be created with record info."""
+        from app.models.job import Job
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        # cleanup_dns_record returns error — local row preserved by cleanup_dns_record
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": "forbidden",
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # Manually add a DnsRecord so the orphan job logic has something to persist
+        dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id="cf_rec_999", value="1.2.3.4")
+        db_session.add(dns)
+        db_session.commit()
+
+        resp = client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
+        assert resp.status_code == 204
+
+        # Job should exist with the orphaned record details
+        jobs = db_session.query(Job).filter(Job.kind == "dns_orphan_cleanup").all()
+        assert len(jobs) == 1
+        job = jobs[0]
+        assert job.status == "pending"
+        assert job.service_id is None  # SET NULL after CASCADE
+        import json as _json
+        details = _json.loads(job.details)
+        assert details["record_id"] == "cf_rec_999"
+        assert details["hostname"] == "app.example.com"
+        assert details["zone_id"] == "zone123"
+
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_creates_orphan_job_without_cleanup_dns(
+        self, mock_re, mock_rn, client, db_session
+    ):
+        """Even without cleanup_dns=true, if a DnsRecord exists, an orphan Job is created."""
+        from app.models.job import Job
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id="cf_rec_888")
+        db_session.add(dns)
+        db_session.commit()
+
+        # Delete without cleanup_dns — cleanup not even attempted
+        resp = client.delete(f"/api/services/{svc_id}")
+        assert resp.status_code == 204
+
+        jobs = db_session.query(Job).filter(Job.kind == "dns_orphan_cleanup").all()
+        assert len(jobs) == 1
+        import json as _json
+        details = _json.loads(jobs[0].details)
+        assert details["record_id"] == "cf_rec_888"
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record",
+           return_value={"deleted_remote": True, "deleted_local": True, "error": None})
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_no_orphan_job_on_successful_cleanup(
+        self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
+    ):
+        """When cleanup succeeds (DnsRecord deleted), no orphan Job should be created."""
+        from app.models.job import Job
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        # Note: cleanup mock says deleted_local=True, so DnsRecord is gone before
+        # the orphan check runs. No orphan job needed.
+
+        resp = client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
+        assert resp.status_code == 204
+
+        jobs = db_session.query(Job).filter(Job.kind == "dns_orphan_cleanup").all()
+        assert len(jobs) == 0
+
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_no_orphan_job_when_no_dns_record(
+        self, mock_re, mock_rn, client, db_session
+    ):
+        """When no DnsRecord exists, no orphan Job should be created."""
+        from app.models.job import Job
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.delete(f"/api/services/{svc_id}")
+        assert resp.status_code == 204
+
+        jobs = db_session.query(Job).filter(Job.kind == "dns_orphan_cleanup").all()
+        assert len(jobs) == 0
+
+
+# ---------------------------------------------------------------------------
+# Hostname change blocks when CF credentials are missing but record exists
+# ---------------------------------------------------------------------------
+
+
+class TestHostnameChangeNoCreds:
+    """Hostname change should abort when CF credentials are missing but a DNS record exists."""
+
+    @patch("app.secrets.read_secret", return_value=None)
+    def test_hostname_change_blocked_when_record_exists_no_creds(
+        self, mock_secret, client, db_session
+    ):
+        """If a DnsRecord with record_id exists but no CF creds, hostname change is 422."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # Create a DnsRecord simulating a previously-created Cloudflare record
+        dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id="cf_rec_777")
+        db_session.add(dns)
+        db_session.commit()
+
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 422
+        assert "credentials" in resp.json()["detail"].lower()
+
+        # Hostname should NOT have changed
+        check = client.get(f"/api/services/{svc_id}")
+        assert check.json()["hostname"] == "app.example.com"
+
+    @patch("app.secrets.read_secret", return_value=None)
+    def test_hostname_change_proceeds_when_no_record_no_creds(
+        self, mock_secret, client
+    ):
+        """If no DnsRecord exists and no CF creds, hostname change should succeed."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+        assert resp.json()["hostname"] == "new.example.com"
+
+    @patch("app.secrets.read_secret", return_value=None)
+    def test_hostname_change_proceeds_when_record_has_no_record_id(
+        self, mock_secret, client, db_session
+    ):
+        """DnsRecord without record_id (never synced to CF) should not block hostname change."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # DnsRecord with no record_id — was created locally but never pushed to CF
+        dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id=None)
+        db_session.add(dns)
+        db_session.commit()
+
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+        assert resp.json()["hostname"] == "new.example.com"

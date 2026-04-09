@@ -283,11 +283,16 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
 
         old_hostname = svc.hostname
 
-        # Clean up old Cloudflare DNS record — abort hostname change if remote delete fails
+        # Clean up old Cloudflare DNS record — abort hostname change if cleanup fails
+        # or if credentials are unavailable but a live record exists.
         from app.adapters.dns_reconciler import cleanup_dns_record
+        from app.models.dns_record import DnsRecord
         from app.secrets import CLOUDFLARE_TOKEN, read_secret
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
+        existing_dns = db.get(DnsRecord, svc.id)
+        has_live_record = existing_dns and existing_dns.record_id
+
         if cf_token and zone_id:
             result = cleanup_dns_record(db, svc, cf_token, zone_id)
             if result["error"]:
@@ -299,14 +304,25 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
                         f"Retry or remove the record manually first."
                     ),
                 )
+        elif has_live_record:
+            # Credentials are missing but a Cloudflare record exists — abort to
+            # prevent orphaning the remote record.
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "Cannot change hostname: a Cloudflare DNS record exists for "
+                    f"'{old_hostname}' but Cloudflare credentials are not configured. "
+                    "Configure cf_token and cf_zone_id, or manually delete the old "
+                    "DNS record first."
+                ),
+            )
 
         # Update Certificate row hostname (if exists) so cert renewal targets new hostname
         cert = db.get(Certificate, svc.id)
         if cert:
             cert.hostname = body.hostname
 
-        # Update DnsRecord hostname if the row survived cleanup (e.g. CF was unreachable)
-        from app.models.dns_record import DnsRecord
+        # Update DnsRecord hostname if the row survived cleanup
         dns_record = db.get(DnsRecord, svc.id)
         if dns_record:
             dns_record.hostname = body.hostname
@@ -466,6 +482,34 @@ async def delete_service(
     ]:
         if subdir.exists():
             shutil.rmtree(subdir, ignore_errors=True)
+
+    # If a DnsRecord with a record_id still exists (cleanup wasn't attempted,
+    # failed, or credentials were unavailable), persist it as an orphan-cleanup
+    # job BEFORE the CASCADE wipes the DnsRecord row.
+    from app.models.dns_record import DnsRecord
+    from app.models.job import Job
+    surviving_dns = db.get(DnsRecord, svc.id)
+    if surviving_dns and surviving_dns.record_id:
+        from app.settings_store import get_setting
+        orphan_job = Job(
+            service_id=svc.id,  # Will become NULL after CASCADE (SET NULL)
+            kind="dns_orphan_cleanup",
+            status="pending",
+            message=f"Orphaned DNS record for deleted service '{svc.name}'",
+            details=json.dumps({
+                "record_id": surviving_dns.record_id,
+                "hostname": surviving_dns.hostname,
+                "zone_id": get_setting(db, "cf_zone_id"),
+                "value": surviving_dns.value,
+                "service_name": svc.name,
+            }),
+        )
+        db.add(orphan_job)
+        _emit_event(
+            db, svc.id, "dns_orphan_created",
+            f"DNS cleanup job created for orphaned record '{surviving_dns.hostname}'",
+            level="warning",
+        )
 
     name = svc.name
     _emit_event(db, None, "service_deleted", f"Service '{name}' ({service_id}) deleted")

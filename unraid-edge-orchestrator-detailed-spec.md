@@ -280,6 +280,14 @@ service is still disabled but the DNS record row is preserved (not deleted
 from the local database) so that retry is possible.  A `dns_cleanup_failed`
 event is emitted.
 
+#### Hostname change with missing credentials
+
+If a Cloudflare DNS record exists for the current hostname but
+`cf_token` or `cf_zone_id` is not configured, hostname change is
+rejected with 422.  The user must configure credentials or manually
+remove the old record before the hostname can be changed.  This
+prevents silently orphaning remote records.
+
 ### 7.5 Delete service journey
 
 Expected behavior:
@@ -764,11 +772,16 @@ handle is lost.
 | Context          | On remote failure                                         |
 |------------------|-----------------------------------------------------------|
 | Hostname change  | Abort with 502 — hostname stays unchanged                 |
+| Hostname change  | Abort with 422 if CF credentials missing but record exists|
 | Disable          | Proceed; keep DnsRecord row; emit `dns_cleanup_failed`    |
-| Delete           | Proceed; CASCADE removes local row; emit warning event    |
+| Delete           | Proceed; create `dns_orphan_cleanup` Job; emit warning    |
 
-For delete, the Cloudflare record may become orphaned if remote deletion
-fails.  A periodic cleanup sweep or manual removal is the fallback.
+For delete, the DnsRecord row is lost to CASCADE, but the `record_id`,
+`hostname`, and `zone_id` are preserved in a Job row with
+`kind="dns_orphan_cleanup"` and `status="pending"`.  The Job's
+`service_id` becomes NULL (via SET NULL) after the CASCADE, but the
+`details` JSON contains all information needed for a background sweep
+to retry the Cloudflare deletion.
 
 ---
 
