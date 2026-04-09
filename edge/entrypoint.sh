@@ -1,6 +1,11 @@
 #!/bin/sh
 set -e
 
+# Tell the tailscale CLI where to find the tailscaled socket.
+# Newer Tailscale versions (≥1.96) removed the --socket flag from most
+# subcommands; the TS_SOCKET env var is the supported replacement.
+export TS_SOCKET="/var/run/tailscale/tailscaled.sock"
+
 # Graceful shutdown handler
 cleanup() {
     echo "[edge] Shutting down..."
@@ -8,7 +13,7 @@ cleanup() {
         kill "$CADDY_PID" 2>/dev/null || true
         wait "$CADDY_PID" 2>/dev/null || true
     fi
-    tailscale down --socket=/var/run/tailscale/tailscaled.sock 2>/dev/null || true
+    tailscale down 2>/dev/null || true
     if [ -n "$TAILSCALED_PID" ]; then
         kill "$TAILSCALED_PID" 2>/dev/null || true
         wait "$TAILSCALED_PID" 2>/dev/null || true
@@ -20,18 +25,18 @@ trap cleanup TERM INT QUIT
 
 # 1. Start tailscaled in userspace networking mode
 echo "[edge] Starting tailscaled in userspace mode..."
-tailscaled --tun=userspace-networking --statedir=/var/lib/tailscale --socket=/var/run/tailscale/tailscaled.sock &
+tailscaled --tun=userspace-networking --statedir=/var/lib/tailscale --socket="$TS_SOCKET" &
 TAILSCALED_PID=$!
 
 # Wait for tailscaled socket to be ready
 for i in $(seq 1 30); do
-    if [ -S /var/run/tailscale/tailscaled.sock ]; then
+    if [ -S "$TS_SOCKET" ]; then
         break
     fi
     sleep 0.5
 done
 
-if [ ! -S /var/run/tailscale/tailscaled.sock ]; then
+if [ ! -S "$TS_SOCKET" ]; then
     echo "[edge] ERROR: tailscaled socket not ready after 15s"
     exit 1
 fi
@@ -42,22 +47,20 @@ if [ -n "$TS_AUTHKEY" ]; then
     tailscale up \
         --authkey="$TS_AUTHKEY" \
         --hostname="${TS_HOSTNAME:-edge}" \
-        --socket=/var/run/tailscale/tailscaled.sock \
         ${TS_EXTRA_ARGS:-}
 else
     echo "[edge] No TS_AUTHKEY set, assuming existing state..."
     tailscale up \
         --hostname="${TS_HOSTNAME:-edge}" \
-        --socket=/var/run/tailscale/tailscaled.sock \
         ${TS_EXTRA_ARGS:-} || true
 fi
 
 # 3. Wait for Tailscale to be ready
 echo "[edge] Waiting for Tailscale to be ready..."
 for i in $(seq 1 60); do
-    if tailscale status --socket=/var/run/tailscale/tailscaled.sock --json 2>/dev/null | grep -q '"BackendState":"Running"'; then
+    if tailscale status --json 2>/dev/null | grep -q '"BackendState":"Running"'; then
         echo "[edge] Tailscale is ready."
-        tailscale ip -4 --socket=/var/run/tailscale/tailscaled.sock 2>/dev/null || true
+        tailscale ip -4 2>/dev/null || true
         break
     fi
     sleep 1

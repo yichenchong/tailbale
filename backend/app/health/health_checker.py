@@ -154,7 +154,8 @@ def _check_tailscale(
     try:
         container = client.containers.get(service.edge_container_name)
         result = container.exec_run(
-            "tailscale status --json --socket=/var/run/tailscale/tailscaled.sock"
+            "tailscale status --json",
+            environment={"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"},
         )
         if result.exit_code != 0:
             return False, False

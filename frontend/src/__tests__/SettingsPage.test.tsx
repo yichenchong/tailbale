@@ -320,7 +320,7 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Confirm New Password")).toBeInTheDocument()
   })
 
-  it("shows version in Account tab", async () => {
+  it("shows version in General tab", async () => {
     vi.stubGlobal("fetch", mockFetch())
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
     render(
@@ -332,12 +332,10 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Settings")).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByText("Account"))
-
+    // General tab is the default, no click needed
     await waitFor(() => {
-      expect(screen.getByText("About")).toBeInTheDocument()
+      expect(screen.getByText("tailBale")).toBeInTheDocument()
     })
-    expect(screen.getByText("tailBale")).toBeInTheDocument()
     expect(screen.getByText("v1.2.3")).toBeInTheDocument()
   })
 
@@ -407,8 +405,7 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Settings")).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByText("Account"))
-
+    // General tab is the default
     expect(screen.getByText("version unknown")).toBeInTheDocument()
   })
 })

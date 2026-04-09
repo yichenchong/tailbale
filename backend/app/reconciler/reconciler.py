@@ -207,9 +207,11 @@ def reconcile_service(
         status.last_reconciled_at = datetime.now(timezone.utc)
         result["phase"] = phase
 
+        level = "info" if phase == "healthy" else "warning" if phase == "warning" else "error"
         emit_event(
             db, service.id, "reconcile_completed",
             f"Reconciliation completed for '{service.name}' — {phase}",
+            level=level,
             details={"phase": phase, "checks": checks},
         )
 

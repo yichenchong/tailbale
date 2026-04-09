@@ -97,7 +97,7 @@ export default function SettingsPage() {
       {/* Tab content */}
       <div className="mt-6 max-w-lg">
         {tab === "General" && (
-          <GeneralTab settings={settings.general} onSave={(b) => save("general", b)} saving={saving} />
+          <GeneralTab settings={settings.general} onSave={(b) => save("general", b)} saving={saving} version={version} />
         )}
         {tab === "Cloudflare" && (
           <CloudflareTab
@@ -133,7 +133,7 @@ export default function SettingsPage() {
           <PathsTab settings={settings.paths} onSave={(b) => save("paths", b)} saving={saving} />
         )}
         {tab === "Account" && (
-          <AccountTab version={version} />
+          <AccountTab />
         )}
       </div>
     </div>
@@ -233,10 +233,12 @@ function GeneralTab({
   settings,
   onSave,
   saving,
+  version,
 }: {
   settings: AllSettings["general"]
   onSave: (b: Record<string, unknown>) => void
   saving: boolean
+  version: string | null
 }) {
   const [baseDomain, setBaseDomain] = useState(settings.base_domain)
   const [acmeEmail, setAcmeEmail] = useState(settings.acme_email)
@@ -272,6 +274,20 @@ function GeneralTab({
           })
         }
       />
+
+      {/* Version info */}
+      <div className="mt-6 border-t border-zinc-200 pt-4">
+        <div className="text-sm text-zinc-500">
+          <span className="font-medium text-zinc-700">tailBale</span>
+          {version ? (
+            <span className="ml-2 rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
+              v{version}
+            </span>
+          ) : (
+            <span className="ml-2 text-xs text-zinc-400">version unknown</span>
+          )}
+        </div>
+      </div>
     </div>
   )
 }
@@ -462,7 +478,7 @@ function PathsTab({
   )
 }
 
-function AccountTab({ version }: { version: string | null }) {
+function AccountTab() {
   const [currentPassword, setCurrentPassword] = useState("")
   const [newPassword, setNewPassword] = useState("")
   const [confirmPassword, setConfirmPassword] = useState("")
@@ -550,20 +566,6 @@ function AccountTab({ version }: { version: string | null }) {
         </div>
       </div>
 
-      {/* Version info */}
-      <div className="border-t border-zinc-200 pt-4">
-        <h3 className="text-sm font-semibold text-zinc-700">About</h3>
-        <div className="mt-2 text-sm text-zinc-500">
-          <span className="font-medium text-zinc-700">tailBale</span>
-          {version ? (
-            <span className="ml-2 rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
-              v{version}
-            </span>
-          ) : (
-            <span className="ml-2 text-xs text-zinc-400">version unknown</span>
-          )}
-        </div>
-      </div>
     </div>
   )
 }

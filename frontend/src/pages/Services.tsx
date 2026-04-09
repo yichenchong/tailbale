@@ -182,7 +182,7 @@ export default function Services() {
                               className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
                               style={{ top: menuPos.top, left: menuPos.left }}
                             >
-                              <Link to={`/services/${svc.id}`} className="block px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50">
+                              <Link to={`/services/${svc.id}`} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                 View Details
                               </Link>
                               <button onClick={() => doAction(svc.id, "/reload")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">

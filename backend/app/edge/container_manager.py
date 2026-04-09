@@ -285,9 +285,11 @@ def detect_tailscale_ip(
                         time.sleep(retry_delay)
                     continue
 
+            ts_env = {"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"}
+
             # Try `tailscale ip -4` first
             exit_code, output = container.exec_run(
-                "tailscale ip -4 --socket=/var/run/tailscale/tailscaled.sock"
+                "tailscale ip -4", environment=ts_env,
             )
             if exit_code == 0:
                 ip = output.decode("utf-8", errors="replace").strip()
@@ -297,7 +299,7 @@ def detect_tailscale_ip(
 
             # Fallback: parse `tailscale status --json`
             exit_code, output = container.exec_run(
-                "tailscale status --json --socket=/var/run/tailscale/tailscaled.sock"
+                "tailscale status --json", environment=ts_env,
             )
             if exit_code == 0:
                 status = json.loads(output.decode("utf-8", errors="replace"))
