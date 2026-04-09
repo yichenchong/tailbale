@@ -149,14 +149,21 @@ def cleanup_dns_record(
     service: Service,
     cf_token: str,
     zone_id: str,
-) -> bool:
-    """Remove DNS record for a service from Cloudflare and the database.
+) -> dict:
+    """Attempt to remove DNS record for a service from Cloudflare.
 
-    Returns True if a record was deleted, False if nothing to clean up.
+    Returns a structured result:
+        deleted_remote: True if Cloudflare record was deleted
+        deleted_local: True if local DnsRecord row was removed
+        error: error message string if remote deletion failed, else None
+
+    The local DnsRecord row is ONLY deleted when the remote deletion
+    succeeds.  This prevents orphaning Cloudflare records that we lose
+    the local handle for.
     """
     dns_record = db.get(DnsRecord, service.id)
     if not dns_record or not dns_record.record_id:
-        return False
+        return {"deleted_remote": False, "deleted_local": False, "error": None}
 
     try:
         delete_a_record(cf_token, zone_id, dns_record.record_id)
@@ -166,12 +173,17 @@ def cleanup_dns_record(
             details={"hostname": service.hostname, "record_id": dns_record.record_id},
         )
         logger.info("Deleted DNS record for %s", service.hostname)
-    except RuntimeError:
-        logger.warning("Failed to delete DNS record %s from Cloudflare", dns_record.record_id, exc_info=True)
-        _emit_event(
-            db, service.id, "dns_removed", "warning",
-            f"Failed to remove DNS record for {service.hostname} from Cloudflare",
+        db.delete(dns_record)
+        return {"deleted_remote": True, "deleted_local": True, "error": None}
+    except Exception as exc:
+        error_msg = str(exc)
+        logger.warning(
+            "Failed to delete DNS record %s from Cloudflare: %s",
+            dns_record.record_id, error_msg, exc_info=True,
         )
-
-    db.delete(dns_record)
-    return True
+        _emit_event(
+            db, service.id, "dns_cleanup_failed", "warning",
+            f"Failed to remove DNS record for {service.hostname} from Cloudflare: {error_msg}",
+            details={"hostname": service.hostname, "record_id": dns_record.record_id, "error": error_msg},
+        )
+        return {"deleted_remote": False, "deleted_local": False, "error": error_msg}

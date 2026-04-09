@@ -164,11 +164,14 @@ def _to_response(
     )
 
 
-def _emit_event(db: Session, service_id: str | None, kind: str, message: str, details: dict | None = None):
+def _emit_event(
+    db: Session, service_id: str | None, kind: str, message: str,
+    details: dict | None = None, level: str = "info",
+):
     event = Event(
         service_id=service_id,
         kind=kind,
-        level="info",
+        level=level,
         message=message,
         details=json.dumps(details) if details else None,
     )
@@ -280,16 +283,22 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
 
         old_hostname = svc.hostname
 
-        # Clean up old Cloudflare DNS record (best-effort) before losing the handle
+        # Clean up old Cloudflare DNS record — abort hostname change if remote delete fails
         from app.adapters.dns_reconciler import cleanup_dns_record
         from app.secrets import CLOUDFLARE_TOKEN, read_secret
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
         if cf_token and zone_id:
-            try:
-                cleanup_dns_record(db, svc, cf_token, zone_id)
-            except Exception:
-                pass  # Best-effort; proceed with hostname change
+            result = cleanup_dns_record(db, svc, cf_token, zone_id)
+            if result["error"]:
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        f"Cannot change hostname: failed to remove old DNS record "
+                        f"from Cloudflare ({result['error']}). "
+                        f"Retry or remove the record manually first."
+                    ),
+                )
 
         # Update Certificate row hostname (if exists) so cert renewal targets new hostname
         cert = db.get(Certificate, svc.id)
@@ -313,6 +322,10 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
 
         changes["hostname"] = body.hostname
         svc.hostname = body.hostname
+
+    # Re-validate upstream if port changes (spec §17 steps 2-3)
+    if "upstream_port" in sent and body.upstream_port != svc.upstream_port:
+        _validate_upstream(db, svc.upstream_container_id, body.upstream_port)
 
     for field in (
         "name", "upstream_scheme", "upstream_port", "healthcheck_path",
@@ -375,11 +388,15 @@ async def disable_service(
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
         if cf_token and zone_id:
-            try:
-                cleanup_dns_record(db, svc, cf_token, zone_id)
+            result = cleanup_dns_record(db, svc, cf_token, zone_id)
+            if result["deleted_remote"]:
                 _emit_event(db, svc.id, "dns_removed", f"DNS record removed on disable for '{svc.name}'")
-            except Exception:
-                pass  # Best-effort
+            elif result["error"]:
+                _emit_event(
+                    db, svc.id, "dns_cleanup_failed",
+                    f"Failed to remove DNS record on disable for '{svc.name}': {result['error']}",
+                    level="warning",
+                )
 
     db.commit()
     db.refresh(svc)
@@ -429,10 +446,16 @@ async def delete_service(
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
         if cf_token and zone_id:
-            try:
-                cleanup_dns_record(db, svc, cf_token, zone_id)
-            except Exception:
-                pass  # Best-effort; service deletion proceeds regardless
+            result = cleanup_dns_record(db, svc, cf_token, zone_id)
+            if result["error"]:
+                # Emit warning but proceed with deletion — the CASCADE will
+                # remove the local DnsRecord row anyway, and the Cloudflare
+                # record becomes orphaned.  A future cleanup sweep can handle it.
+                _emit_event(
+                    db, svc.id, "dns_cleanup_failed",
+                    f"Cloudflare DNS record may be orphaned for '{svc.name}': {result['error']}",
+                    level="warning",
+                )
 
     # Clean up generated configs, certs, and Tailscale state on disk
     runtime = get_runtime_paths(db)

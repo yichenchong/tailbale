@@ -175,62 +175,101 @@ class TestDetectDnsDrift:
 
 
 class TestCleanupDnsRecord:
+    """cleanup_dns_record should return structured result and only delete local row on success."""
+
     @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_deletes_record(self, mock_delete, db_session):
+    def test_success_deletes_both(self, mock_delete, db_session):
         from app.adapters.dns_reconciler import cleanup_dns_record
 
         svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="r1", value="100.64.0.1")
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_123", value="1.2.3.4")
         db_session.add(dns)
         db_session.commit()
 
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone1")
-        db_session.commit()
-        assert result is True
-        mock_delete.assert_called_once_with("cf-token", "zone1", "r1")
+        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        assert result["deleted_remote"] is True
+        assert result["deleted_local"] is True
+        assert result["error"] is None
 
-        # Record should be removed from DB
+        # Local row should be gone (flush + expire to see the deletion)
+        db_session.flush()
+        db_session.expire_all()
         assert db_session.get(DnsRecord, svc.id) is None
+
+    @patch("app.adapters.dns_reconciler.delete_a_record", side_effect=RuntimeError("API error"))
+    def test_failure_preserves_local_row(self, mock_delete, db_session):
+        from app.adapters.dns_reconciler import cleanup_dns_record
+
+        svc = _create_service(db_session)
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_456", value="1.2.3.4")
+        db_session.add(dns)
+        db_session.commit()
+
+        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        assert result["deleted_remote"] is False
+        assert result["deleted_local"] is False
+        assert result["error"] is not None
+        assert "API error" in result["error"]
+
+        # Local row should still exist
+        row = db_session.get(DnsRecord, svc.id)
+        assert row is not None
+        assert row.record_id == "cf_456"
+
+    def test_no_record_returns_noop(self, db_session):
+        from app.adapters.dns_reconciler import cleanup_dns_record
+
+        svc = _create_service(db_session)
+        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        assert result["deleted_remote"] is False
+        assert result["deleted_local"] is False
+        assert result["error"] is None
+
+    def test_no_record_id_returns_noop(self, db_session):
+        from app.adapters.dns_reconciler import cleanup_dns_record
+
+        svc = _create_service(db_session)
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id=None)
+        db_session.add(dns)
+        db_session.commit()
+
+        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        assert result["deleted_remote"] is False
+        assert result["deleted_local"] is False
+        assert result["error"] is None
+
+    @patch("app.adapters.dns_reconciler.delete_a_record", side_effect=Exception("timeout"))
+    def test_failure_emits_warning_event(self, mock_delete, db_session):
+        from app.adapters.dns_reconciler import cleanup_dns_record
+
+        svc = _create_service(db_session)
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_789", value="5.6.7.8")
+        db_session.add(dns)
+        db_session.commit()
+
+        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        db_session.flush()
+
+        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
+        assert len(events) == 1
+        assert events[0].level == "warning"
+        assert "timeout" in events[0].message.lower()
+
+    @patch("app.adapters.dns_reconciler.delete_a_record")
+    def test_success_emits_info_event(self, mock_delete, db_session):
+        from app.adapters.dns_reconciler import cleanup_dns_record
+
+        svc = _create_service(db_session)
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_aaa", value="1.1.1.1")
+        db_session.add(dns)
+        db_session.commit()
+
+        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        db_session.flush()
 
         events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
         assert len(events) == 1
-
-    def test_noop_when_no_record(self, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone1")
-        assert result is False
-
-    def test_noop_when_no_record_id(self, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id=None, value=None)
-        db_session.add(dns)
-        db_session.commit()
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone1")
-        assert result is False
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_best_effort_on_cf_failure(self, mock_delete, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        mock_delete.side_effect = RuntimeError("CF API error")
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="r1", value="100.64.0.1")
-        db_session.add(dns)
-        db_session.commit()
-
-        # Should not raise despite CF error
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone1")
-        db_session.commit()
-        assert result is True
-
-        # DB record should still be removed
-        assert db_session.get(DnsRecord, svc.id) is None
+        assert events[0].level == "info"
 
 
 class TestDeleteWithDnsCleanup:

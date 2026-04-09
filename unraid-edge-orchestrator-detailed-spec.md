@@ -275,6 +275,11 @@ Expected behavior:
 - certs may be retained
 - service remains in UI as disabled
 
+When `cleanup_dns=true` is requested and Cloudflare deletion fails, the
+service is still disabled but the DNS record row is preserved (not deleted
+from the local database) so that retry is possible.  A `dns_cleanup_failed`
+event is emitted.
+
 ### 7.5 Delete service journey
 
 Expected behavior:
@@ -733,7 +738,7 @@ Proxy:
 TTL:
 - auto or configurable
 
-### 14.3 Failure modes
+### 14.3 Failure modes and cleanup semantics
 
 Possible errors:
 - auth failure
@@ -743,6 +748,27 @@ Possible errors:
 - partial drift
 
 Each should be surfaced clearly.
+
+#### DNS record cleanup
+
+`cleanup_dns_record()` returns a structured result:
+
+    { "deleted_remote": bool, "deleted_local": bool, "error": str | None }
+
+The local `DnsRecord` row is only removed when the remote Cloudflare
+deletion succeeds.  This prevents orphaning remote records when the local
+handle is lost.
+
+**Caller behaviour by context:**
+
+| Context          | On remote failure                                         |
+|------------------|-----------------------------------------------------------|
+| Hostname change  | Abort with 502 — hostname stays unchanged                 |
+| Disable          | Proceed; keep DnsRecord row; emit `dns_cleanup_failed`    |
+| Delete           | Proceed; CASCADE removes local row; emit warning event    |
+
+For delete, the Cloudflare record may become orphaned if remote deletion
+fails.  A periodic cleanup sweep or manual removal is the fallback.
 
 ---
 
@@ -1052,6 +1078,13 @@ When user submits the wizard, backend should perform:
 5. Queue reconcile job
 6. Return service ID immediately
 7. Frontend polls or streams progress
+
+### 17.1 Upstream validation on update
+
+When a service is updated and `upstream_port` changes, the backend re-runs
+steps 2-3 (validate container exists, validate port plausibility) against the
+current upstream container.  If validation fails, the update is rejected with
+422 — the same as on create.
 
 ### Expected progress states
 - `pending`

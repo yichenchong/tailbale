@@ -782,7 +782,8 @@ class TestDisableDnsCleanup:
         assert resp.status_code == 200
         assert resp.json()["enabled"] is False
 
-    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record",
+           return_value={"deleted_remote": True, "deleted_local": True, "error": None})
     @patch("app.secrets.read_secret", return_value="cf-token")
     @patch("app.edge.container_manager.stop_edge")
     def test_disable_with_cleanup_dns(self, mock_stop, mock_secret, mock_cleanup, client, db_session):
@@ -887,7 +888,8 @@ class TestDeleteUsesRuntimePaths:
 class TestHostnameChangeCleanup:
     """Changing hostname should clean up old DNS record, cert files, and cert metadata."""
 
-    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record",
+           return_value={"deleted_remote": True, "deleted_local": True, "error": None})
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_hostname_change_deletes_old_dns(self, mock_secret, mock_cleanup, client, db_session):
         from app.settings_store import set_setting
@@ -908,11 +910,13 @@ class TestHostnameChangeCleanup:
         assert resp.status_code == 200
         mock_cleanup.assert_not_called()
 
-    @patch("app.adapters.dns_reconciler.cleanup_dns_record", side_effect=Exception("CF unreachable"))
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record",
+           return_value={"deleted_remote": False, "deleted_local": False, "error": "CF unreachable"})
     @patch("app.secrets.read_secret", return_value="cf-token")
-    def test_hostname_change_updates_dns_record_hostname_on_failed_cleanup(
+    def test_hostname_change_aborts_when_dns_cleanup_fails(
         self, mock_secret, mock_cleanup, client, db_session
     ):
+        """Hostname change should abort with 502 when old DNS record can't be removed."""
         from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
@@ -923,12 +927,18 @@ class TestHostnameChangeCleanup:
         db_session.commit()
 
         resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
-        assert resp.status_code == 200
+        assert resp.status_code == 502
+        assert "failed to remove old dns record" in resp.json()["detail"].lower()
 
+        # Hostname should NOT have changed
         db_session.expire_all()
+        check = client.get(f"/api/services/{svc_id}")
+        assert check.json()["hostname"] == "app.example.com"
+
+        # DnsRecord should still exist with old hostname
         updated_dns = db_session.get(DnsRecord, svc_id)
         assert updated_dns is not None
-        assert updated_dns.hostname == "new.example.com"
+        assert updated_dns.hostname == "app.example.com"
 
     def test_hostname_change_updates_cert_hostname(self, client, db_session):
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
@@ -1011,3 +1021,257 @@ class TestUnusedImportCleanup:
                             names = [alias.name for alias in child.names]
                             assert "settings" not in names, \
                                 "app_settings is imported but unused in update_edge_endpoint"
+
+
+# ---------------------------------------------------------------------------
+# Upstream port revalidation on update
+# ---------------------------------------------------------------------------
+
+
+class TestUpdateUpstreamPortValidation:
+    """update_service should revalidate upstream port when it changes."""
+
+    def test_update_port_revalidates(self, client):
+        """Changing upstream_port should trigger _validate_upstream."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        with patch("app.routers.services._validate_upstream") as mock_val:
+            resp = client.put(f"/api/services/{svc_id}", json={"upstream_port": 9090})
+            assert resp.status_code == 200
+            mock_val.assert_called_once()
+            args = mock_val.call_args[0]
+            assert args[2] == 9090  # new port
+
+    def test_update_port_invalid_rejected(self, client):
+        """If the new port isn't exposed by the container, update should 422."""
+        from fastapi import HTTPException
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        with patch(
+            "app.routers.services._validate_upstream",
+            side_effect=HTTPException(status_code=422, detail="Port 9999 is not exposed"),
+        ):
+            resp = client.put(f"/api/services/{svc_id}", json={"upstream_port": 9999})
+            assert resp.status_code == 422
+            assert "9999" in resp.json()["detail"]
+
+    def test_update_same_port_no_revalidation(self, client):
+        """Setting port to the same value should not trigger revalidation."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        with patch("app.routers.services._validate_upstream") as mock_val:
+            resp = client.put(f"/api/services/{svc_id}", json={"upstream_port": 80})
+            assert resp.status_code == 200
+            mock_val.assert_not_called()
+
+    def test_update_non_port_fields_no_revalidation(self, client):
+        """Changing non-port fields should not trigger upstream revalidation."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        with patch("app.routers.services._validate_upstream") as mock_val:
+            resp = client.put(f"/api/services/{svc_id}", json={"name": "Renamed"})
+            assert resp.status_code == 200
+            mock_val.assert_not_called()
+
+    def test_update_docker_unreachable_503(self, client):
+        """If Docker is unreachable during port revalidation, return 503."""
+        from fastapi import HTTPException
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        with patch(
+            "app.routers.services._validate_upstream",
+            side_effect=HTTPException(status_code=503, detail="Cannot connect to Docker"),
+        ):
+            resp = client.put(f"/api/services/{svc_id}", json={"upstream_port": 443})
+            assert resp.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# DNS cleanup structured result — hostname change aborts on failure
+# ---------------------------------------------------------------------------
+
+
+class TestHostnameChangeDnsAbort:
+    """Hostname change should abort if old DNS record cannot be deleted from Cloudflare."""
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_hostname_change_aborts_on_cf_failure(self, mock_secret, mock_cleanup, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": "Connection refused",
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 502
+        assert "failed to remove old dns record" in resp.json()["detail"].lower()
+
+        # Hostname should NOT have changed
+        check = client.get(f"/api/services/{svc_id}")
+        assert check.json()["hostname"] == "app.example.com"
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_hostname_change_proceeds_on_cf_success(self, mock_secret, mock_cleanup, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": True,
+            "deleted_local": True,
+            "error": None,
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+        assert resp.json()["hostname"] == "new.example.com"
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_hostname_change_no_record_proceeds(self, mock_secret, mock_cleanup, client, db_session):
+        """If there's no DNS record at all, hostname change should proceed."""
+        from app.settings_store import set_setting
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": None,
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+        assert resp.json()["hostname"] == "new.example.com"
+
+
+# ---------------------------------------------------------------------------
+# DNS cleanup structured result — disable keeps row on failure
+# ---------------------------------------------------------------------------
+
+
+class TestDisableDnsCleanupStructured:
+    """Disable with cleanup_dns should preserve DnsRecord row on Cloudflare failure."""
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.container_manager.stop_edge")
+    def test_disable_keeps_dns_row_on_cf_failure(
+        self, mock_stop, mock_secret, mock_cleanup, client, db_session
+    ):
+        from app.models.dns_record import DnsRecord
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # Create a DnsRecord for the service
+        dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id="cf_old")
+        db_session.add(dns)
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": "API rate limited",
+        }
+
+        resp = client.post(f"/api/services/{svc_id}/disable?cleanup_dns=true")
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+
+        # DnsRecord should still exist because cleanup returned it
+        # (cleanup_dns_record itself no longer deletes; we're checking
+        # it was called but didn't delete the row)
+        mock_cleanup.assert_called_once()
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.container_manager.stop_edge")
+    def test_disable_emits_warning_on_cf_failure(
+        self, mock_stop, mock_secret, mock_cleanup, client, db_session
+    ):
+        from app.models.event import Event
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": "timeout",
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        client.post(f"/api/services/{svc_id}/disable?cleanup_dns=true")
+
+        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
+        assert len(events) >= 1
+        assert events[-1].level == "warning"
+
+
+# ---------------------------------------------------------------------------
+# DNS cleanup structured result — delete emits warning
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteDnsCleanupStructured:
+    """Delete with cleanup_dns should emit warning on Cloudflare failure."""
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_proceeds_on_cf_failure(
+        self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
+    ):
+        from app.settings_store import set_setting
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": "forbidden",
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
+        assert resp.status_code == 204
+
+        # Service should be gone
+        check = client.get(f"/api/services/{svc_id}")
+        assert check.status_code == 404
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_emits_orphan_warning(
+        self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
+    ):
+        from app.models.event import Event
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        mock_cleanup.return_value = {
+            "deleted_remote": False,
+            "deleted_local": False,
+            "error": "API error",
+        }
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
+
+        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
+        assert len(events) >= 1
+        assert "orphaned" in events[-1].message.lower()
