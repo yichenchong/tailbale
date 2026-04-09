@@ -203,6 +203,29 @@ def get_edge_logs(
     return container.logs(tail=tail, timestamps=True).decode("utf-8", errors="replace")
 
 
+def _wait_for_running(
+    container: docker.models.containers.Container,
+    timeout: float = 30.0,
+    poll_interval: float = 1.0,
+) -> bool:
+    """Wait until a container reaches the 'running' state.
+
+    Docker rejects ``exec`` calls when a container is restarting or paused.
+    Returns True if the container is running, False on timeout.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        container.reload()  # refresh attrs from daemon
+        if container.status == "running":
+            return True
+        if container.status in ("exited", "dead", "removing"):
+            logger.warning("Container %s is %s — not waiting further", container.name, container.status)
+            return False
+        time.sleep(poll_interval)
+    logger.warning("Timed out waiting for container %s to be running (status=%s)", container.name, container.status)
+    return False
+
+
 def reload_caddy(
     service_id: str, edge_container_name: str, socket_path: str | None = None
 ) -> str:
@@ -210,6 +233,12 @@ def reload_caddy(
     container = _find_edge_container(service_id, edge_container_name, socket_path)
     if not container:
         raise RuntimeError(f"Edge container not found for service {service_id}")
+
+    if not _wait_for_running(container):
+        raise RuntimeError(
+            f"Edge container {edge_container_name} is not running "
+            f"(status={container.status}), cannot reload Caddy"
+        )
 
     exit_code, output = container.exec_run(
         "caddy reload --config /etc/caddy/Caddyfile"
@@ -237,8 +266,25 @@ def detect_tailscale_ip(
     if not container:
         return None
 
+    # Wait for the container to be running before attempting exec.
+    if not _wait_for_running(container):
+        logger.warning(
+            "Container %s not running (status=%s), skipping IP detection",
+            edge_container_name, container.status,
+        )
+        return None
+
     for attempt in range(max_retries):
         try:
+            # Re-check state on each retry — container may have restarted.
+            container.reload()
+            if container.status != "running":
+                if not _wait_for_running(container, timeout=10.0):
+                    logger.debug("Container %s left running state on attempt %d", edge_container_name, attempt + 1)
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay)
+                    continue
+
             # Try `tailscale ip -4` first
             exit_code, output = container.exec_run(
                 "tailscale ip -4 --socket=/var/run/tailscale/tailscaled.sock"
