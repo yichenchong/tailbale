@@ -14,7 +14,7 @@ class TestReconcileEndpoint:
         body.update(overrides)
         return client.post("/api/services", json=body)
 
-    @patch("app.reconciler.reconcile_loop.reconcile_service")
+    @patch("app.reconciler.reconcile_loop.reconcile_one")
     def test_reconcile_returns_result(self, mock_reconcile, client):
         svc_id = self._create_via_api(client).json()["id"]
         mock_reconcile.return_value = {"phase": "healthy", "error": None}
@@ -25,7 +25,7 @@ class TestReconcileEndpoint:
         assert data["success"] is True
         assert data["phase"] == "healthy"
 
-    @patch("app.reconciler.reconcile_loop.reconcile_service")
+    @patch("app.reconciler.reconcile_loop.reconcile_one")
     def test_reconcile_returns_failed_phase(self, mock_reconcile, client):
         svc_id = self._create_via_api(client).json()["id"]
         mock_reconcile.return_value = {"phase": "failed", "error": "TS auth key missing"}
@@ -43,7 +43,7 @@ class TestReconcileEndpoint:
     def test_reconcile_replaces_501_stub(self, client):
         """The old 501 stub should no longer exist."""
         svc_id = self._create_via_api(client).json()["id"]
-        with patch("app.reconciler.reconcile_loop.reconcile_service") as mock:
+        with patch("app.reconciler.reconcile_loop.reconcile_one") as mock:
             mock.return_value = {"phase": "healthy", "error": None}
             resp = client.post(f"/api/services/{svc_id}/reconcile")
             assert resp.status_code != 501

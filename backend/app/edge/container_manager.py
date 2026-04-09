@@ -227,9 +227,17 @@ def _wait_for_running(
 
 
 def reload_caddy(
-    service_id: str, edge_container_name: str, socket_path: str | None = None
+    service_id: str,
+    edge_container_name: str,
+    socket_path: str | None = None,
+    max_retries: int = 5,
+    retry_delay: float = 2.0,
 ) -> str:
-    """Execute `caddy reload` inside the edge container. Returns exec output."""
+    """Execute ``caddy reload`` inside the edge container. Returns exec output.
+
+    Retries several times because Caddy's admin API (:2019) may not be
+    ready immediately after the container starts.
+    """
     container = _find_edge_container(service_id, edge_container_name, socket_path)
     if not container:
         raise RuntimeError(f"Edge container not found for service {service_id}")
@@ -240,14 +248,29 @@ def reload_caddy(
             f"(status={container.status}), cannot reload Caddy"
         )
 
-    exit_code, output = container.exec_run(
-        "caddy reload --config /etc/caddy/Caddyfile"
-    )
-    result = output.decode("utf-8", errors="replace")
-    if exit_code != 0:
-        raise RuntimeError(f"Caddy reload failed (exit {exit_code}): {result}")
-    logger.info("Reloaded Caddy in edge container %s", edge_container_name)
-    return result
+    last_result = ""
+    for attempt in range(max_retries):
+        exit_code, output = container.exec_run(
+            "caddy reload --config /etc/caddy/Caddyfile"
+        )
+        last_result = output.decode("utf-8", errors="replace")
+        if exit_code == 0:
+            logger.info("Reloaded Caddy in edge container %s", edge_container_name)
+            return last_result
+
+        # "connection refused" means the admin API isn't up yet — retry
+        if "connection refused" in last_result and attempt < max_retries - 1:
+            logger.debug(
+                "Caddy admin API not ready in %s, retrying (%d/%d)...",
+                edge_container_name, attempt + 1, max_retries,
+            )
+            time.sleep(retry_delay)
+            continue
+
+        # Any other failure — don't retry
+        break
+
+    raise RuntimeError(f"Caddy reload failed (exit {exit_code}): {last_result}")
 
 
 def detect_tailscale_ip(

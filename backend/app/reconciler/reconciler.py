@@ -215,6 +215,19 @@ def reconcile_service(
             details={"phase": phase, "checks": checks},
         )
 
+        # ── Step 13: Schedule probe retry if HTTPS probe failed ──
+        # When critical checks pass but the HTTPS probe fails (common on
+        # newly-created services), schedule background retries so the
+        # status converges without waiting for the next full sweep.
+        if not checks.get("https_probe_ok") and phase in ("warning", "error"):
+            critical_ok = all(checks.get(c, False) for c in (
+                "edge_container_present", "edge_container_running",
+                "tailscale_ip_present", "cert_present",
+            ))
+            if critical_ok:
+                from app.reconciler.probe_retry import schedule_probe_retry
+                schedule_probe_retry(service.id, socket_path)
+
     except ReconcileError as e:
         logger.error("Reconcile failed for %s: %s", service.id, e)
         status.phase = "failed"

@@ -29,8 +29,8 @@ class TestRenderCaddyfile:
         assert "tls /certs/fullchain.pem /certs/privkey.pem" in result
         assert "reverse_proxy http://nextcloud:80" in result
         assert "header_up X-Forwarded-Proto https" in result
-        assert "header_up X-Forwarded-Host {host}" in result
         assert "header_up X-Real-IP {remote_host}" in result
+        assert "X-Forwarded-Host" not in result
 
     def test_preserve_host_header_enabled(self):
         """When True, Caddy's default behavior preserves the original Host — no override emitted."""

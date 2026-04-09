@@ -106,7 +106,12 @@ class TestCreateEdgeContainer:
 
     @patch("app.edge.container_manager.ensure_edge_image")
     @patch("app.edge.container_manager.docker.DockerClient")
-    def test_creates_host_directories(self, mock_cls, mock_ensure, tmp_path):
+    def test_uses_host_paths_for_mounts(self, mock_cls, mock_ensure, tmp_path):
+        """Directories are created by the reconciler before this is called.
+
+        This test verifies that the provided paths are used for Docker
+        bind mounts without the function trying to create them itself.
+        """
         from app.edge.container_manager import create_edge_container
 
         mock_client = MagicMock()
@@ -123,8 +128,13 @@ class TestCreateEdgeContainer:
             tailscale_state_dir=tmp_path / "tailscale",
         )
 
-        assert (tmp_path / "certs" / "nextcloud.example.com").is_dir()
-        assert (tmp_path / "tailscale" / "edge_nextcloud").is_dir()
+        # Verify mounts use the provided paths
+        call_kwargs = mock_client.containers.create.call_args
+        mounts = call_kwargs.kwargs["mounts"]
+        sources = [m["Source"] for m in mounts]
+        assert str(tmp_path / "generated" / "svc_abc123" / "Caddyfile") in sources
+        assert str(tmp_path / "certs" / "nextcloud.example.com") in sources
+        assert str(tmp_path / "tailscale" / "edge_nextcloud") in sources
 
 
 class TestStartEdge:
@@ -262,6 +272,7 @@ class TestReloadCaddy:
         from app.edge.container_manager import reload_caddy
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         mock_container.exec_run.return_value = (0, b"config reloaded")
         mock_find.return_value = mock_container
 
@@ -278,6 +289,7 @@ class TestReloadCaddy:
         import pytest
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         mock_container.exec_run.return_value = (1, b"error: invalid config")
         mock_find.return_value = mock_container
 
@@ -301,6 +313,7 @@ class TestDetectTailscaleIp:
         from app.edge.container_manager import detect_tailscale_ip
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         mock_container.exec_run.return_value = (0, b"100.64.0.1\n")
         mock_find.return_value = mock_container
 
@@ -313,6 +326,7 @@ class TestDetectTailscaleIp:
         from app.edge.container_manager import detect_tailscale_ip
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         # tailscale ip -4 fails
         status_json = json.dumps({
             "Self": {
@@ -334,6 +348,7 @@ class TestDetectTailscaleIp:
         from app.edge.container_manager import detect_tailscale_ip
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         mock_container.exec_run.side_effect = [
             (1, b""),  # attempt 1: tailscale ip fails
             (1, b""),  # attempt 1: tailscale status fails
@@ -350,6 +365,7 @@ class TestDetectTailscaleIp:
         from app.edge.container_manager import detect_tailscale_ip
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         mock_container.exec_run.return_value = (1, b"not ready")
         mock_find.return_value = mock_container
 
@@ -370,6 +386,7 @@ class TestDetectTailscaleIp:
         from app.edge.container_manager import detect_tailscale_ip
 
         mock_container = MagicMock()
+        mock_container.status = "running"
         # Returns a non-Tailscale IP first, then status with Tailscale IP
         mock_container.exec_run.side_effect = [
             (0, b"192.168.1.1\n"),  # Not a 100.x IP
@@ -494,6 +511,7 @@ class TestDockerSocketConsistency:
 
         mock_reconcile.return_value = {"phase": "healthy", "error": None}
         svc_id = _create_service_via_api(client).json()["id"]
+        mock_reconcile.reset_mock()  # clear any calls from service creation
         client.post(f"/api/services/{svc_id}/reconcile")
 
         mock_reconcile.assert_called_once()

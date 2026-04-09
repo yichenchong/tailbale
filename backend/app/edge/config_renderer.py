@@ -47,7 +47,6 @@ def render_caddyfile(service: Service) -> str:
 
     lines.extend([
         "    header_up X-Forwarded-Proto https",
-        "    header_up X-Forwarded-Host {host}",
         "    header_up X-Real-IP {remote_host}",
         "  }",
     ])
