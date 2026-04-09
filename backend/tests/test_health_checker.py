@@ -1,6 +1,7 @@
 """Tests for health checker subchecks and aggregation."""
 
 import json
+import ssl
 from unittest.mock import MagicMock, patch
 
 import docker.errors
@@ -288,8 +289,9 @@ class TestHttpsProbeHealthCheck:
         )
         assert _check_https_probe(svc, None, "/tmp/certs") is False
 
+    @patch("ssl.create_default_context")
     @patch("httpx.get")
-    def test_https_probe_success(self, mock_get, db_session, tmp_path):
+    def test_https_probe_success(self, mock_get, mock_ssl_ctx, db_session, tmp_path):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -305,6 +307,9 @@ class TestHttpsProbeHealthCheck:
         (cert_dir / "fullchain.pem").write_text("fake")
         (cert_dir / "privkey.pem").write_text("fake")
 
+        mock_ctx = MagicMock(spec=ssl.SSLContext)
+        mock_ssl_ctx.return_value = mock_ctx
+
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_get.return_value = mock_resp
@@ -314,9 +319,47 @@ class TestHttpsProbeHealthCheck:
         mock_get.assert_called_once()
         call_args = mock_get.call_args
         assert "100.64.0.1" in call_args[0][0]
+        # verify= must be the SSLContext, not False
+        assert call_args[1]["verify"] is mock_ctx
 
+    @patch("ssl.create_default_context")
     @patch("httpx.get")
-    def test_https_probe_5xx_is_failure(self, mock_get, tmp_path):
+    def test_https_probe_verifies_tls(self, mock_get, mock_ssl_ctx, tmp_path):
+        """The SSL context is built with the service's fullchain as CA and check_hostname disabled."""
+        from app.health.health_checker import _check_https_probe
+
+        svc = Service(
+            name="Test", upstream_container_id="c1",
+            upstream_container_name="t", upstream_scheme="http",
+            upstream_port=80, hostname="tls.example.com",
+            base_domain="example.com", edge_container_name="e",
+            network_name="n", ts_hostname="ts",
+        )
+
+        cert_dir = tmp_path / "tls.example.com"
+        cert_dir.mkdir()
+        (cert_dir / "fullchain.pem").write_text("fake")
+        (cert_dir / "privkey.pem").write_text("fake")
+
+        mock_ctx = MagicMock(spec=ssl.SSLContext)
+        mock_ssl_ctx.return_value = mock_ctx
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_get.return_value = mock_resp
+
+        _check_https_probe(svc, "100.64.0.1", str(tmp_path))
+
+        # SSL context created with the service's fullchain as CA
+        mock_ssl_ctx.assert_called_once()
+        ca_arg = mock_ssl_ctx.call_args
+        assert "fullchain.pem" in str(ca_arg)
+        # check_hostname must be disabled (connecting by IP, not hostname)
+        assert mock_ctx.check_hostname is False
+
+    @patch("ssl.create_default_context")
+    @patch("httpx.get")
+    def test_https_probe_5xx_is_failure(self, mock_get, mock_ssl_ctx, tmp_path):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -332,14 +375,17 @@ class TestHttpsProbeHealthCheck:
         (cert_dir / "fullchain.pem").write_text("fake")
         (cert_dir / "privkey.pem").write_text("fake")
 
+        mock_ssl_ctx.return_value = MagicMock(spec=ssl.SSLContext)
+
         mock_resp = MagicMock()
         mock_resp.status_code = 502
         mock_get.return_value = mock_resp
 
         assert _check_https_probe(svc, "100.64.0.1", str(tmp_path)) is False
 
+    @patch("ssl.create_default_context")
     @patch("httpx.get")
-    def test_https_probe_connection_error_is_failure(self, mock_get, tmp_path):
+    def test_https_probe_connection_error_is_failure(self, mock_get, mock_ssl_ctx, tmp_path):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -355,6 +401,7 @@ class TestHttpsProbeHealthCheck:
         (cert_dir / "fullchain.pem").write_text("fake")
         (cert_dir / "privkey.pem").write_text("fake")
 
+        mock_ssl_ctx.return_value = MagicMock(spec=ssl.SSLContext)
         mock_get.side_effect = Exception("connection refused")
 
         assert _check_https_probe(svc, "100.64.0.1", str(tmp_path)) is False

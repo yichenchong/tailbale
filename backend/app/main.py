@@ -15,6 +15,7 @@ from app.routers.auth import router as auth_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.discovery import router as discovery_router
 from app.routers.events import router as events_router
+from app.routers.jobs import router as jobs_router
 from app.routers.profiles import router as profiles_router
 from app.routers.services import router as services_router
 from app.routers.settings import router as settings_router
@@ -77,6 +78,7 @@ app.include_router(services_router)
 app.include_router(events_router)
 app.include_router(dashboard_router)
 app.include_router(profiles_router)
+app.include_router(jobs_router)
 
 
 @app.get("/api/health")

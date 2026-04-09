@@ -5,6 +5,7 @@ import {
   Server,
   Search,
   ScrollText,
+  Unplug,
   Settings,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
@@ -15,6 +16,7 @@ const navItems = [
   { to: "/services", label: "Services", icon: Server },
   { to: "/discover", label: "Discover", icon: Search },
   { to: "/events", label: "Events", icon: ScrollText },
+  { to: "/orphan-dns", label: "Orphan DNS", icon: Unplug },
   { to: "/settings", label: "Settings", icon: Settings },
 ]
 

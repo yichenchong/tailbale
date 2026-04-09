@@ -196,26 +196,36 @@ def _check_https_probe(
 ) -> bool:
     """Attempt an actual HTTPS request to the edge container via its Tailscale IP.
 
-    We verify the TLS handshake succeeds and the server returns a non-5xx
-    response.  We disable hostname verification (the cert is for the public
-    hostname, not the IP) and set a short timeout.
+    We verify the TLS handshake succeeds by building an SSL context that
+    trusts the service's own fullchain.pem as the CA bundle.  Hostname
+    verification is disabled because the cert is issued for the public
+    hostname, not the Tailscale IP we connect to.  A short timeout is used.
     """
     if not tailscale_ip:
         return False
 
     cert_path = Path(certs_dir) / service.hostname
-    if not (cert_path / "fullchain.pem").exists():
+    fullchain = cert_path / "fullchain.pem"
+    if not fullchain.exists():
         return False
 
     try:
+        import ssl
+
         import httpx
+
+        # Build an SSL context that actually verifies the TLS certificate
+        # chain against the service's own fullchain.pem.  We disable
+        # hostname checking because we connect by IP, not by hostname.
+        ctx = ssl.create_default_context(cafile=str(fullchain))
+        ctx.check_hostname = False
 
         # Probe via Tailscale IP, setting Host header so Caddy routes correctly
         url = f"https://{tailscale_ip}:443/"
         resp = httpx.get(
             url,
             headers={"Host": service.hostname},
-            verify=False,  # cert is for the hostname, not the IP
+            verify=ctx,
             timeout=5.0,
             follow_redirects=True,
         )

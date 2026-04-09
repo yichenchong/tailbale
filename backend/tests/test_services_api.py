@@ -517,6 +517,49 @@ class TestHostnameValidation:
         assert resp.status_code == 201
 
 
+class TestBaseDomainConsistency:
+    """base_domain must match the hostname suffix."""
+
+    def _create(self, client, hostname="app.example.com", base_domain="example.com"):
+        body = {
+            "name": "App",
+            "upstream_container_id": "abc123",
+            "upstream_container_name": "app",
+            "upstream_scheme": "http",
+            "upstream_port": 80,
+            "hostname": hostname,
+            "base_domain": base_domain,
+        }
+        return client.post("/api/services", json=body)
+
+    def test_consistent_base_domain_accepted(self, client):
+        resp = self._create(client, hostname="app.example.com", base_domain="example.com")
+        assert resp.status_code == 201
+
+    def test_inconsistent_base_domain_rejected(self, client):
+        resp = self._create(client, hostname="app.example.com", base_domain="wrong.com")
+        assert resp.status_code == 422
+        assert "inconsistent" in resp.json()["detail"].lower()
+
+    def test_base_domain_not_suffix_of_hostname_rejected(self, client):
+        resp = self._create(client, hostname="app.example.com", base_domain="ple.com")
+        assert resp.status_code == 422
+
+    def test_deep_hostname_with_matching_subdomain(self, client):
+        resp = self._create(client, hostname="a.b.example.com", base_domain="b.example.com")
+        assert resp.status_code == 201
+
+    def test_deep_hostname_with_root_domain(self, client):
+        """base_domain=example.com is valid for any hostname under it."""
+        resp = self._create(client, hostname="a.b.example.com", base_domain="example.com")
+        assert resp.status_code == 201
+
+    def test_base_domain_equals_hostname_rejected(self, client):
+        """hostname must be a subdomain of base_domain, not equal to it."""
+        resp = self._create(client, hostname="example.com", base_domain="example.com")
+        assert resp.status_code == 422
+
+
 class TestUpdateHostnameValidation:
     """Hostname domain validation on update."""
 
@@ -954,6 +997,32 @@ class TestHostnameChangeCleanup:
         assert updated_cert is not None
         assert updated_cert.hostname == "new.example.com"
 
+    def test_hostname_change_clears_stale_cert_metadata(self, client, db_session):
+        """Hostname change should clear expires_at, last_renewed_at, last_failure, next_retry_at."""
+        from datetime import datetime, timezone
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        cert = Certificate(
+            service_id=svc_id,
+            hostname="app.example.com",
+            expires_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            last_renewed_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            last_failure="old error",
+            next_retry_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+        )
+        db_session.add(cert)
+        db_session.commit()
+
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+
+        db_session.expire_all()
+        updated_cert = db_session.get(Certificate, svc_id)
+        assert updated_cert.hostname == "new.example.com"
+        assert updated_cert.expires_at is None
+        assert updated_cert.last_renewed_at is None
+        assert updated_cert.last_failure is None
+        assert updated_cert.next_retry_at is None
+
     def test_hostname_change_removes_old_cert_dir(self, client, db_session, tmp_data_dir):
         from app.settings_store import set_setting
         custom_certs = str(tmp_data_dir / "certs")
@@ -1194,10 +1263,10 @@ class TestDisableDnsCleanupStructured:
     @patch("app.adapters.dns_reconciler.cleanup_dns_record")
     @patch("app.secrets.read_secret", return_value="cf-token")
     @patch("app.edge.container_manager.stop_edge")
-    def test_disable_emits_warning_on_cf_failure(
+    def test_disable_still_succeeds_on_cf_failure(
         self, mock_stop, mock_secret, mock_cleanup, client, db_session
     ):
-        from app.models.event import Event
+        """Disable proceeds even when cleanup_dns_record reports a failure."""
         from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone123")
@@ -1210,11 +1279,10 @@ class TestDisableDnsCleanupStructured:
         }
 
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
-        client.post(f"/api/services/{svc_id}/disable?cleanup_dns=true")
-
-        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
-        assert len(events) >= 1
-        assert events[-1].level == "warning"
+        resp = client.post(f"/api/services/{svc_id}/disable?cleanup_dns=true")
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+        mock_cleanup.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -1254,10 +1322,10 @@ class TestDeleteDnsCleanupStructured:
     @patch("app.secrets.read_secret", return_value="cf-token")
     @patch("app.edge.network_manager.remove_network")
     @patch("app.edge.container_manager.remove_edge")
-    def test_delete_emits_orphan_warning(
+    def test_delete_calls_cleanup_on_failure(
         self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
     ):
-        from app.models.event import Event
+        """Delete calls cleanup_dns_record and proceeds even on failure."""
         from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone123")
@@ -1270,11 +1338,9 @@ class TestDeleteDnsCleanupStructured:
         }
 
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
-        client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
-
-        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
-        assert len(events) >= 1
-        assert "orphaned" in events[-1].message.lower()
+        resp = client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
+        assert resp.status_code == 204
+        mock_cleanup.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

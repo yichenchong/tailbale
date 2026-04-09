@@ -207,6 +207,17 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
             detail=f"Hostname '{body.hostname}' must end with '.{configured_domain}'",
         )
 
+    # Enforce base_domain consistency: hostname must end with ".{base_domain}"
+    # so the persisted base_domain always reflects the hostname's actual domain.
+    if not body.hostname.endswith(f".{body.base_domain}"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"base_domain '{body.base_domain}' is inconsistent with "
+                f"hostname '{body.hostname}' (hostname must end with '.{body.base_domain}')"
+            ),
+        )
+
     # Validate upstream container + port (spec §17 steps 2-3) — hard failure
     _validate_upstream(db, body.upstream_container_id, body.upstream_port)
 
@@ -317,10 +328,16 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
                 ),
             )
 
-        # Update Certificate row hostname (if exists) so cert renewal targets new hostname
+        # Update Certificate row hostname (if exists) so cert renewal targets new hostname.
+        # Clear stale metadata — the old cert files were deleted, so expiry/renewal
+        # info from the old hostname is meaningless and would be misleading.
         cert = db.get(Certificate, svc.id)
         if cert:
             cert.hostname = body.hostname
+            cert.expires_at = None
+            cert.last_renewed_at = None
+            cert.last_failure = None
+            cert.next_retry_at = None
 
         # Update DnsRecord hostname if the row survived cleanup
         dns_record = db.get(DnsRecord, svc.id)
@@ -405,14 +422,8 @@ async def disable_service(
         zone_id = get_setting(db, "cf_zone_id")
         if cf_token and zone_id:
             result = cleanup_dns_record(db, svc, cf_token, zone_id)
-            if result["deleted_remote"]:
-                _emit_event(db, svc.id, "dns_removed", f"DNS record removed on disable for '{svc.name}'")
-            elif result["error"]:
-                _emit_event(
-                    db, svc.id, "dns_cleanup_failed",
-                    f"Failed to remove DNS record on disable for '{svc.name}': {result['error']}",
-                    level="warning",
-                )
+            # cleanup_dns_record already emits dns_removed or dns_cleanup_failed
+            # events internally — no need to duplicate here.
 
     db.commit()
     db.refresh(svc)
@@ -462,16 +473,9 @@ async def delete_service(
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
         if cf_token and zone_id:
-            result = cleanup_dns_record(db, svc, cf_token, zone_id)
-            if result["error"]:
-                # Emit warning but proceed with deletion — the CASCADE will
-                # remove the local DnsRecord row anyway, and the Cloudflare
-                # record becomes orphaned.  A future cleanup sweep can handle it.
-                _emit_event(
-                    db, svc.id, "dns_cleanup_failed",
-                    f"Cloudflare DNS record may be orphaned for '{svc.name}': {result['error']}",
-                    level="warning",
-                )
+            # cleanup_dns_record emits dns_removed or dns_cleanup_failed
+            # events internally — no duplicate event needed here.
+            cleanup_dns_record(db, svc, cf_token, zone_id)
 
     # Clean up generated configs, certs, and Tailscale state on disk
     runtime = get_runtime_paths(db)

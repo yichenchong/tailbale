@@ -7,6 +7,7 @@ import ServiceDetail from "@/pages/ServiceDetail"
 import Discover from "@/pages/Discover"
 import ExposeService from "@/pages/ExposeService"
 import Events from "@/pages/Events"
+import OrphanDns from "@/pages/OrphanDns"
 import SettingsPage from "@/pages/SettingsPage"
 import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
@@ -63,6 +64,7 @@ function App() {
               <Route path="discover" element={<Discover />} />
               <Route path="expose" element={<ExposeService />} />
               <Route path="events" element={<Events />} />
+              <Route path="orphan-dns" element={<OrphanDns />} />
               <Route path="settings" element={<SettingsPage />} />
             </>
           )}
