@@ -296,6 +296,12 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
         if cert:
             cert.hostname = body.hostname
 
+        # Update DnsRecord hostname if the row survived cleanup (e.g. CF was unreachable)
+        from app.models.dns_record import DnsRecord
+        dns_record = db.get(DnsRecord, svc.id)
+        if dns_record:
+            dns_record.hostname = body.hostname
+
         # Remove old cert files from disk
         import shutil
         from pathlib import Path
