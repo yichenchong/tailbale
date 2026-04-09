@@ -86,10 +86,17 @@ docker run -d \
   -v /mnt/user/appdata/tailbale/data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATA_DIR=/data \
+  -e HOST_DATA_DIR=/mnt/user/appdata/tailbale/data \
   -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
 ```
+
+> **Important**: `HOST_DATA_DIR` must be set to the **host-side** absolute path
+> of the data directory. tailBale creates edge containers via the Docker socket,
+> and Docker resolves bind-mount paths on the host — not inside the orchestrator
+> container. Without this variable, edge container creation will fail with
+> "bind source path does not exist".
 
 Then open `http://<unraid-ip>:6780` to complete setup.
 
@@ -105,9 +112,16 @@ docker run -d \
   -v /mnt/user/appdata/tailbale/data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATA_DIR=/data \
+  -e HOST_DATA_DIR=/mnt/user/appdata/tailbale/data \
   -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
+```
+
+Or use the convenience script (auto-detects the host data path):
+
+```bash
+./redeploy.sh
 ```
 
 ---
@@ -132,12 +146,13 @@ secret will be generated automatically.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
+| `HOST_DATA_DIR` | **Yes** (containerised) | same as `DATA_DIR` | Absolute host-side path to the data directory. Required when running inside Docker so edge container bind mounts resolve correctly. |
+| `DATA_DIR` | No | `/data` | Data directory inside the container |
 | `JWT_EXPIRY_HOURS` | No | `24` | Session duration in hours |
 | `COOKIE_SECURE` | No | `false` | Set `true` if behind HTTPS |
 | `CORS_ORIGINS` | No | `*` | Comma-separated allowed origins |
 | `PORT` | No | `8080` | Container listen port |
 | `HOST` | No | `0.0.0.0` | Listen address |
-| `DATA_DIR` | No | `/data` | Data directory |
 | `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path |
 
 ## Updating
@@ -169,6 +184,7 @@ Then update the edge image reference in the orchestrator's container_manager to 
 
 ## Troubleshooting
 
+- **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the absolute host path of your data directory (e.g. `/mnt/user/appdata/tailbale/data`). Docker Compose sets this automatically via `${PWD}/data`; for `docker run` you must pass it explicitly.
 - **Can't connect to Docker**: Ensure `/var/run/docker.sock` is mounted and the container user has access
 - **Edge container won't start**: Check Tailscale auth key is valid and reusable
 - **Certs not issuing**: Verify Cloudflare API token has DNS:Edit permission for your zone
