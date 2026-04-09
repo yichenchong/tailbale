@@ -14,6 +14,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - DATA_DIR=/data
+      - HOST_DATA_DIR=${HOST_DATA_DIR:-${PWD}/data}
     restart: unless-stopped
 
   frontend:

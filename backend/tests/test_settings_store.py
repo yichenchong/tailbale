@@ -67,3 +67,47 @@ class TestRuntimePaths:
         paths = get_runtime_paths(db_session)
         assert paths["generated_dir"] == "/custom/generated"
         assert paths["certs_dir"] == "/custom/certs"
+
+    def test_host_paths_same_as_internal_when_no_host_data_dir(self, db_session):
+        """Without HOST_DATA_DIR, host paths equal internal paths."""
+        from app.config import settings as app_settings
+        from app.settings_store import get_runtime_paths
+
+        original = app_settings.host_data_dir
+        app_settings.host_data_dir = None
+        try:
+            paths = get_runtime_paths(db_session)
+            assert paths["host_generated_dir"] == paths["generated_dir"]
+            assert paths["host_certs_dir"] == paths["certs_dir"]
+            assert paths["host_tailscale_state_dir"] == paths["tailscale_state_dir"]
+        finally:
+            app_settings.host_data_dir = original
+
+    def test_host_paths_translated_when_host_data_dir_set(self, db_session):
+        """With HOST_DATA_DIR, host paths replace data_dir prefix."""
+        from pathlib import Path, PurePosixPath
+
+        from app.config import settings as app_settings
+        from app.settings_store import get_runtime_paths
+
+        original_host = app_settings.host_data_dir
+        original_data = app_settings.data_dir
+        app_settings.data_dir = Path("/data")
+        app_settings.host_data_dir = Path("/home/user/tailbale/data")
+        try:
+            paths = get_runtime_paths(db_session)
+            data_str = str(Path("/data"))
+            host_str = str(Path("/home/user/tailbale/data"))
+            # Internal paths use data_dir
+            assert paths["generated_dir"].startswith(data_str)
+            # Host paths use the host_data_dir
+            assert paths["host_generated_dir"].startswith(host_str)
+            assert paths["host_certs_dir"].startswith(host_str)
+            assert paths["host_tailscale_state_dir"].startswith(host_str)
+            # The sub-path portion is preserved
+            assert paths["host_generated_dir"].endswith("generated")
+            assert paths["host_certs_dir"].endswith("certs")
+            assert paths["host_tailscale_state_dir"].endswith("tailscale")
+        finally:
+            app_settings.data_dir = original_data
+            app_settings.host_data_dir = original_host

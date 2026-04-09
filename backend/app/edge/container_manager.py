@@ -52,7 +52,14 @@ def create_edge_container(
     socket_path: str | None = None,
     edge_image: str = EDGE_IMAGE,
 ) -> str:
-    """Create an edge container for a service. Returns the container ID."""
+    """Create an edge container for a service. Returns the container ID.
+
+    The *_dir paths must be resolvable by the **Docker host**.  When tailBale
+    runs inside a container that shares the host's Docker socket, these must
+    be the host-side paths (see ``HOST_DATA_DIR``).  The caller (reconciler)
+    is responsible for creating directories and writing files at the internal
+    (container-local) equivalents before calling this function.
+    """
     generated_dir = Path(generated_dir)
     certs_dir = Path(certs_dir)
     tailscale_state_dir = Path(tailscale_state_dir)
@@ -60,27 +67,10 @@ def create_edge_container(
     ensure_edge_image(socket_path)
     client = _get_client(socket_path)
 
-    # Prepare mount paths
+    # Prepare mount paths (these are host-side paths for Docker bind mounts)
     caddyfile_path = str(generated_dir / service.id / "Caddyfile")
     cert_dir = str(certs_dir / service.hostname)
     ts_state_dir = str(tailscale_state_dir / service.edge_container_name)
-
-    # Ensure host directories exist
-    Path(cert_dir).mkdir(parents=True, exist_ok=True)
-    Path(ts_state_dir).mkdir(parents=True, exist_ok=True)
-
-    # Ensure Caddyfile exists; Docker bind mounts fail if the source is missing.
-    caddyfile = Path(caddyfile_path)
-    if not caddyfile.exists():
-        caddyfile.parent.mkdir(parents=True, exist_ok=True)
-        placeholder = (
-            "# Placeholder — will be replaced by reconciler\n"
-            ":443 {\n"
-            '    respond "Service starting..." 503\n'
-            "}\n"
-        )
-        caddyfile.write_text(placeholder)
-        logger.warning("Caddyfile did not exist; created placeholder at %s", caddyfile_path)
 
     mounts = [
         Mount(target="/etc/caddy/Caddyfile", source=caddyfile_path, type="bind", read_only=True),

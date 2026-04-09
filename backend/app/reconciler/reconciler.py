@@ -94,9 +94,16 @@ def reconcile_service(
         certs_dir = Path(runtime["certs_dir"])
         ts_state_dir = Path(runtime["tailscale_state_dir"])
 
+        # Host-side equivalents for Docker bind mounts (differ when
+        # HOST_DATA_DIR is set, i.e. tailBale runs inside a container).
+        host_generated_dir = Path(runtime["host_generated_dir"])
+        host_certs_dir = Path(runtime["host_certs_dir"])
+        host_ts_state_dir = Path(runtime["host_tailscale_state_dir"])
+
         # ── Step 2: Ensure generated directories ──
         (generated_dir / service.id).mkdir(parents=True, exist_ok=True)
         (certs_dir / service.hostname).mkdir(parents=True, exist_ok=True)
+        (ts_state_dir / service.edge_container_name).mkdir(parents=True, exist_ok=True)
 
         # ── Step 3: Ensure Docker network + app connected ──
         _update_phase(db, service.id, "creating_network", "Ensuring Docker network")
@@ -132,7 +139,8 @@ def reconcile_service(
         container = _find_edge_container(service.id, service.edge_container_name, socket_path)
         if container is None:
             container_id = create_edge_container(
-                service, ts_authkey, generated_dir, certs_dir, ts_state_dir,
+                service, ts_authkey,
+                host_generated_dir, host_certs_dir, host_ts_state_dir,
                 socket_path,
             )
             status.edge_container_id = container_id

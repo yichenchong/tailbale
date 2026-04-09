@@ -600,7 +600,8 @@ async def recreate_edge_endpoint(service_id: str, db: Session = Depends(get_db))
         runtime = get_runtime_paths(db)
         container_id = do_recreate(
             svc, ts_authkey,
-            runtime["generated_dir"], runtime["certs_dir"], runtime["tailscale_state_dir"],
+            runtime["host_generated_dir"], runtime["host_certs_dir"],
+            runtime["host_tailscale_state_dir"],
             _get_docker_socket(db),
         )
 
@@ -815,8 +816,8 @@ async def update_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
             ensure_edge_image(socket)
             container_id = recreate_edge(
                 svc, ts_authkey,
-                runtime["generated_dir"], runtime["certs_dir"],
-                runtime["tailscale_state_dir"],
+                runtime["host_generated_dir"], runtime["host_certs_dir"],
+                runtime["host_tailscale_state_dir"],
                 socket,
             )
 

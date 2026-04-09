@@ -26,6 +26,11 @@ class Settings(BaseSettings):
 
     # Paths
     data_dir: Path = Path("./data")
+    # HOST_DATA_DIR: the path to the data directory **on the Docker host**.
+    # When tailBale runs inside a container that mounts the Docker socket,
+    # bind-mount source paths must be expressed in the host's filesystem.
+    # If unset, defaults to data_dir (fine for non-containerised installs).
+    host_data_dir: Path | None = None
 
     # Docker
     docker_socket: str = "unix:///var/run/docker.sock"
