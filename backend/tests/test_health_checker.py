@@ -1,7 +1,6 @@
 """Tests for health checker subchecks and aggregation."""
 
 import json
-import ssl
 from unittest.mock import MagicMock, patch
 
 import docker.errors
@@ -289,9 +288,20 @@ class TestHttpsProbeHealthCheck:
         )
         assert _check_https_probe(svc, None, "/tmp/certs") is False
 
-    @patch("ssl.create_default_context")
-    @patch("httpx.get")
-    def test_https_probe_success(self, mock_get, mock_ssl_ctx, db_session, tmp_path):
+    def test_https_probe_false_when_no_client(self):
+        from app.health.health_checker import _check_https_probe
+
+        svc = Service(
+            name="Test", upstream_container_id="c1",
+            upstream_container_name="t", upstream_scheme="http",
+            upstream_port=80, hostname="t.example.com",
+            base_domain="example.com", edge_container_name="e",
+            network_name="n", ts_hostname="ts",
+        )
+        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=None) is False
+
+    def test_https_probe_success(self):
+        """Probe succeeds when wget exits 0 inside edge container."""
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -302,64 +312,43 @@ class TestHttpsProbeHealthCheck:
             network_name="n", ts_hostname="ts",
         )
 
-        cert_dir = tmp_path / "probe.example.com"
-        cert_dir.mkdir()
-        (cert_dir / "fullchain.pem").write_text("fake")
-        (cert_dir / "privkey.pem").write_text("fake")
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = (0, b"")
+        mock_client.containers.get.return_value = mock_container
 
-        mock_ctx = MagicMock(spec=ssl.SSLContext)
-        mock_ssl_ctx.return_value = mock_ctx
-
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_get.return_value = mock_resp
-
-        result = _check_https_probe(svc, "100.64.0.1", str(tmp_path))
+        result = _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
         assert result is True
-        mock_get.assert_called_once()
-        call_args = mock_get.call_args
-        assert "100.64.0.1" in call_args[0][0]
-        # verify= must be the SSLContext, not False
-        assert call_args[1]["verify"] is mock_ctx
+        mock_client.containers.get.assert_called_once_with("e")
 
-    @patch("ssl.create_default_context")
-    @patch("httpx.get")
-    def test_https_probe_verifies_tls(self, mock_get, mock_ssl_ctx, tmp_path):
-        """The SSL context is built with the service's fullchain as CA and check_hostname disabled."""
+    def test_https_probe_runs_wget_in_edge_container(self):
+        """Probe execs wget inside the edge container, not from the orchestrator."""
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
             upstream_container_name="t", upstream_scheme="http",
             upstream_port=80, hostname="tls.example.com",
-            base_domain="example.com", edge_container_name="e",
+            base_domain="example.com", edge_container_name="edge_tls",
             network_name="n", ts_hostname="ts",
         )
 
-        cert_dir = tmp_path / "tls.example.com"
-        cert_dir.mkdir()
-        (cert_dir / "fullchain.pem").write_text("fake")
-        (cert_dir / "privkey.pem").write_text("fake")
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = (0, b"")
+        mock_client.containers.get.return_value = mock_container
 
-        mock_ctx = MagicMock(spec=ssl.SSLContext)
-        mock_ssl_ctx.return_value = mock_ctx
+        _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 200
-        mock_get.return_value = mock_resp
+        mock_container.exec_run.assert_called_once()
+        cmd = mock_container.exec_run.call_args[0][0]
+        assert "wget" in cmd
+        assert "https://localhost:443/" in cmd
 
-        _check_https_probe(svc, "100.64.0.1", str(tmp_path))
-
-        # SSL context created with the service's fullchain as CA
-        mock_ssl_ctx.assert_called_once()
-        ca_arg = mock_ssl_ctx.call_args
-        assert "fullchain.pem" in str(ca_arg)
-        # check_hostname must be disabled (connecting by IP, not hostname)
-        assert mock_ctx.check_hostname is False
-
-    @patch("ssl.create_default_context")
-    @patch("httpx.get")
-    def test_https_probe_5xx_is_failure(self, mock_get, mock_ssl_ctx, tmp_path):
+    def test_https_probe_5xx_is_failure(self):
+        """wget output containing 5xx status means the probe failed."""
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -370,22 +359,37 @@ class TestHttpsProbeHealthCheck:
             network_name="n", ts_hostname="ts",
         )
 
-        cert_dir = tmp_path / "fail.example.com"
-        cert_dir.mkdir()
-        (cert_dir / "fullchain.pem").write_text("fake")
-        (cert_dir / "privkey.pem").write_text("fake")
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        # wget exit 8 = server error, output contains 502
+        mock_container.exec_run.return_value = (8, b"502 Bad Gateway")
+        mock_client.containers.get.return_value = mock_container
 
-        mock_ssl_ctx.return_value = MagicMock(spec=ssl.SSLContext)
+        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
 
-        mock_resp = MagicMock()
-        mock_resp.status_code = 502
-        mock_get.return_value = mock_resp
+    def test_https_probe_4xx_is_success(self):
+        """4xx from upstream (e.g. auth required) still means Caddy is serving."""
+        from app.health.health_checker import _check_https_probe
 
-        assert _check_https_probe(svc, "100.64.0.1", str(tmp_path)) is False
+        svc = Service(
+            name="Test", upstream_container_id="c1",
+            upstream_container_name="t", upstream_scheme="http",
+            upstream_port=80, hostname="auth.example.com",
+            base_domain="example.com", edge_container_name="e",
+            network_name="n", ts_hostname="ts",
+        )
 
-    @patch("ssl.create_default_context")
-    @patch("httpx.get")
-    def test_https_probe_connection_error_is_failure(self, mock_get, mock_ssl_ctx, tmp_path):
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        # wget exit 8 = server error, but output is 401 (not 5xx)
+        mock_container.exec_run.return_value = (8, b"401 Unauthorized")
+        mock_client.containers.get.return_value = mock_container
+
+        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is True
+
+    def test_https_probe_connection_error_is_failure(self):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -396,15 +400,32 @@ class TestHttpsProbeHealthCheck:
             network_name="n", ts_hostname="ts",
         )
 
-        cert_dir = tmp_path / "err.example.com"
-        cert_dir.mkdir()
-        (cert_dir / "fullchain.pem").write_text("fake")
-        (cert_dir / "privkey.pem").write_text("fake")
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        # wget exit 4 = network failure
+        mock_container.exec_run.return_value = (4, b"connection refused")
+        mock_client.containers.get.return_value = mock_container
 
-        mock_ssl_ctx.return_value = MagicMock(spec=ssl.SSLContext)
-        mock_get.side_effect = Exception("connection refused")
+        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
 
-        assert _check_https_probe(svc, "100.64.0.1", str(tmp_path)) is False
+    def test_https_probe_container_not_running(self):
+        from app.health.health_checker import _check_https_probe
+
+        svc = Service(
+            name="Test", upstream_container_id="c1",
+            upstream_container_name="t", upstream_scheme="http",
+            upstream_port=80, hostname="t.example.com",
+            base_domain="example.com", edge_container_name="e",
+            network_name="n", ts_hostname="ts",
+        )
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "restarting"
+        mock_client.containers.get.return_value = mock_container
+
+        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
 
     def test_https_probe_is_warning_check(self):
         from app.health.health_checker import CRITICAL_CHECKS, WARNING_CHECKS

@@ -113,7 +113,7 @@ def run_health_checks(
     checks["caddy_config_present"] = _check_caddy_config(service, generated_dir)
 
     # --- HTTPS probe (spec §18.1) ---
-    checks["https_probe_ok"] = _check_https_probe(service, current_ip, certs_dir)
+    checks["https_probe_ok"] = _check_https_probe(service, current_ip, certs_dir, client)
 
     return checks
 
@@ -193,46 +193,58 @@ def _check_caddy_config(service: Service, generated_dir: str | Path) -> bool:
 
 
 def _check_https_probe(
-    service: "Service", tailscale_ip: str | None, certs_dir: str | Path,
+    service: "Service",
+    tailscale_ip: str | None,
+    certs_dir: str | Path,
+    client: "docker.DockerClient | None" = None,
 ) -> bool:
-    """Attempt an actual HTTPS request to the edge container via its Tailscale IP.
+    """Verify that Caddy inside the edge container is serving HTTPS.
 
-    We verify the TLS handshake succeeds by building an SSL context that
-    trusts the service's own fullchain.pem as the CA bundle.  Hostname
-    verification is disabled because the cert is issued for the public
-    hostname, not the Tailscale IP we connect to.  A short timeout is used.
+    The probe runs ``wget`` **inside the edge container** rather than
+    connecting from the orchestrator.  This avoids the problem where the
+    orchestrator container can't reach Tailscale IPs (only edge containers
+    are on the tailnet).
+
+    We exec ``wget --spider --no-check-certificate https://localhost:443/``
+    which verifies Caddy is listening, TLS-terminating, and proxying.
+    ``--no-check-certificate`` is acceptable here because the separate
+    ``cert_present`` / ``cert_not_expiring`` checks already validate the
+    certificate itself.
     """
     if not tailscale_ip:
         return False
 
-    cert_path = Path(certs_dir) / service.hostname
-    fullchain = cert_path / "fullchain.pem"
-    if not fullchain.exists():
+    if not client:
         return False
 
     try:
-        import ssl
+        container = client.containers.get(service.edge_container_name)
+        if container.status != "running":
+            return False
 
-        import httpx
-
-        # Build an SSL context that actually verifies the TLS certificate
-        # chain against the service's own fullchain.pem.  We disable
-        # hostname checking because we connect by IP, not by hostname.
-        ctx = ssl.create_default_context(cafile=str(fullchain))
-        ctx.check_hostname = False
-
-        # Probe via Tailscale IP, setting Host header so Caddy routes correctly
-        url = f"https://{tailscale_ip}:443/"
-        resp = httpx.get(
-            url,
-            headers={"Host": service.hostname},
-            verify=ctx,
-            timeout=5.0,
-            follow_redirects=True,
+        exit_code, output = container.exec_run(
+            [
+                "wget", "--spider", "--quiet",
+                "--no-check-certificate", "--timeout=5",
+                "-O", "/dev/null",
+                f"https://localhost:443/",
+            ],
+            environment={"HOME": "/tmp"},
         )
-        # Any response that isn't a 5xx means the edge is serving
-        return resp.status_code < 500
+        if exit_code == 0:
+            return True
+
+        # wget exit code 8 = server issued an error response (4xx/5xx).
+        # 4xx is fine (upstream may require auth); 5xx means broken.
+        # wget --spider treats redirects as success (exit 0).
+        # Exit code 8 covers HTTP errors; check output for 5xx.
+        out_text = output.decode("utf-8", errors="replace") if output else ""
+        if exit_code == 8 and "500" not in out_text and "502" not in out_text and "503" not in out_text:
+            return True
+
+        return False
     except Exception:
+        logger.debug("HTTPS probe exec failed for %s", service.edge_container_name, exc_info=True)
         return False
 
 

@@ -31,6 +31,15 @@ def render_caddyfile(service: Service) -> str:
 
     upstream = f"{service.upstream_container_name}:{service.upstream_port}"
 
+    # Caddy's reverse_proxy defaults to plain HTTP, so we only need the
+    # scheme prefix when the upstream actually speaks HTTPS.  Omitting the
+    # scheme for HTTP avoids Caddy's scheme/port conflict check (it rejects
+    # ``http://<host>:443`` because 443 is the conventional HTTPS port).
+    if service.upstream_scheme == "https":
+        upstream_addr = f"https://{upstream}"
+    else:
+        upstream_addr = upstream  # plain address — Caddy uses HTTP by default
+
     lines = [
         "{",
         "  auto_https off",
@@ -39,7 +48,7 @@ def render_caddyfile(service: Service) -> str:
         f"https://{service.hostname} {{",
         "  tls /certs/fullchain.pem /certs/privkey.pem",
         "",
-        f"  reverse_proxy {service.upstream_scheme}://{upstream} {{",
+        f"  reverse_proxy {upstream_addr} {{",
     ]
 
     if preserve_host_block:

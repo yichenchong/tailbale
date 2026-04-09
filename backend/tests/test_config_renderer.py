@@ -27,7 +27,7 @@ class TestRenderCaddyfile:
         assert "auto_https off" in result
         assert "https://nextcloud.example.com" in result
         assert "tls /certs/fullchain.pem /certs/privkey.pem" in result
-        assert "reverse_proxy http://nextcloud:80" in result
+        assert "reverse_proxy nextcloud:80" in result
         assert "header_up X-Forwarded-Proto https" in result
         assert "header_up X-Real-IP {remote_host}" in result
         assert "X-Forwarded-Host" not in result
@@ -84,7 +84,7 @@ class TestRenderCaddyfile:
         svc = _make_service(upstream_port=8096)
         result = render_caddyfile(svc)
 
-        assert "reverse_proxy http://nextcloud:8096" in result
+        assert "reverse_proxy nextcloud:8096" in result
 
     def test_different_hostname(self):
         from app.edge.config_renderer import render_caddyfile
@@ -109,7 +109,28 @@ class TestRenderCaddyfile:
         svc = _make_service(upstream_container_name="my-jellyfin-app")
         result = render_caddyfile(svc)
 
-        assert "reverse_proxy http://my-jellyfin-app:80" in result
+        assert "reverse_proxy my-jellyfin-app:80" in result
+
+    def test_http_scheme_with_port_443_omits_scheme(self):
+        """Caddy rejects http:// with port 443. Omitting scheme avoids the conflict."""
+        from app.edge.config_renderer import render_caddyfile
+
+        svc = _make_service(upstream_scheme="http", upstream_port=443)
+        result = render_caddyfile(svc)
+
+        # No scheme prefix — Caddy defaults to HTTP, avoiding the conflict
+        assert "reverse_proxy nextcloud:443" in result
+        assert "http://nextcloud:443" not in result
+        assert "https://nextcloud:443" not in result
+
+    def test_https_scheme_keeps_prefix(self):
+        """When upstream is genuinely HTTPS, the scheme prefix is included."""
+        from app.edge.config_renderer import render_caddyfile
+
+        svc = _make_service(upstream_scheme="https", upstream_port=8443)
+        result = render_caddyfile(svc)
+
+        assert "reverse_proxy https://nextcloud:8443" in result
 
 
 class TestWriteCaddyfile:
