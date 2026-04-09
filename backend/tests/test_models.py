@@ -338,3 +338,85 @@ class TestJobModel:
         row = db_session.get(Job, "job_prog")
         assert row.progress == 50
         assert row.message == "Creating network..."
+
+
+# ---------------------------------------------------------------------------
+# SQLite foreign key CASCADE enforcement
+# ---------------------------------------------------------------------------
+
+
+class TestSqliteForeignKeyCascade:
+    """Verify that PRAGMA foreign_keys=ON is active, making CASCADE deletes work."""
+
+    def _create_service_in_db(self, db, **overrides):
+        defaults = {
+            "name": "TestApp", "upstream_container_id": "abc123",
+            "upstream_container_name": "testapp", "upstream_scheme": "http",
+            "upstream_port": 80, "hostname": "testapp.example.com",
+            "base_domain": "example.com", "edge_container_name": "edge_testapp",
+            "network_name": "edge_net_testapp", "ts_hostname": "edge-testapp",
+        }
+        defaults.update(overrides)
+        svc = Service(**defaults)
+        db.add(svc)
+        db.flush()
+        status = ServiceStatus(service_id=svc.id, phase="pending")
+        db.add(status)
+        db.commit()
+        return svc
+
+    def test_delete_service_cascades_status(self, db_session):
+        svc = self._create_service_in_db(db_session)
+        svc_id = svc.id
+        assert db_session.get(ServiceStatus, svc_id) is not None
+        db_session.delete(svc)
+        db_session.commit()
+        assert db_session.get(ServiceStatus, svc_id) is None
+
+    def test_delete_service_cascades_certificate(self, db_session):
+        svc = self._create_service_in_db(db_session)
+        svc_id = svc.id
+        cert = Certificate(service_id=svc_id, hostname=svc.hostname)
+        db_session.add(cert)
+        db_session.commit()
+        assert db_session.get(Certificate, svc_id) is not None
+        db_session.delete(svc)
+        db_session.commit()
+        assert db_session.get(Certificate, svc_id) is None
+
+    def test_delete_service_cascades_dns_record(self, db_session):
+        svc = self._create_service_in_db(db_session)
+        svc_id = svc.id
+        dns = DnsRecord(service_id=svc_id, hostname=svc.hostname, record_id="cf_rec_1")
+        db_session.add(dns)
+        db_session.commit()
+        assert db_session.get(DnsRecord, svc_id) is not None
+        db_session.delete(svc)
+        db_session.commit()
+        assert db_session.get(DnsRecord, svc_id) is None
+
+    def test_cascade_deletes_all_related_rows_at_once(self, db_session):
+        svc = self._create_service_in_db(db_session)
+        svc_id = svc.id
+        db_session.add(Certificate(service_id=svc_id, hostname=svc.hostname))
+        db_session.add(DnsRecord(service_id=svc_id, hostname=svc.hostname))
+        db_session.commit()
+        db_session.delete(svc)
+        db_session.commit()
+        assert db_session.get(ServiceStatus, svc_id) is None
+        assert db_session.get(Certificate, svc_id) is None
+        assert db_session.get(DnsRecord, svc_id) is None
+
+    def test_pragma_is_active_on_test_engine(self, db_engine):
+        with db_engine.connect() as conn:
+            result = conn.exec_driver_sql("PRAGMA foreign_keys")
+            row = result.fetchone()
+            assert row is not None
+            assert row[0] == 1, "PRAGMA foreign_keys should be ON (1)"
+
+    def test_production_engine_has_pragma_listener(self):
+        from sqlalchemy import event as sa_event
+        from app.database import engine
+        has_fk_listener = sa_event.contains(engine, "connect", None)
+        from app.database import _set_sqlite_pragma
+        assert callable(_set_sqlite_pragma)

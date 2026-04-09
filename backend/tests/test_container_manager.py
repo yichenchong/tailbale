@@ -379,3 +379,228 @@ class TestDetectTailscaleIp:
 
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.5"
+
+
+# ---------------------------------------------------------------------------
+# Docker socket consistency across endpoints
+# ---------------------------------------------------------------------------
+
+
+def _create_service_via_api(client, **overrides):
+    """Create a service through the API."""
+    body = {
+        "name": "App",
+        "upstream_container_id": "abc123",
+        "upstream_container_name": "app",
+        "upstream_scheme": "http",
+        "upstream_port": 80,
+        "hostname": "app.example.com",
+        "base_domain": "example.com",
+    }
+    body.update(overrides)
+    return client.post("/api/services", json=body)
+
+
+class TestDockerSocketConsistency:
+    """Verify that action endpoints pass the configured Docker socket to helpers."""
+
+    @patch("app.edge.container_manager.reload_caddy")
+    def test_reload_passes_socket(self, mock_reload, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        mock_reload.return_value = "ok"
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.post(f"/api/services/{svc_id}/reload")
+
+        mock_reload.assert_called_once()
+        call_args = mock_reload.call_args
+        assert call_args[0][2] == "unix:///custom/docker.sock"
+
+    @patch("app.edge.container_manager.restart_edge")
+    def test_restart_passes_socket(self, mock_restart, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.post(f"/api/services/{svc_id}/restart-edge")
+
+        mock_restart.assert_called_once()
+        call_args = mock_restart.call_args
+        assert call_args[0][2] == "unix:///custom/docker.sock"
+
+    @patch("app.edge.container_manager.get_edge_logs")
+    def test_logs_passes_socket(self, mock_logs, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        mock_logs.return_value = "some logs"
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.get(f"/api/services/{svc_id}/logs/edge")
+
+        mock_logs.assert_called_once()
+        call_kwargs = mock_logs.call_args
+        assert call_kwargs.kwargs.get("socket_path") == "unix:///custom/docker.sock"
+
+    @patch("app.edge.container_manager.stop_edge")
+    def test_disable_passes_socket(self, mock_stop, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.post(f"/api/services/{svc_id}/disable")
+
+        mock_stop.assert_called_once()
+        call_args = mock_stop.call_args
+        assert call_args[0][2] == "unix:///custom/docker.sock"
+
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_passes_socket(self, mock_remove_edge, mock_remove_net, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.delete(f"/api/services/{svc_id}")
+
+        mock_remove_edge.assert_called_once()
+        assert mock_remove_edge.call_args[0][2] == "unix:///custom/docker.sock"
+        mock_remove_net.assert_called_once()
+        assert mock_remove_net.call_args[0][1] == "unix:///custom/docker.sock"
+
+    @patch("app.edge.container_manager.get_edge_version")
+    def test_edge_version_passes_socket(self, mock_ver, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        mock_ver.return_value = "0.2.0"
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.get(f"/api/services/{svc_id}/edge-version")
+
+        mock_ver.assert_called_once()
+        assert mock_ver.call_args[0][2] == "unix:///custom/docker.sock"
+
+    @patch("app.reconciler.reconcile_loop.reconcile_one")
+    def test_manual_reconcile_passes_socket(self, mock_reconcile, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        mock_reconcile.return_value = {"phase": "healthy", "error": None}
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.post(f"/api/services/{svc_id}/reconcile")
+
+        mock_reconcile.assert_called_once()
+        assert mock_reconcile.call_args.kwargs.get("socket_path") == "unix:///custom/docker.sock"
+
+    def test_default_socket_returns_default_value(self, db_session):
+        from app.routers.services import _get_docker_socket
+        result = _get_docker_socket(db_session)
+        assert result == "unix:///var/run/docker.sock"
+
+    @patch("app.secrets.read_secret")
+    @patch("app.edge.container_manager.recreate_edge")
+    def test_recreate_passes_socket(self, mock_recreate, mock_secret, client, db_session):
+        from app.settings_store import set_setting
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+
+        mock_secret.return_value = "tskey-auth-test"
+        mock_recreate.return_value = "new_id"
+
+        svc_id = _create_service_via_api(client).json()["id"]
+        client.post(f"/api/services/{svc_id}/recreate-edge")
+
+        mock_recreate.assert_called_once()
+        call_args = mock_recreate.call_args[0]
+        assert call_args[-1] == "unix:///custom/docker.sock"
+
+
+# ---------------------------------------------------------------------------
+# String-vs-Path acceptance
+# ---------------------------------------------------------------------------
+
+
+class TestStringPathAcceptance:
+    """create_edge_container and recreate_edge should accept both str and Path."""
+
+    @patch("app.edge.container_manager.ensure_edge_image")
+    @patch("app.edge.container_manager._get_client")
+    def test_create_accepts_strings(self, mock_get_client, mock_ensure, tmp_path):
+        from app.edge.container_manager import create_edge_container
+
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_client.containers.create.return_value = MagicMock(id="c1")
+
+        svc = MagicMock()
+        svc.id = "svc_1"
+        svc.hostname = "app.example.com"
+        svc.edge_container_name = "edge_app"
+        svc.network_name = "edge_net_app"
+        svc.ts_hostname = "edge-app"
+
+        result = create_edge_container(
+            svc, "tskey-test",
+            str(tmp_path / "gen"), str(tmp_path / "certs"), str(tmp_path / "ts"),
+        )
+        assert result == "c1"
+        mock_client.containers.create.assert_called_once()
+
+    @patch("app.edge.container_manager.ensure_edge_image")
+    @patch("app.edge.container_manager._get_client")
+    def test_create_accepts_paths(self, mock_get_client, mock_ensure, tmp_path):
+        from app.edge.container_manager import create_edge_container
+
+        mock_client = MagicMock()
+        mock_get_client.return_value = mock_client
+        mock_client.containers.create.return_value = MagicMock(id="c2")
+
+        svc = MagicMock()
+        svc.id = "svc_2"
+        svc.hostname = "app.example.com"
+        svc.edge_container_name = "edge_app"
+        svc.network_name = "edge_net_app"
+        svc.ts_hostname = "edge-app"
+
+        result = create_edge_container(
+            svc, "tskey-test",
+            tmp_path / "gen", tmp_path / "certs", tmp_path / "ts",
+        )
+        assert result == "c2"
+
+    @patch("app.edge.container_manager.start_edge")
+    @patch("app.edge.container_manager.create_edge_container", return_value="c3")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_recreate_accepts_strings(self, mock_rm, mock_create, mock_start, tmp_path):
+        from app.edge.container_manager import recreate_edge
+
+        svc = MagicMock()
+        svc.id = "svc_3"
+        svc.edge_container_name = "edge_app"
+
+        result = recreate_edge(
+            svc, "tskey-test",
+            str(tmp_path / "gen"), str(tmp_path / "certs"), str(tmp_path / "ts"),
+        )
+        assert result == "c3"
+
+    def test_type_hints_accept_str_or_path(self):
+        import inspect
+        from app.edge.container_manager import create_edge_container, recreate_edge
+
+        sig_create = inspect.signature(create_edge_container)
+        sig_recreate = inspect.signature(recreate_edge)
+        for param_name in ("generated_dir", "certs_dir", "tailscale_state_dir"):
+            annotation = str(sig_create.parameters[param_name].annotation)
+            assert "str" in annotation and "Path" in annotation, \
+                f"create_edge_container.{param_name} should accept str | Path"
+            annotation_r = str(sig_recreate.parameters[param_name].annotation)
+            assert "str" in annotation_r and "Path" in annotation_r, \
+                f"recreate_edge.{param_name} should accept str | Path"

@@ -265,3 +265,28 @@ class TestPasswordSalt:
             json={"username": "admin", "password": "mysecretpass123-wrong"},
         )
         assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Deprecation warning regression check
+# ---------------------------------------------------------------------------
+
+
+class TestNoDeprecationWarnings:
+    def test_no_per_request_cookies_pattern(self):
+        """Verify test_auth_api.py doesn't use deprecated per-request cookies= param."""
+        import ast
+        from pathlib import Path
+
+        test_file = Path(__file__)
+        source = test_file.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                for kw in node.keywords:
+                    if kw.arg == "cookies":
+                        assert False, (
+                            f"Found cookies= keyword arg at line {kw.lineno}. "
+                            "Use client.cookies.set() instead."
+                        )

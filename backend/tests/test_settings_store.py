@@ -38,3 +38,32 @@ class TestSettingsStore:
         assert result["setup_complete"] == "true"
         # Non-overridden keys still have defaults
         assert result["acme_email"] == DEFAULTS["acme_email"]
+
+
+# ---------------------------------------------------------------------------
+# DB-backed runtime paths
+# ---------------------------------------------------------------------------
+
+
+class TestRuntimePaths:
+    def test_defaults_fall_back_to_config(self, db_session):
+        from app.settings_store import get_runtime_paths
+
+        paths = get_runtime_paths(db_session)
+        assert "generated_dir" in paths
+        assert "certs_dir" in paths
+        assert "tailscale_state_dir" in paths
+        assert "docker_socket" in paths
+        for v in paths.values():
+            assert v
+
+    def test_db_overrides_config(self, db_session):
+        from app.settings_store import get_runtime_paths, set_setting
+
+        set_setting(db_session, "generated_root", "/custom/generated")
+        set_setting(db_session, "cert_root", "/custom/certs")
+        db_session.flush()
+
+        paths = get_runtime_paths(db_session)
+        assert paths["generated_dir"] == "/custom/generated"
+        assert paths["certs_dir"] == "/custom/certs"

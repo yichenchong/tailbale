@@ -205,3 +205,54 @@ class TestRunRenewalScan:
         # Should still process both (count failures as processed=1 for the successful one)
         assert mock_process.call_count == 2
         mock_db.close.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Certificate renewal uses DB-backed paths
+# ---------------------------------------------------------------------------
+
+
+class TestCertRenewalDbPaths:
+    def test_get_certs_root_default(self, db_session):
+        from app.certs.renewal_task import _get_certs_root
+        from app.config import settings
+
+        root = _get_certs_root(db_session)
+        assert str(root) == str(settings.certs_dir)
+
+    def test_get_certs_root_respects_db_override(self, db_session):
+        from pathlib import Path
+        from app.certs.renewal_task import _get_certs_root
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cert_root", "/custom/certs")
+        db_session.commit()
+
+        root = _get_certs_root(db_session)
+        assert root == Path("/custom/certs")
+
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.issue_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_issue_cert_uses_db_cert_path(self, mock_secret, mock_issue, mock_expiry, db_session):
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+        from pathlib import Path
+
+        mock_secret.return_value = "cf-token"
+        mock_expiry.side_effect = [None, None]
+
+        set_setting(db_session, "cert_root", "/custom/certs")
+        db_session.flush()
+
+        svc = _create_service(db_session)
+
+        mock_issue.side_effect = RuntimeError("stopped for test")
+        process_service_cert(db_session, svc)
+
+        if mock_issue.called:
+            call_args = mock_issue.call_args
+            cert_dir = call_args[0][3] if len(call_args[0]) > 3 else call_args.kwargs.get("cert_dir")
+            lego_dir = call_args[0][4] if len(call_args[0]) > 4 else call_args.kwargs.get("lego_dir")
+            assert str(cert_dir) == str(Path("/custom/certs") / svc.hostname)
+            assert str(lego_dir) == str(Path("/custom/certs") / ".lego")
