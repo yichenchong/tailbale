@@ -28,10 +28,35 @@ beforeEach(() => {
   vi.restoreAllMocks()
 })
 
+/** Builds a fetch mock that returns settings for /settings, version for /version, and optional overrides. */
 function mockFetch(data: unknown = mockSettings) {
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: () => Promise.resolve(data),
+  return vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+    if (String(url).includes("/version")) {
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ version: "1.2.3" }),
+      })
+    }
+    if (String(url).includes("/auth/change-password")) {
+      if (opts?.body) {
+        const body = JSON.parse(String(opts.body))
+        if (body.current_password === "wrongpassword") {
+          return Promise.resolve({
+            ok: false,
+            status: 401,
+            json: () => Promise.resolve({ detail: "Current password is incorrect" }),
+          })
+        }
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ ok: true }),
+      })
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(data),
+    })
   })
 }
 
@@ -235,8 +260,14 @@ describe("SettingsPage", () => {
       "fetch",
       vi.fn().mockImplementation(() => {
         callCount++
-        if (callCount === 1) {
-          // Initial settings load
+        if (callCount <= 2) {
+          // Initial settings load + version fetch
+          if (callCount === 2) {
+            return Promise.resolve({
+              ok: true,
+              json: () => Promise.resolve({ version: "1.2.3" }),
+            })
+          }
           return Promise.resolve({
             ok: true,
             json: () => Promise.resolve(mockSettings),
@@ -266,5 +297,118 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Docker is reachable")).toBeInTheDocument()
     })
+  })
+
+  it("shows Account tab with password change form", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    expect(screen.getByText("Account")).toBeInTheDocument()
+    fireEvent.click(screen.getByText("Account"))
+
+    expect(screen.getByRole("button", { name: "Change Password" })).toBeInTheDocument()
+    expect(screen.getByText("Current Password")).toBeInTheDocument()
+    expect(screen.getByText("New Password")).toBeInTheDocument()
+    expect(screen.getByText("Confirm New Password")).toBeInTheDocument()
+  })
+
+  it("shows version in Account tab", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Account"))
+
+    await waitFor(() => {
+      expect(screen.getByText("About")).toBeInTheDocument()
+    })
+    expect(screen.getByText("tailBale")).toBeInTheDocument()
+    expect(screen.getByText("v1.2.3")).toBeInTheDocument()
+  })
+
+  it("disables Change Password button when fields are empty", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Account"))
+
+    const btn = screen.getByRole("button", { name: "Change Password" })
+    expect(btn).toBeDisabled()
+  })
+
+  it("shows mismatch warning when passwords differ", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Account"))
+
+    // Fill in new password
+    const newPwInput = screen.getByPlaceholderText("Minimum 8 characters")
+    fireEvent.change(newPwInput, { target: { value: "newpassword1" } })
+
+    // Fill in confirm with different value
+    const confirmInput = screen.getByPlaceholderText("Confirm new password")
+    fireEvent.change(confirmInput, { target: { value: "differentpass" } })
+
+    expect(screen.getByText("Passwords do not match.")).toBeInTheDocument()
+  })
+
+  it("shows version unknown when version endpoint fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (String(url).includes("/version")) {
+          return Promise.reject(new Error("Not found"))
+        }
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(mockSettings),
+        })
+      })
+    )
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Account"))
+
+    expect(screen.getByText("version unknown")).toBeInTheDocument()
   })
 })

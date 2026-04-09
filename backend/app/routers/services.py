@@ -3,7 +3,7 @@
 import json
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -191,7 +191,7 @@ async def list_services(db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=ServiceResponse, status_code=201)
-async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
+async def create_service(body: ServiceCreate, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     """Create a new service exposure."""
     # Check hostname uniqueness
     existing = db.query(Service).filter(Service.hostname == body.hostname).first()
@@ -251,6 +251,23 @@ async def create_service(body: ServiceCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(svc)
     db.refresh(status)
+
+    # Trigger immediate reconciliation so the frontend sees progress
+    # without waiting for the periodic loop.
+    service_id = svc.id
+    socket = _get_docker_socket(db)
+
+    def _reconcile_new_service() -> None:
+        from app.database import SessionLocal
+        from app.reconciler.reconcile_loop import reconcile_one
+
+        thread_db = SessionLocal()
+        try:
+            reconcile_one(thread_db, service_id, socket_path=socket)
+        finally:
+            thread_db.close()
+
+    background_tasks.add_task(_reconcile_new_service)
 
     return _to_response(svc, status)
 

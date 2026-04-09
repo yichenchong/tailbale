@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/api"
 import { cn } from "@/lib/utils"
@@ -10,7 +10,10 @@ import {
   XCircle,
   ShieldAlert,
   Clock,
+  RefreshCw,
 } from "lucide-react"
+
+const POLL_INTERVAL = 30_000
 
 interface DashboardSummary {
   services: {
@@ -46,16 +49,36 @@ export default function Dashboard() {
   const [data, setData] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  useEffect(() => {
-    api
-      .get<DashboardSummary>("/dashboard/summary")
-      .then(setData)
-      .catch((e) => setError(e instanceof Error ? e.message : "Failed to load"))
-      .finally(() => setLoading(false))
+  const load = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true)
+    try {
+      const result = await api.get<DashboardSummary>("/dashboard/summary")
+      setData(result)
+      setError("")
+      setLastRefresh(new Date())
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load")
+    } finally {
+      setLoading(false)
+    }
   }, [])
 
-  if (loading) {
+  useEffect(() => {
+    load(true)
+  }, [load])
+
+  // Auto-refresh every 30s
+  useEffect(() => {
+    timerRef.current = setInterval(() => load(false), POLL_INTERVAL)
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+  }, [load])
+
+  if (loading && !data) {
     return (
       <div className="flex items-center gap-2 p-8 text-zinc-500">
         <Loader2 className="h-4 w-4 animate-spin" /> Loading dashboard...
@@ -63,7 +86,7 @@ export default function Dashboard() {
     )
   }
 
-  if (error) {
+  if (error && !data) {
     return <div className="rounded-md bg-red-50 p-4 text-red-700">{error}</div>
   }
 
@@ -73,8 +96,31 @@ export default function Dashboard() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold">Dashboard</h1>
-      <p className="mt-1 text-zinc-500">Overview of your exposed services.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Dashboard</h1>
+          <p className="mt-1 text-zinc-500">Overview of your exposed services.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {lastRefresh && (
+            <span className="text-xs text-zinc-400">
+              Updated {lastRefresh.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={() => load(true)}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
+          >
+            {loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            Refresh
+          </button>
+        </div>
+      </div>
 
       {/* Summary cards */}
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -107,7 +153,7 @@ export default function Dashboard() {
                       "font-medium",
                       days !== null && days < 0 ? "text-red-600" : days !== null && days <= 7 ? "text-yellow-600" : "text-zinc-500"
                     )}>
-                      {days !== null ? (days < 0 ? "Expired" : `${days}d left`) : "—"}
+                      {days !== null ? (days < 0 ? "Expired" : `${days}d left`) : "\u2014"}
                     </span>
                   </li>
                 )

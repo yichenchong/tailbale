@@ -69,6 +69,19 @@ def create_edge_container(
     Path(cert_dir).mkdir(parents=True, exist_ok=True)
     Path(ts_state_dir).mkdir(parents=True, exist_ok=True)
 
+    # Ensure Caddyfile exists; Docker bind mounts fail if the source is missing.
+    caddyfile = Path(caddyfile_path)
+    if not caddyfile.exists():
+        caddyfile.parent.mkdir(parents=True, exist_ok=True)
+        placeholder = (
+            "# Placeholder — will be replaced by reconciler\n"
+            ":443 {\n"
+            '    respond "Service starting..." 503\n'
+            "}\n"
+        )
+        caddyfile.write_text(placeholder)
+        logger.warning("Caddyfile did not exist; created placeholder at %s", caddyfile_path)
+
     mounts = [
         Mount(target="/etc/caddy/Caddyfile", source=caddyfile_path, type="bind", read_only=True),
         Mount(target="/certs", source=cert_dir, type="bind", read_only=True),

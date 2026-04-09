@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type DiscoveredContainer, type DiscoveryResponse, type ServiceListResponse } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { Loader2, Search, Globe } from "lucide-react"
+import { Loader2, Search, Globe, RefreshCw } from "lucide-react"
+
+const POLL_INTERVAL = 30_000 // 30 seconds
 
 export default function Discover() {
   const navigate = useNavigate()
@@ -11,11 +13,13 @@ export default function Discover() {
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [runningOnly, setRunningOnly] = useState(true)
+  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
   // Track how many exposures each container already has
   const [exposureCounts, setExposureCounts] = useState<Record<string, number>>({})
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const load = async () => {
-    setLoading(true)
+  const load = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setLoading(true)
     setError(null)
     try {
       const [discovery, services] = await Promise.all([
@@ -29,19 +33,34 @@ export default function Discover() {
       setContainers(discovery.containers)
       const counts: Record<string, number> = {}
       for (const svc of services.services) {
-        counts[svc.upstream_container_id] = (counts[svc.upstream_container_id] || 0) + 1
+        const phase = svc.status?.phase
+        if (phase === 'healthy' || phase === 'warning') {
+          counts[svc.upstream_container_id] = (counts[svc.upstream_container_id] || 0) + 1
+        }
       }
       setExposureCounts(counts)
+      setLastRefresh(new Date())
     } catch (e) {
       setError(String(e))
     } finally {
       setLoading(false)
     }
-  }
+  }, [runningOnly, search])
 
-  useEffect(() => { load() }, [runningOnly])
+  // Load on mount and when runningOnly changes
+  useEffect(() => {
+    load(true)
+  }, [runningOnly])
 
-  const handleSearch = () => load()
+  // Auto-refresh every 30s
+  useEffect(() => {
+    timerRef.current = setInterval(() => load(false), POLL_INTERVAL)
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current)
+    }
+  }, [load])
+
+  const handleSearch = () => load(true)
 
   const handleExpose = (container: DiscoveredContainer) => {
     const params = new URLSearchParams({
@@ -55,8 +74,31 @@ export default function Discover() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold">Discover Containers</h1>
-      <p className="mt-1 text-sm text-zinc-500">Find running Docker containers to expose as HTTPS services.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Discover Containers</h1>
+          <p className="mt-1 text-sm text-zinc-500">Find running Docker containers to expose as HTTPS services.</p>
+        </div>
+        <div className="flex items-center gap-3">
+          {lastRefresh && (
+            <span className="text-xs text-zinc-400">
+              Updated {lastRefresh.toLocaleTimeString()}
+            </span>
+          )}
+          <button
+            onClick={() => load(true)}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
+          >
+            {loading ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+            ) : (
+              <RefreshCw className="h-3.5 w-3.5" />
+            )}
+            Refresh
+          </button>
+        </div>
+      </div>
 
       {/* Filters */}
       <div className="mt-6 flex items-center gap-3">
@@ -103,7 +145,7 @@ export default function Discover() {
             No containers found. Make sure Docker is accessible and containers are running.
           </div>
         ) : (
-          <div className="overflow-hidden rounded-md border border-zinc-200">
+          <div className="overflow-x-auto rounded-md border border-zinc-200">
             <table className="min-w-full divide-y divide-zinc-200">
               <thead className="bg-zinc-50">
                 <tr>
@@ -131,24 +173,24 @@ export default function Discover() {
                     <td className="px-4 py-3 text-sm text-zinc-500">
                       {c.ports.length > 0
                         ? c.ports.map((p) => `${p.container_port}/${p.protocol}`).join(", ")
-                        : "—"}
+                        : "\u2014"}
                     </td>
                     <td className="px-4 py-3 text-sm text-zinc-500">
-                      {c.networks.length > 0 ? c.networks.join(", ") : "—"}
+                      {c.networks.length > 0 ? c.networks.join(", ") : "\u2014"}
                     </td>
-                    <td className="px-4 py-3 text-right">
+                    <td className="whitespace-nowrap px-4 py-3 text-right">
                       <div className="inline-flex items-center gap-2">
                         {exposureCounts[c.id] ? (
                           <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
-                            {exposureCounts[c.id]} exposed
+                            {exposureCounts[c.id]} svc
                           </span>
                         ) : null}
                         <button
                           onClick={() => handleExpose(c)}
                           className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
                         >
-                          <Globe className="h-3 w-3" />
-                          {exposureCounts[c.id] ? "Expose Another Port" : "Expose"}
+                          <Globe className="hidden h-3 w-3 sm:inline" />
+                          Expose
                         </button>
                       </div>
                     </td>

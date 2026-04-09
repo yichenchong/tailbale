@@ -16,6 +16,7 @@ from app.database import get_db
 from app.models.user import User
 from app.schemas.auth import (
     AuthStatusResponse,
+    ChangePasswordRequest,
     LoginRequest,
     LoginResponse,
     SetupUserRequest,
@@ -71,6 +72,20 @@ async def me(user: User = Depends(get_current_user)):
     return _user_response(user)
 
 
+@router.post("/change-password")
+async def change_password(
+    body: ChangePasswordRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Change the current user's password. Requires the current password."""
+    if not verify_password(body.current_password, user.password_hash, db):
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    user.password_hash = hash_password(body.new_password, db)
+    db.commit()
+    return {"ok": True}
+
+
 @router.post("/setup-user", response_model=LoginResponse)
 async def setup_user(
     body: SetupUserRequest, response: Response, db: Session = Depends(get_db)
@@ -92,6 +107,34 @@ async def setup_user(
     token = create_access_token(user.id)
     _set_cookie(response, token)
     return LoginResponse(user=_user_response(user))
+
+
+@router.get("/setup-progress")
+async def setup_progress(db: Session = Depends(get_db)):
+    """Report which setup steps have already been completed.
+
+    Always accessible (no auth required) so the setup wizard can resume
+    from the first incomplete step after a page refresh or back navigation.
+    """
+    from app.models.setting import Setting
+    from app.secrets import CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, secret_exists
+
+    user_exists = db.query(User).first() is not None
+    base_domain_set = db.get(Setting, "base_domain") is not None
+    cf_zone_set = db.get(Setting, "cf_zone_id") is not None and db.get(Setting, "cf_zone_id").value != ""
+    cf_token_set = secret_exists(CLOUDFLARE_TOKEN)
+    acme_email_set = db.get(Setting, "acme_email") is not None
+    ts_auth_key_set = secret_exists(TAILSCALE_AUTH_KEY)
+    docker_socket_set = db.get(Setting, "docker_socket_path") is not None
+
+    return {
+        "user_exists": user_exists,
+        "base_domain_set": base_domain_set,
+        "cloudflare_configured": cf_zone_set or cf_token_set,
+        "acme_email_set": acme_email_set,
+        "tailscale_configured": ts_auth_key_set,
+        "docker_configured": docker_socket_set,
+    }
 
 
 @router.get("/status", response_model=AuthStatusResponse)

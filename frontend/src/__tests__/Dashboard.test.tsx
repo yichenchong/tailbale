@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, fireEvent } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 const mockSummary = {
@@ -224,5 +224,52 @@ describe("Dashboard page", () => {
     })
     const link = screen.getByText(/Nextcloud/).closest("a")
     expect(link).toHaveAttribute("href", "/services/svc_1")
+  })
+
+  it("shows Refresh button", async () => {
+    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    render(
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+  })
+
+  it("shows last refresh timestamp after load", async () => {
+    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    render(
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/Updated/)).toBeInTheDocument()
+    })
+  })
+
+  it("reloads data when Refresh button clicked", async () => {
+    const fetchMock = mockFetch(mockSummary)
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    render(
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+    const initialCallCount = fetchMock.mock.calls.length
+
+    fireEvent.click(screen.getByText("Refresh"))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(initialCallCount)
+    })
   })
 })

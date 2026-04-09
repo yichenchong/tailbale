@@ -124,3 +124,14 @@ def _mock_upstream_validation():
     """
     with patch("app.routers.services._validate_upstream"):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _mock_background_reconcile():
+    """Auto-mock the background reconciliation triggered after service creation.
+
+    Without this, every test that creates a service would trigger a real
+    reconcile_one() call that tries to connect to Docker/Tailscale.
+    """
+    with patch("app.reconciler.reconcile_loop.reconcile_one"):
+        yield

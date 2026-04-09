@@ -11,7 +11,7 @@ import {
   Loader2,
 } from "lucide-react"
 
-const TABS = ["General", "Cloudflare", "Tailscale", "Docker", "Paths"] as const
+const TABS = ["General", "Cloudflare", "Tailscale", "Docker", "Paths", "Account"] as const
 type Tab = (typeof TABS)[number]
 
 export default function SettingsPage() {
@@ -21,12 +21,17 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false)
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null)
   const [testing, setTesting] = useState(false)
+  const [version, setVersion] = useState<string | null>(null)
 
   const load = async () => {
     setLoading(true)
     try {
-      const data = await api.get<AllSettings>("/settings")
+      const [data, ver] = await Promise.all([
+        api.get<AllSettings>("/settings"),
+        api.get<{ version: string }>("/version").catch(() => null),
+      ])
       setSettings(data)
+      if (ver) setVersion(ver.version)
     } finally {
       setLoading(false)
     }
@@ -127,6 +132,9 @@ export default function SettingsPage() {
         {tab === "Paths" && (
           <PathsTab settings={settings.paths} onSave={(b) => save("paths", b)} saving={saving} />
         )}
+        {tab === "Account" && (
+          <AccountTab version={version} />
+        )}
       </div>
     </div>
   )
@@ -164,14 +172,14 @@ function Field({
   )
 }
 
-function SaveButton({ saving, onClick }: { saving: boolean; onClick: () => void }) {
+function SaveButton({ saving, onClick, label }: { saving: boolean; onClick: () => void; label?: string }) {
   return (
     <button
       onClick={onClick}
       disabled={saving}
       className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
     >
-      {saving ? "Saving..." : "Save"}
+      {saving ? "Saving..." : label ?? "Save"}
     </button>
   )
 }
@@ -450,6 +458,112 @@ function PathsTab({
           onSave({ generated_root: generated, cert_root: cert, tailscale_state_root: ts })
         }
       />
+    </div>
+  )
+}
+
+function AccountTab({ version }: { version: string | null }) {
+  const [currentPassword, setCurrentPassword] = useState("")
+  const [newPassword, setNewPassword] = useState("")
+  const [confirmPassword, setConfirmPassword] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [success, setSuccess] = useState("")
+  const [error, setError] = useState("")
+
+  const canSubmit =
+    currentPassword.length > 0 &&
+    newPassword.length >= 8 &&
+    newPassword === confirmPassword &&
+    !saving
+
+  const handleChangePassword = async () => {
+    setSaving(true)
+    setError("")
+    setSuccess("")
+    try {
+      await api.post("/auth/change-password", {
+        current_password: currentPassword,
+        new_password: newPassword,
+      })
+      setSuccess("Password changed successfully")
+      setCurrentPassword("")
+      setNewPassword("")
+      setConfirmPassword("")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to change password")
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Password change */}
+      <div>
+        <h3 className="text-sm font-semibold text-zinc-700">Change Password</h3>
+        <div className="mt-3 space-y-3">
+          <Field
+            label="Current Password"
+            value={currentPassword}
+            onChange={(v) => { setCurrentPassword(v); setError(""); setSuccess("") }}
+            type="password"
+            placeholder="Enter current password"
+          />
+          <Field
+            label="New Password"
+            value={newPassword}
+            onChange={(v) => { setNewPassword(v); setError(""); setSuccess("") }}
+            type="password"
+            placeholder="Minimum 8 characters"
+            hint="Minimum 8 characters"
+          />
+          <label className="block">
+            <span className="text-sm font-medium text-zinc-700">Confirm New Password</span>
+            <input
+              type="password"
+              value={confirmPassword}
+              onChange={(e) => { setConfirmPassword(e.target.value); setError(""); setSuccess("") }}
+              placeholder="Confirm new password"
+              className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+            />
+            {confirmPassword.length > 0 && newPassword !== confirmPassword && (
+              <p className="mt-1 text-xs text-red-600">Passwords do not match.</p>
+            )}
+          </label>
+          <button
+            onClick={handleChangePassword}
+            disabled={!canSubmit}
+            className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
+          >
+            {saving ? "Changing..." : "Change Password"}
+          </button>
+          {success && (
+            <div className="flex items-center gap-2 rounded-md bg-green-50 px-3 py-2 text-sm text-green-800">
+              <CheckCircle className="h-4 w-4" /> {success}
+            </div>
+          )}
+          {error && (
+            <div className="flex items-center gap-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+              <XCircle className="h-4 w-4" /> {error}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Version info */}
+      <div className="border-t border-zinc-200 pt-4">
+        <h3 className="text-sm font-semibold text-zinc-700">About</h3>
+        <div className="mt-2 text-sm text-zinc-500">
+          <span className="font-medium text-zinc-700">tailBale</span>
+          {version ? (
+            <span className="ml-2 rounded-full bg-zinc-100 px-2 py-0.5 text-xs font-medium text-zinc-600">
+              v{version}
+            </span>
+          ) : (
+            <span className="ml-2 text-xs text-zinc-400">version unknown</span>
+          )}
+        </div>
+      </div>
     </div>
   )
 }

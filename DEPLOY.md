@@ -49,6 +49,14 @@ Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will
 - Go to **Discover** to see your running containers
 - Use **Expose** to create your first service
 
+### Rebuilding the Orchestrator
+
+```bash
+cd /mnt/user/appdata/tailbale
+git pull
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
 ---
 
 ## Option B: Manual Docker Run
@@ -84,6 +92,23 @@ docker run -d \
 ```
 
 Then open `http://<unraid-ip>:6780` to complete setup.
+
+### Rebuilding the Orchestrator
+```bash
+docker build -t tailbale:latest .
+docker build -t tailbale-edge:latest ./edge
+docker rm -f tailbale
+docker run -d \
+  --name tailbale \
+  --restart unless-stopped \
+  -p 6780:8080 \
+  -v /mnt/user/appdata/tailbale/data:/data \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e DATA_DIR=/data \
+  -e DOCKER_SOCKET=unix:///var/run/docker.sock \
+  -e PORT=8080 \
+  tailbale:latest
+```
 
 ---
 

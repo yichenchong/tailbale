@@ -28,6 +28,7 @@ export default function Services() {
   const [services, setServices] = useState<ServiceItem[]>([])
   const [loading, setLoading] = useState(true)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
 
   const load = () => {
@@ -41,6 +42,7 @@ export default function Services() {
 
   const doAction = async (svcId: string, path: string, method: "post" | "put" = "post", body?: unknown) => {
     setOpenMenuId(null)
+    setMenuPos(null)
     try {
       if (method === "put") {
         await api.put(`/services/${svcId}${path}`, body)
@@ -57,6 +59,7 @@ export default function Services() {
 
   const handleDelete = async (svc: ServiceItem) => {
     setOpenMenuId(null)
+    setMenuPos(null)
     if (!window.confirm(`Delete service "${svc.name}"? This cannot be undone.`)) return
     try {
       await api.delete(`/services/${svc.id}`)
@@ -107,7 +110,7 @@ export default function Services() {
           </button>
         </div>
       ) : (
-        <div className="mt-6 overflow-hidden rounded-md border border-zinc-200">
+        <div className="mt-6 overflow-x-auto rounded-md border border-zinc-200">
           <table className="min-w-full divide-y divide-zinc-200">
             <thead className="bg-zinc-50">
               <tr>
@@ -155,18 +158,30 @@ export default function Services() {
                       {cert.text}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="relative inline-block">
+                      <div className="inline-block">
                         <button
-                          onClick={() => setOpenMenuId(openMenuId === svc.id ? null : svc.id)}
+                          onClick={(e) => {
+                            if (openMenuId === svc.id) {
+                              setOpenMenuId(null)
+                              setMenuPos(null)
+                            } else {
+                              const rect = e.currentTarget.getBoundingClientRect()
+                              setMenuPos({ top: rect.bottom + 4, left: rect.right - 176 })
+                              setOpenMenuId(svc.id)
+                            }
+                          }}
                           className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
                           aria-label="Actions"
                         >
                           <MoreVertical className="h-4 w-4" />
                         </button>
-                        {openMenuId === svc.id && (
+                        {openMenuId === svc.id && menuPos && (
                           <>
-                            <div className="fixed inset-0 z-10" onClick={() => setOpenMenuId(null)} />
-                            <div className="absolute right-0 z-20 mt-1 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg">
+                            <div className="fixed inset-0 z-10" onClick={() => { setOpenMenuId(null); setMenuPos(null) }} />
+                            <div
+                              className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
+                              style={{ top: menuPos.top, left: menuPos.left }}
+                            >
                               <Link to={`/services/${svc.id}`} className="block px-3 py-1.5 text-sm text-zinc-700 hover:bg-zinc-50">
                                 View Details
                               </Link>

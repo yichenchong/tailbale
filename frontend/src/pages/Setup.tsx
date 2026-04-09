@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type ConnectionTestResult, type LoginResponse } from "@/lib/api"
 import { cn } from "@/lib/utils"
@@ -13,12 +13,34 @@ const STEPS = [
   { key: "docker", label: "Docker" },
 ]
 
+interface SetupProgress {
+  user_exists: boolean
+  base_domain_set: boolean
+  cloudflare_configured: boolean
+  acme_email_set: boolean
+  tailscale_configured: boolean
+  docker_configured: boolean
+}
+
+/** Return the first incomplete step index based on backend progress. */
+function firstIncompleteStep(progress: SetupProgress): number {
+  if (!progress.user_exists) return 0
+  if (!progress.base_domain_set) return 1
+  if (!progress.cloudflare_configured) return 2
+  if (!progress.acme_email_set) return 3
+  if (!progress.tailscale_configured) return 4
+  if (!progress.docker_configured) return 5
+  return 5 // all done, show last step for "Complete Setup"
+}
+
 export default function Setup() {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
+  const [initializing, setInitializing] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState("")
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null)
+  const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set())
 
   // Account fields
   const [adminUsername, setAdminUsername] = useState("")
@@ -33,17 +55,44 @@ export default function Setup() {
   const [tsAuthKey, setTsAuthKey] = useState("")
   const [dockerSocket, setDockerSocket] = useState("unix:///var/run/docker.sock")
 
+  // On mount, check which steps are already completed and skip ahead
+  useEffect(() => {
+    api
+      .get<SetupProgress>("/auth/setup-progress")
+      .then((progress) => {
+        const done = new Set<number>()
+        if (progress.user_exists) done.add(0)
+        if (progress.base_domain_set) done.add(1)
+        if (progress.cloudflare_configured) done.add(2)
+        if (progress.acme_email_set) done.add(3)
+        if (progress.tailscale_configured) done.add(4)
+        if (progress.docker_configured) done.add(5)
+        setCompletedSteps(done)
+        setStep(firstIncompleteStep(progress))
+      })
+      .catch(() => {
+        // If the endpoint isn't available, start from step 0
+      })
+      .finally(() => setInitializing(false))
+  }, [])
+
   const saveAndNext = async () => {
     setSaving(true)
     setError("")
     setTestResult(null)
     try {
+      // Skip API calls for already-completed steps when user hasn't entered new data
+      const alreadyDone = completedSteps.has(step)
+
       if (step === 0) {
-        // Create admin user and auto-login
-        await api.post<LoginResponse>("/auth/setup-user", {
-          username: adminUsername,
-          password: adminPassword,
-        })
+        if (alreadyDone) {
+          // User already exists — skip account creation
+        } else {
+          await api.post<LoginResponse>("/auth/setup-user", {
+            username: adminUsername,
+            password: adminPassword,
+          })
+        }
       } else if (step === 1) {
         await api.put("/settings/general", { base_domain: baseDomain })
       } else if (step === 2) {
@@ -83,6 +132,9 @@ export default function Setup() {
         }
       }
 
+      // Mark this step as completed
+      setCompletedSteps((prev) => new Set(prev).add(step))
+
       if (step < STEPS.length - 1) {
         setStep(step + 1)
         setTestResult(null)
@@ -98,6 +150,8 @@ export default function Setup() {
   }
 
   const canProceed = () => {
+    // Already-completed steps can always be skipped
+    if (completedSteps.has(step)) return true
     if (step === 0)
       return (
         adminUsername.length > 0 &&
@@ -109,6 +163,14 @@ export default function Setup() {
     if (step === 3) return acmeEmail.includes("@")
     if (step === 4) return tsAuthKey.length > 0
     return true
+  }
+
+  if (initializing) {
+    return (
+      <div className="mx-auto max-w-lg py-12 px-4 flex items-center gap-2 text-zinc-500">
+        <Loader2 className="h-5 w-5 animate-spin" /> Loading setup progress...
+      </div>
+    )
   }
 
   return (
@@ -131,6 +193,14 @@ export default function Setup() {
       <p className="mt-2 text-xs text-zinc-500">
         Step {step + 1} of {STEPS.length}: {STEPS[step].label}
       </p>
+
+      {/* Already-completed banner */}
+      {completedSteps.has(step) && (
+        <div className="mt-6 flex items-center gap-2 rounded-md bg-green-50 px-4 py-3 text-sm text-green-800">
+          <CheckCircle className="h-4 w-4 shrink-0" />
+          This step was already completed. Click Next to continue, or update the values below.
+        </div>
+      )}
 
       {/* Step content */}
       <div className="mt-6 space-y-4">

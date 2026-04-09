@@ -22,6 +22,11 @@ class LoginResponse(BaseModel):
     user: UserResponse
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=1)
+    new_password: str = Field(min_length=8)
+
+
 class AuthStatusResponse(BaseModel):
     setup_complete: bool
     authenticated: bool

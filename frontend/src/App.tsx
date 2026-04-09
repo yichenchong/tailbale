@@ -12,6 +12,7 @@ import SettingsPage from "@/pages/SettingsPage"
 import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
 import { api, type AuthStatus } from "@/lib/api"
+import { useDynamicFavicon } from "@/lib/useFavicon"
 
 function App() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
@@ -30,14 +31,20 @@ function App() {
       })
   }, [])
 
+  // Update favicon based on service health (polls every 30s)
+  useDynamicFavicon(30_000)
+
   // Still loading
   if (setupComplete === null || authenticated === null) return null
 
   return (
     <BrowserRouter>
       <Routes>
-        {/* Setup wizard and login — no sidebar layout */}
-        <Route path="setup" element={<Setup />} />
+        {/* Setup wizard — redirect to dashboard if already completed */}
+        <Route
+          path="setup"
+          element={setupComplete ? <Navigate to="/" replace /> : <Setup />}
+        />
         <Route path="login" element={<Login />} />
 
         <Route element={<Layout />}>

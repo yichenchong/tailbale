@@ -202,6 +202,127 @@ class TestAuthStatus:
         assert data["authenticated"] is False
 
 
+class TestSetupProgress:
+    """The setup-progress endpoint reports which setup steps are already done."""
+
+    def test_fresh_install_all_false(self, auth_client):
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["user_exists"] is False
+        assert data["base_domain_set"] is False
+        assert data["cloudflare_configured"] is False
+        assert data["acme_email_set"] is False
+        assert data["tailscale_configured"] is False
+        assert data["docker_configured"] is False
+
+    def test_after_user_created(self, auth_client):
+        _setup_user(auth_client)
+        resp = auth_client.get("/api/auth/setup-progress")
+        data = resp.json()
+        assert data["user_exists"] is True
+        assert data["base_domain_set"] is False
+
+    def test_after_settings_configured(self, auth_client):
+        setup_resp = _setup_user(auth_client)
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
+
+        # Set base domain
+        auth_client.put("/api/settings/general", json={"base_domain": "test.com"})
+
+        resp = auth_client.get("/api/auth/setup-progress")
+        data = resp.json()
+        assert data["user_exists"] is True
+        assert data["base_domain_set"] is True
+        assert data["acme_email_set"] is False
+
+    def test_after_acme_email_set(self, auth_client):
+        setup_resp = _setup_user(auth_client)
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
+
+        auth_client.put("/api/settings/general", json={"acme_email": "me@test.com"})
+
+        resp = auth_client.get("/api/auth/setup-progress")
+        data = resp.json()
+        assert data["acme_email_set"] is True
+
+    def test_is_publicly_accessible(self, auth_client):
+        """setup-progress must work without auth (it's used before login)."""
+        auth_client.cookies.clear()
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.status_code == 200
+
+
+class TestChangePassword:
+    """Tests for the POST /api/auth/change-password endpoint."""
+
+    def _login(self, client, password="securepassword123"):
+        """Helper: create user, clear cookies, login, set cookie."""
+        setup_resp = _setup_user(client, password=password)
+        client.cookies.clear()
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": password},
+        )
+        _set_auth_cookie(client, login_resp.cookies["access_token"])
+        return login_resp
+
+    def test_change_password_success(self, auth_client):
+        self._login(auth_client)
+        resp = auth_client.post(
+            "/api/auth/change-password",
+            json={"current_password": "securepassword123", "new_password": "newpassword456"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        # Verify old password no longer works
+        auth_client.cookies.clear()
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "securepassword123"},
+        )
+        assert resp.status_code == 401
+
+        # Verify new password works
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "newpassword456"},
+        )
+        assert resp.status_code == 200
+
+    def test_wrong_current_password(self, auth_client):
+        self._login(auth_client)
+        resp = auth_client.post(
+            "/api/auth/change-password",
+            json={"current_password": "wrongpassword", "new_password": "newpassword456"},
+        )
+        assert resp.status_code == 401
+        assert "incorrect" in resp.json()["detail"].lower()
+
+    def test_new_password_too_short(self, auth_client):
+        self._login(auth_client)
+        resp = auth_client.post(
+            "/api/auth/change-password",
+            json={"current_password": "securepassword123", "new_password": "short"},
+        )
+        assert resp.status_code == 422
+
+    def test_requires_auth(self, auth_client):
+        _setup_user(auth_client)
+        auth_client.cookies.clear()
+        resp = auth_client.post(
+            "/api/auth/change-password",
+            json={"current_password": "securepassword123", "new_password": "newpassword456"},
+        )
+        assert resp.status_code == 401
+
+    def test_missing_fields(self, auth_client):
+        self._login(auth_client)
+        resp = auth_client.post("/api/auth/change-password", json={})
+        assert resp.status_code == 422
+
+
 class TestProtectedEndpoints:
     """Verify that protected routers return 401 without auth."""
 

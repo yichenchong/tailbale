@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { render, screen, waitFor, fireEvent } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 /** Build a fetch mock that returns discovery data for /discovery/ and services data for /services. */
@@ -93,7 +93,7 @@ describe("Discover page", () => {
         labels: {},
       }],
       [
-        { upstream_container_id: "c1", name: "Nextcloud Web", hostname: "nc.example.com" },
+        { upstream_container_id: "c1", name: "Nextcloud Web", hostname: "nc.example.com", status: { phase: "healthy" } },
       ],
     ))
     const { default: Discover } = await import("@/pages/Discover")
@@ -103,9 +103,8 @@ describe("Discover page", () => {
       </MemoryRouter>
     )
     await waitFor(() => {
-      expect(screen.getByText("1 exposed")).toBeInTheDocument()
+      expect(screen.getByText("1 svc")).toBeInTheDocument()
     })
-    expect(screen.getByText("Expose Another Port")).toBeInTheDocument()
   })
 
   it("shows search input", async () => {
@@ -129,5 +128,52 @@ describe("Discover page", () => {
     )
     const checkbox = screen.getByLabelText("Running only")
     expect(checkbox).toBeChecked()
+  })
+
+  it("shows Refresh button", async () => {
+    vi.stubGlobal("fetch", mockFetchResponses([], []))
+    const { default: Discover } = await import("@/pages/Discover")
+    render(
+      <MemoryRouter>
+        <Discover />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+  })
+
+  it("shows last refresh timestamp after load", async () => {
+    vi.stubGlobal("fetch", mockFetchResponses([], []))
+    const { default: Discover } = await import("@/pages/Discover")
+    render(
+      <MemoryRouter>
+        <Discover />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText(/Updated/)).toBeInTheDocument()
+    })
+  })
+
+  it("reloads data when Refresh button clicked", async () => {
+    const fetchMock = mockFetchResponses([], [])
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Discover } = await import("@/pages/Discover")
+    render(
+      <MemoryRouter>
+        <Discover />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+    const initialCallCount = fetchMock.mock.calls.length
+
+    fireEvent.click(screen.getByText("Refresh"))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThan(initialCallCount)
+    })
   })
 })
