@@ -1,8 +1,12 @@
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, waitFor, fireEvent } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 beforeEach(() => {
+  vi.restoreAllMocks()
+})
+
+afterEach(() => {
   vi.restoreAllMocks()
 })
 
@@ -98,5 +102,54 @@ describe("Login page", () => {
     await waitFor(() => {
       expect(screen.getByText("Signing in...")).toBeInTheDocument()
     })
+  })
+})
+
+describe("Login page does not fetch dashboard summary", () => {
+  it("never calls /api/dashboard/summary when unauthenticated", async () => {
+    // Track all fetched URLs
+    const fetchedUrls: string[] = []
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      fetchedUrls.push(String(url))
+      if (String(url).includes("/auth/status")) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({ setup_complete: true, authenticated: false }),
+        })
+      }
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              general: { timezone: "UTC" },
+            }),
+        })
+      }
+      // Return 401 for everything else (simulates unauthenticated)
+      return Promise.resolve({
+        ok: false,
+        status: 401,
+        json: () => Promise.resolve({ detail: "Not authenticated" }),
+      })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { default: App } = await import("@/App")
+    render(<App />)
+
+    // Wait for auth check to complete and login page to render
+    await waitFor(() => {
+      expect(screen.getByText("Sign in to continue.")).toBeInTheDocument()
+    })
+
+    // Wait a bit longer to catch any async effects that fire after render
+    await new Promise((r) => setTimeout(r, 200))
+
+    const summaryRequests = fetchedUrls.filter((u) =>
+      u.includes("dashboard/summary")
+    )
+    expect(summaryRequests).toEqual([])
   })
 })

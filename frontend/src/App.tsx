@@ -12,6 +12,13 @@ import SettingsPage from "@/pages/SettingsPage"
 import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
 import { api, type AuthStatus } from "@/lib/api"
+import { useDynamicFavicon } from "@/lib/useFavicon"
+
+/** Wrapper that enables favicon polling only for authenticated routes. */
+function AuthenticatedLayout() {
+  useDynamicFavicon(30_000)
+  return <Layout />
+}
 
 function App() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
@@ -33,6 +40,9 @@ function App() {
   // Still loading
   if (setupComplete === null || authenticated === null) return null
 
+  // Determine where unauthenticated users should go
+  const redirect = !setupComplete ? "/setup" : !authenticated ? "/login" : null
+
   return (
     <BrowserRouter>
       <Routes>
@@ -46,35 +56,24 @@ function App() {
           element={authenticated ? <Navigate to="/" replace /> : <Login />}
         />
 
-        <Route element={<Layout />}>
-          <Route
-            index
-            element={
-              !setupComplete ? (
-                <Navigate to="/setup" replace />
-              ) : !authenticated ? (
-                <Navigate to="/login" replace />
-              ) : (
-                <Dashboard />
-              )
-            }
-          />
-          {!setupComplete ? (
-            <Route path="*" element={<Navigate to="/setup" replace />} />
-          ) : !authenticated ? (
-            <Route path="*" element={<Navigate to="/login" replace />} />
-          ) : (
-            <>
-              <Route path="services" element={<Services />} />
-              <Route path="services/:id" element={<ServiceDetail />} />
-              <Route path="discover" element={<Discover />} />
-              <Route path="expose" element={<ExposeService />} />
-              <Route path="events" element={<Events />} />
-              <Route path="orphan-dns" element={<OrphanDns />} />
-              <Route path="settings" element={<SettingsPage />} />
-            </>
-          )}
-        </Route>
+        {redirect ? (
+          /* Not authenticated or not set up — redirect everything to login/setup.
+             No Layout renders, so no Sidebar, no favicon polling. */
+          <Route path="*" element={<Navigate to={redirect} replace />} />
+        ) : (
+          /* Authenticated — render full app with Layout + favicon polling */
+          <Route element={<AuthenticatedLayout />}>
+            <Route index element={<Dashboard />} />
+            <Route path="services" element={<Services />} />
+            <Route path="services/:id" element={<ServiceDetail />} />
+            <Route path="discover" element={<Discover />} />
+            <Route path="expose" element={<ExposeService />} />
+            <Route path="events" element={<Events />} />
+            <Route path="orphan-dns" element={<OrphanDns />} />
+            <Route path="settings" element={<SettingsPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        )}
       </Routes>
     </BrowserRouter>
   )
