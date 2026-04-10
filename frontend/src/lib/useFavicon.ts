@@ -8,11 +8,15 @@ interface DashboardSummary {
 /**
  * Polls the dashboard summary and updates the favicon to reflect overall health.
  * Green monitor = all healthy, red monitor = at least one error.
+ *
+ * Pass `null` to disable polling (e.g. when the user isn't authenticated).
  */
-export function useDynamicFavicon(intervalMs = 30_000) {
+export function useDynamicFavicon(intervalMs: number | null = 30_000) {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => {
+    if (intervalMs === null) return
+
     function update() {
       api
         .get<DashboardSummary>("/dashboard/summary")

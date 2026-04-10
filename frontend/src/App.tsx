@@ -32,7 +32,8 @@ function App() {
   }, [])
 
   // Update favicon based on service health (polls every 30s)
-  useDynamicFavicon(30_000)
+  // Only poll when authenticated — otherwise the 401 triggers a redirect loop
+  useDynamicFavicon(authenticated === true ? 30_000 : null)
 
   // Still loading
   if (setupComplete === null || authenticated === null) return null
