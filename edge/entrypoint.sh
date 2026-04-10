@@ -57,14 +57,22 @@ fi
 
 # 3. Wait for Tailscale to be ready
 echo "[edge] Waiting for Tailscale to be ready..."
+TS_READY=false
 for i in $(seq 1 60); do
-    if tailscale status --json 2>/dev/null | grep -q '"BackendState":"Running"'; then
+    # Match with optional whitespace — tailscale status --json may
+    # pretty-print ("BackendState": "Running") or compact the output.
+    if tailscale status --json 2>/dev/null | grep -q '"BackendState"[[:space:]]*:[[:space:]]*"Running"'; then
+        TS_READY=true
         echo "[edge] Tailscale is ready."
         tailscale ip -4 2>/dev/null || true
         break
     fi
     sleep 1
 done
+
+if [ "$TS_READY" = false ]; then
+    echo "[edge] WARNING: Tailscale did not reach Running state after 60s, starting Caddy anyway..."
+fi
 
 # 4. Start Caddy with the generated Caddyfile
 echo "[edge] Starting Caddy..."
