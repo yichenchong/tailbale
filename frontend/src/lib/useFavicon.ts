@@ -21,19 +21,37 @@ function setFavicon(href: string) {
  * Polls the dashboard summary and updates the favicon to reflect overall health.
  * Green monitor = all healthy, red monitor = at least one error.
  *
- * Uses raw `fetch` instead of `api.get` to avoid the 401 interceptor
- * that triggers a hard redirect to /login (which would cause a reload loop
- * if the user isn't authenticated).
+ * Self-guarding: if the fetch returns 401 (unauthenticated), polling stops
+ * immediately so it can never cause a redirect loop.
  */
 export function useDynamicFavicon(intervalMs = 30_000) {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const stoppedRef = useRef(false)
 
   useEffect(() => {
+    stoppedRef.current = false
+
+    function stop() {
+      stoppedRef.current = true
+      if (timerRef.current) {
+        clearInterval(timerRef.current)
+        timerRef.current = null
+      }
+    }
+
     function update() {
+      if (stoppedRef.current) return
       fetch("/api/dashboard/summary", { credentials: "same-origin" })
-        .then((r) => (r.ok ? r.json() : null))
+        .then((r) => {
+          if (r.status === 401) {
+            // Not authenticated — stop polling permanently
+            stop()
+            return null
+          }
+          return r.ok ? r.json() : null
+        })
         .then((data: DashboardSummary | null) => {
-          if (!data) return // 401 or error — leave favicon alone
+          if (!data) return
           const hasError = data.services.error > 0
           setFavicon(hasError ? "/favicon-error.svg" : "/favicon-healthy.svg")
         })
@@ -43,9 +61,7 @@ export function useDynamicFavicon(intervalMs = 30_000) {
     update()
     timerRef.current = setInterval(update, intervalMs)
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
+    return () => stop()
   }, [intervalMs])
 }
 
