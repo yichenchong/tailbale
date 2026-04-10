@@ -1,9 +1,11 @@
 import { useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type LoginResponse } from "@/lib/api"
+import { useStaticFavicon } from "@/lib/useFavicon"
 import { Loader2, LogIn } from "lucide-react"
 
 export default function Login() {
+  useStaticFavicon("/favicon.svg")
   const navigate = useNavigate()
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
