@@ -4,7 +4,7 @@ import { api, type LoginResponse } from "@/lib/api"
 import { useStaticFavicon } from "@/lib/useFavicon"
 import { Loader2, LogIn } from "lucide-react"
 
-export default function Login() {
+export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
   useStaticFavicon("/favicon.svg")
   const navigate = useNavigate()
   const [username, setUsername] = useState("")
@@ -18,6 +18,7 @@ export default function Login() {
     setError("")
     try {
       await api.post<LoginResponse>("/auth/login", { username, password })
+      onLogin?.()
       navigate("/")
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed")

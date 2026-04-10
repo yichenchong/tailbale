@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom"
-import { useEffect, useState } from "react"
+import { useEffect, useState, useCallback } from "react"
 import { Layout } from "@/components/Layout"
 import Dashboard from "@/pages/Dashboard"
 import Services from "@/pages/Services"
@@ -37,6 +37,10 @@ function App() {
       })
   }, [])
 
+  const onLogin = useCallback(() => {
+    setAuthenticated(true)
+  }, [])
+
   // Still loading
   if (setupComplete === null || authenticated === null) return null
 
@@ -53,7 +57,7 @@ function App() {
         />
         <Route
           path="login"
-          element={authenticated ? <Navigate to="/" replace /> : <Login />}
+          element={authenticated ? <Navigate to="/" replace /> : <Login onLogin={onLogin} />}
         />
 
         {redirect ? (
