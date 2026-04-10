@@ -1,8 +1,7 @@
-import { useState, useEffect, useRef } from "react"
-import { useNavigate, useSearchParams, Link } from "react-router-dom"
+import { useState, useEffect } from "react"
+import { useNavigate, useSearchParams } from "react-router-dom"
 import { api, type ServiceItem, type AllSettings, type ContainerPort } from "@/lib/api"
-import { Loader2, ArrowLeft, CheckCircle, XCircle, Info } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { Loader2, ArrowLeft, CheckCircle, Info } from "lucide-react"
 
 interface AppProfile {
   name: string
@@ -13,33 +12,12 @@ interface AppProfile {
   image_patterns: string[]
 }
 
-const PROGRESS_PHASES = [
-  { key: "pending", label: "Queued" },
-  { key: "validating", label: "Validating" },
-  { key: "creating_network", label: "Creating Network" },
-  { key: "ensuring_cert", label: "Issuing Certificate" },
-  { key: "rendering_config", label: "Generating Config" },
-  { key: "ensuring_edge", label: "Creating Edge" },
-  { key: "detecting_ip", label: "Waiting for Tailscale" },
-  { key: "ensuring_dns", label: "Syncing DNS" },
-  { key: "reloading_caddy", label: "Reloading Caddy" },
-  { key: "checking_health", label: "Health Checks" },
-  { key: "healthy", label: "Healthy" },
-]
-
 export default function ExposeService() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<AllSettings | null>(null)
-
-  // Progress polling state
-  const [createdServiceId, setCreatedServiceId] = useState<string | null>(null)
-  const [createdServiceName, setCreatedServiceName] = useState("")
-  const [currentPhase, setCurrentPhase] = useState("pending")
-  const [phaseMessage, setPhaseMessage] = useState<string | null>(null)
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // App profile state
   const [detectedProfile, setDetectedProfile] = useState<string | null>(null)
@@ -96,39 +74,6 @@ export default function ExposeService() {
     }
   }, [])
 
-  // Polling for progress after creation
-  useEffect(() => {
-    if (!createdServiceId) return
-
-    const poll = async () => {
-      try {
-        const svc = await api.get<ServiceItem>(`/services/${createdServiceId}`)
-        const phase = svc.status?.phase || "pending"
-        setCurrentPhase(phase)
-        setPhaseMessage(svc.status?.message || null)
-
-        if (phase === "healthy" || phase === "failed" || phase === "error") {
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current)
-            intervalRef.current = null
-          }
-        }
-      } catch {
-        // Service may not be ready yet, keep polling
-      }
-    }
-
-    poll()
-    intervalRef.current = setInterval(poll, 2000)
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
-      }
-    }
-  }, [createdServiceId])
-
   const baseDomain = settings?.general.base_domain || "example.com"
   const fullHostname = `${hostnamePrefix}.${baseDomain}`
 
@@ -150,94 +95,12 @@ export default function ExposeService() {
         custom_caddy_snippet: customSnippet || null,
         app_profile: appProfile,
       })
-      setCreatedServiceId(svc.id)
-      setCreatedServiceName(svc.name)
-      setCurrentPhase(svc.status?.phase || "pending")
-      setPhaseMessage(svc.status?.message || null)
+      // Redirect straight to the service detail page
+      navigate(`/services/${svc.id}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
-    } finally {
       setSaving(false)
     }
-  }
-
-  // --- Progress screen ---
-  if (createdServiceId) {
-    const isFinal = currentPhase === "healthy" || currentPhase === "failed" || currentPhase === "error"
-    const isSuccess = currentPhase === "healthy"
-    const isFailed = currentPhase === "failed" || currentPhase === "error"
-
-    // Find current step index
-    const currentIdx = PROGRESS_PHASES.findIndex((p) => p.key === currentPhase)
-
-    return (
-      <div>
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold">
-            {isSuccess ? "Service Created" : isFailed ? "Creation Failed" : "Creating Service..."}
-          </h1>
-          <p className="mt-1 text-sm text-zinc-500">{createdServiceName}</p>
-        </div>
-
-        <div className="max-w-lg space-y-3">
-          {PROGRESS_PHASES.map((step, idx) => {
-            const isCompleted = currentIdx > idx || (isSuccess && idx === PROGRESS_PHASES.length - 1)
-            const isCurrent = step.key === currentPhase
-            const isPending = currentIdx < idx && !isSuccess
-
-            return (
-              <div key={step.key} className="flex items-center gap-3">
-                {isCompleted ? (
-                  <CheckCircle className="h-5 w-5 text-green-500" />
-                ) : isCurrent && !isFinal ? (
-                  <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
-                ) : isCurrent && isFailed ? (
-                  <XCircle className="h-5 w-5 text-red-500" />
-                ) : (
-                  <div className="h-5 w-5 rounded-full border-2 border-zinc-200" />
-                )}
-                <span className={cn(
-                  "text-sm",
-                  isCompleted ? "text-green-700" : isCurrent ? "text-zinc-900 font-medium" : isPending ? "text-zinc-400" : "text-zinc-500",
-                )}>
-                  {step.label}
-                </span>
-              </div>
-            )
-          })}
-        </div>
-
-        {isFailed && phaseMessage && (
-          <div className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
-            {phaseMessage}
-          </div>
-        )}
-
-        {isSuccess && profileData?.post_setup_reminder && (
-          <div className="mt-4 max-w-lg flex items-start gap-2 rounded-md bg-blue-50 px-4 py-3 text-sm text-blue-800">
-            <Info className="mt-0.5 h-4 w-4 shrink-0" />
-            <div>
-              <strong>{profileData.name} reminder:</strong> {profileData.post_setup_reminder}
-            </div>
-          </div>
-        )}
-
-        <div className="mt-6 flex gap-3">
-          <Link
-            to={`/services/${createdServiceId}`}
-            className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-          >
-            {isSuccess ? "View Service" : "View Service Details"}
-          </Link>
-          <Link
-            to="/services"
-            className="inline-flex items-center gap-2 rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50"
-          >
-            Back to Services
-          </Link>
-        </div>
-      </div>
-    )
   }
 
   // --- Wizard form ---

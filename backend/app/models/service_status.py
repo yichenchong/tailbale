@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -21,6 +21,14 @@ class ServiceStatus(Base):
     health_checks: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     last_reconciled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Probe retry tracking — when the next background retry is scheduled
+    probe_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    probe_retry_attempt: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # When the HTTPS probe last ran (pass or fail)
+    last_probe_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )

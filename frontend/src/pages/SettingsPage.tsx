@@ -244,6 +244,7 @@ function GeneralTab({
   const [acmeEmail, setAcmeEmail] = useState(settings.acme_email)
   const [reconcileInterval, setReconcileInterval] = useState(String(settings.reconcile_interval_seconds))
   const [renewalWindow, setRenewalWindow] = useState(String(settings.cert_renewal_window_days))
+  const [timezone, setTimezone] = useState(settings.timezone)
 
   return (
     <div className="space-y-4">
@@ -263,6 +264,19 @@ function GeneralTab({
         type="number"
         hint="Renew certs this many days before expiry"
       />
+      <label className="block">
+        <span className="text-sm font-medium text-zinc-700">Timezone</span>
+        <select
+          value={timezone}
+          onChange={(e) => setTimezone(e.target.value)}
+          className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm shadow-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+        >
+          {Intl.supportedValuesOf("timeZone").map((tz) => (
+            <option key={tz} value={tz}>{tz.replace(/_/g, " ")}</option>
+          ))}
+        </select>
+        <p className="mt-1 text-xs text-zinc-400">Timezone used for all displayed times</p>
+      </label>
       <SaveButton
         saving={saving}
         onClick={() =>
@@ -271,6 +285,7 @@ function GeneralTab({
             acme_email: acmeEmail,
             reconcile_interval_seconds: Number(reconcileInterval),
             cert_renewal_window_days: Number(renewalWindow),
+            timezone,
           })
         }
       />
@@ -354,6 +369,7 @@ function TailscaleTab({
   testResult: ConnectionTestResult | null
 }) {
   const [authKey, setAuthKey] = useState("")
+  const [apiKey, setApiKey] = useState("")
   const [controlUrl, setControlUrl] = useState(settings.control_url)
   const [prefix, setPrefix] = useState(settings.default_ts_hostname_prefix)
 
@@ -366,10 +382,23 @@ function TailscaleTab({
           onChange={setAuthKey}
           type="password"
           placeholder="tskey-auth-..."
-          hint="Write-only — current value is never shown"
+          hint="Write-only — used to register edge containers on your tailnet"
         />
         <div className="mt-1">
           <SecretStatus configured={settings.auth_key_configured} />
+        </div>
+      </div>
+      <div>
+        <Field
+          label="API Key"
+          value={apiKey}
+          onChange={setApiKey}
+          type="password"
+          placeholder="tskey-api-..."
+          hint="Write-only — used to remove devices from tailnet on service deletion"
+        />
+        <div className="mt-1">
+          <SecretStatus configured={settings.api_key_configured} />
         </div>
       </div>
       <Field label="Control URL" value={controlUrl} onChange={setControlUrl} placeholder="https://controlplane.tailscale.com" />
@@ -386,6 +415,7 @@ function TailscaleTab({
           onClick={() =>
             onSave({
               auth_key: authKey || undefined,
+              api_key: apiKey || undefined,
               control_url: controlUrl,
               default_ts_hostname_prefix: prefix,
             })

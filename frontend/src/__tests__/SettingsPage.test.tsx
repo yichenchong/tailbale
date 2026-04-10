@@ -8,10 +8,12 @@ const mockSettings = {
     acme_email: "admin@example.com",
     reconcile_interval_seconds: 60,
     cert_renewal_window_days: 30,
+    timezone: "UTC",
   },
   cloudflare: { zone_id: "zone123", token_configured: true },
   tailscale: {
     auth_key_configured: true,
+    api_key_configured: false,
     control_url: "https://controlplane.tailscale.com",
     default_ts_hostname_prefix: "edge",
   },

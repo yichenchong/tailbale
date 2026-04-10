@@ -37,6 +37,7 @@ export interface GeneralSettings {
   acme_email: string
   reconcile_interval_seconds: number
   cert_renewal_window_days: number
+  timezone: string
 }
 
 export interface CloudflareSettings {
@@ -46,6 +47,7 @@ export interface CloudflareSettings {
 
 export interface TailscaleSettings {
   auth_key_configured: boolean
+  api_key_configured: boolean
   control_url: string
   default_ts_hostname_prefix: string
 }
@@ -84,6 +86,9 @@ export interface ServiceStatus {
   last_reconciled_at: string | null
   health_checks: Record<string, boolean> | null
   cert_expires_at: string | null
+  probe_retry_at: string | null
+  probe_retry_attempt: number | null
+  last_probe_at: string | null
 }
 
 export interface ServiceItem {

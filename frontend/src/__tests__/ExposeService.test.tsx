@@ -3,9 +3,9 @@ import { render, screen, waitFor, fireEvent } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 const mockSettings = {
-  general: { base_domain: "example.com", acme_email: "a@b.com", reconcile_interval_seconds: 60, cert_renewal_window_days: 30 },
+  general: { base_domain: "example.com", acme_email: "a@b.com", reconcile_interval_seconds: 60, cert_renewal_window_days: 30, timezone: "UTC" },
   cloudflare: { zone_id: "", token_configured: false },
-  tailscale: { auth_key_configured: false, control_url: "", default_ts_hostname_prefix: "edge" },
+  tailscale: { auth_key_configured: false, api_key_configured: false, control_url: "", default_ts_hostname_prefix: "edge" },
   docker: { socket_path: "" },
   paths: { generated_root: "", cert_root: "", tailscale_state_root: "" },
   setup_complete: false,
@@ -112,14 +112,20 @@ describe("ExposeService page", () => {
     })
   })
 
-  it("shows progress screen after submit", async () => {
-    let callCount = 0
-    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+  it("calls API and navigates after submit", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
       // Settings GET
       if (String(url).includes("/settings")) {
         return Promise.resolve({
           ok: true,
           json: () => Promise.resolve(mockSettings),
+        })
+      }
+      // Profile detect
+      if (String(url).includes("/profiles/detect")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ detected_profile: null, profile: null }),
         })
       }
       // Service POST (create)
@@ -129,17 +135,9 @@ describe("ExposeService page", () => {
           json: () => Promise.resolve(mockCreatedService),
         })
       }
-      // Service GET (poll) - return healthy on second poll
-      callCount++
-      const phase = callCount >= 2 ? "healthy" : "pending"
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          ...mockCreatedService,
-          status: { ...mockCreatedService.status, phase, message: phase === "healthy" ? "All checks passing" : "Awaiting first reconciliation" },
-        }),
-      })
-    }))
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
 
     const { default: ExposeService } = await import("@/pages/ExposeService")
     render(
@@ -154,9 +152,12 @@ describe("ExposeService page", () => {
 
     fireEvent.click(screen.getByText("Create Service"))
 
+    // Verify the POST was made
     await waitFor(() => {
-      // Should show the progress screen
-      expect(screen.getByText("View Service Details")).toBeInTheDocument()
+      const postCalls = fetchMock.mock.calls.filter(
+        (c: unknown[]) => typeof c[1] === "object" && (c[1] as RequestInit).method === "POST"
+      )
+      expect(postCalls.length).toBeGreaterThanOrEqual(1)
     })
   })
 })

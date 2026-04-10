@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
 import { api } from "@/lib/api"
+import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -29,6 +30,7 @@ interface JobsResponse {
 }
 
 export default function OrphanDns() {
+  const tz = useTimezone()
   const [jobs, setJobs] = useState<OrphanJob[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
@@ -96,9 +98,9 @@ export default function OrphanDns() {
     }
   }
 
-  function formatTime(iso: string | null) {
+  function fmtTime(iso: string | null) {
     if (!iso) return "\u2014"
-    return new Date(iso).toLocaleString()
+    return formatDateTime(iso, tz)
   }
 
   const STATUS_STYLES: Record<string, string> = {
@@ -175,7 +177,7 @@ export default function OrphanDns() {
                         {d?.value && (
                           <div>IP: <code className="rounded bg-zinc-100 px-1 py-0.5 text-xs">{d.value}</code></div>
                         )}
-                        <div>Created: {formatTime(job.created_at)}</div>
+                        <div>Created: {fmtTime(job.created_at)}</div>
                         {job.message && (
                           <div className="mt-1 text-xs text-zinc-400">{job.message}</div>
                         )}

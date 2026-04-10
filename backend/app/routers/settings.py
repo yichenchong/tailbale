@@ -21,6 +21,7 @@ from app.schemas.settings import (
 )
 from app.secrets import (
     CLOUDFLARE_TOKEN,
+    TAILSCALE_API_KEY,
     TAILSCALE_AUTH_KEY,
     read_secret,
     secret_exists,
@@ -43,6 +44,7 @@ def _build_response(db: Session) -> AllSettingsResponse:
             acme_email=s["acme_email"],
             reconcile_interval_seconds=int(s["reconcile_interval_seconds"]),
             cert_renewal_window_days=int(s["cert_renewal_window_days"]),
+            timezone=s["timezone"],
         ),
         cloudflare=CloudflareSettingsResponse(
             zone_id=s["cf_zone_id"],
@@ -50,6 +52,7 @@ def _build_response(db: Session) -> AllSettingsResponse:
         ),
         tailscale=TailscaleSettingsResponse(
             auth_key_configured=secret_exists(TAILSCALE_AUTH_KEY),
+            api_key_configured=secret_exists(TAILSCALE_API_KEY),
             control_url=s["ts_control_url"],
             default_ts_hostname_prefix=s["ts_default_hostname_prefix"],
         ),
@@ -86,6 +89,8 @@ async def update_general(body: GeneralSettingsUpdate, db: Session = Depends(get_
         set_setting(db, "reconcile_interval_seconds", str(body.reconcile_interval_seconds))
     if body.cert_renewal_window_days is not None:
         set_setting(db, "cert_renewal_window_days", str(body.cert_renewal_window_days))
+    if body.timezone is not None:
+        set_setting(db, "timezone", body.timezone)
     db.commit()
     return _build_response(db)
 
@@ -104,6 +109,8 @@ async def update_cloudflare(body: CloudflareSettingsUpdate, db: Session = Depend
 async def update_tailscale(body: TailscaleSettingsUpdate, db: Session = Depends(get_db)):
     if body.auth_key is not None:
         write_secret(TAILSCALE_AUTH_KEY, body.auth_key)
+    if body.api_key is not None:
+        write_secret(TAILSCALE_API_KEY, body.api_key)
     if body.control_url is not None:
         set_setting(db, "ts_control_url", body.control_url)
     if body.default_ts_hostname_prefix is not None:

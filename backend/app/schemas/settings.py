@@ -6,6 +6,7 @@ class GeneralSettingsUpdate(BaseModel):
     acme_email: str | None = None
     reconcile_interval_seconds: int | None = None
     cert_renewal_window_days: int | None = None
+    timezone: str | None = None
 
 
 class CloudflareSettingsUpdate(BaseModel):
@@ -15,6 +16,7 @@ class CloudflareSettingsUpdate(BaseModel):
 
 class TailscaleSettingsUpdate(BaseModel):
     auth_key: str | None = None  # Write-only — never returned
+    api_key: str | None = None   # Write-only — for device management API
     control_url: str | None = None
     default_ts_hostname_prefix: str | None = None
 
@@ -34,6 +36,7 @@ class GeneralSettingsResponse(BaseModel):
     acme_email: str
     reconcile_interval_seconds: int
     cert_renewal_window_days: int
+    timezone: str
 
 
 class CloudflareSettingsResponse(BaseModel):
@@ -43,6 +46,7 @@ class CloudflareSettingsResponse(BaseModel):
 
 class TailscaleSettingsResponse(BaseModel):
     auth_key_configured: bool
+    api_key_configured: bool
     control_url: str
     default_ts_hostname_prefix: str
 

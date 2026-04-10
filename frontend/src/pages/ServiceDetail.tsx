@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type ServiceItem, type ServiceUpdateRequest } from "@/lib/api"
+import { useTimezone, formatDate, formatDateTime } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
 import {
   Loader2,
@@ -17,6 +18,8 @@ import {
   CheckCircle2,
   XCircle,
   AlertTriangle,
+  Clock,
+  Timer,
 } from "lucide-react"
 
 const PHASE_STYLES: Record<string, string> = {
@@ -39,6 +42,7 @@ const CHECK_LABELS: Record<string, string> = {
   dns_record_present: "DNS Record",
   dns_matches_ip: "DNS Matches IP",
   caddy_config_present: "Caddy Config",
+  https_probe_ok: "HTTPS Probe",
 }
 
 const CHECK_SUGGESTIONS: Record<string, string> = {
@@ -53,11 +57,13 @@ const CHECK_SUGGESTIONS: Record<string, string> = {
   dns_record_present: "No DNS record found. Re-run reconcile to create the Cloudflare DNS record.",
   dns_matches_ip: "DNS record IP does not match the current Tailscale IP. Re-run reconcile to update.",
   caddy_config_present: "Caddyfile is missing. Re-run reconcile to generate the configuration.",
+  https_probe_ok: "HTTPS probe failed — Caddy may still be starting or the upstream is unreachable.",
 }
 
 export default function ServiceDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
+  const tz = useTimezone()
   const [service, setService] = useState<ServiceItem | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -337,7 +343,7 @@ export default function ServiceDetail() {
             <Row label="Docker Network" value={service.network_name} />
             <Row label="TS Hostname" value={service.ts_hostname} />
             <Row label="Tailscale IP" value={service.status?.tailscale_ip || "—"} />
-            <Row label="Cert Expiry" value={service.status?.cert_expires_at ? new Date(service.status.cert_expires_at).toLocaleDateString() : "—"} />
+            <Row label="Cert Expiry" value={service.status?.cert_expires_at ? formatDate(service.status.cert_expires_at, tz) : "—"} />
             <Row label="Phase" value={phase} />
             <Row label="Message" value={service.status?.message || "—"} />
             <Row label="Last Reconciled" value={service.status?.last_reconciled_at || "Never"} />
@@ -374,6 +380,24 @@ export default function ServiceDetail() {
                 </div>
               ))}
             </div>
+
+            {/* Last probe timestamp */}
+            {service.status?.last_probe_at && (
+              <div className="mt-3 flex items-center gap-1.5 text-xs text-zinc-500">
+                <Clock className="h-3.5 w-3.5" />
+                Last checked {formatDateTime(service.status.last_probe_at, tz)}
+              </div>
+            )}
+
+            {/* Probe retry info when HTTPS probe is failing */}
+            {healthChecks.https_probe_ok === false && service.status?.probe_retry_at && (
+              <ProbeRetryBanner
+                retryAt={service.status.probe_retry_at}
+                attempt={service.status.probe_retry_attempt}
+                tz={tz}
+              />
+            )}
+
             {/* Show actionable suggestions for failing checks */}
             {Object.entries(healthChecks).some(([, ok]) => !ok) && (
               <div className="mt-3 space-y-1 rounded-md bg-red-50 p-3">
@@ -518,9 +542,52 @@ export default function ServiceDetail() {
 
       <div className="mt-4 text-right">
         <span className="text-xs text-zinc-400">
-          Created {new Date(service.created_at).toLocaleDateString()}
+          Created {formatDate(service.created_at, tz)}
         </span>
       </div>
+    </div>
+  )
+}
+
+function ProbeRetryBanner({
+  retryAt,
+  attempt,
+  tz,
+}: {
+  retryAt: string
+  attempt: number | null
+  tz: string
+}) {
+  const [, setTick] = useState(0)
+
+  // Re-render every second so the countdown stays live
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000)
+    return () => clearInterval(id)
+  }, [])
+
+  const retryDate = new Date(retryAt)
+  const diffMs = retryDate.getTime() - Date.now()
+
+  let timeLabel: string
+  if (diffMs <= 0) {
+    timeLabel = "any moment now"
+  } else if (diffMs < 60_000) {
+    const secs = Math.ceil(diffMs / 1000)
+    timeLabel = `in ${secs}s`
+  } else if (diffMs < 3_600_000) {
+    const mins = Math.ceil(diffMs / 60_000)
+    timeLabel = `in ${mins}m`
+  } else {
+    timeLabel = formatDateTime(retryAt, tz)
+  }
+
+  return (
+    <div className="mt-2 flex items-center gap-1.5 rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-700">
+      <Timer className="h-3.5 w-3.5 flex-shrink-0" />
+      <span>
+        HTTPS probe retry #{attempt ?? "?"} scheduled {timeLabel}
+      </span>
     </div>
   )
 }

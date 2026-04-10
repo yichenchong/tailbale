@@ -21,13 +21,13 @@ def render_caddyfile(service: Service) -> str:
     if not service.preserve_host_header:
         # Caddy preserves the original Host by default. When the user opts OUT,
         # rewrite Host to the upstream container address so the app sees its own name.
-        preserve_host_block = "    header_up Host {upstream_hostport}"
+        preserve_host_block = "\t\theader_up Host {upstream_hostport}"
 
     custom_snippet = ""
     if service.custom_caddy_snippet:
-        # Indent each line of the custom snippet
-        lines = service.custom_caddy_snippet.strip().splitlines()
-        custom_snippet = "\n" + "\n".join(f"  {line}" for line in lines)
+        # Indent each line of the custom snippet with a single tab
+        snippet_lines = service.custom_caddy_snippet.strip().splitlines()
+        custom_snippet = "\n" + "\n".join(f"\t{line}" for line in snippet_lines)
 
     upstream = f"{service.upstream_container_name}:{service.upstream_port}"
 
@@ -40,24 +40,25 @@ def render_caddyfile(service: Service) -> str:
     else:
         upstream_addr = upstream  # plain address — Caddy uses HTTP by default
 
+    # Caddy expects tab indentation (caddy fmt standard).
     lines = [
         "{",
-        "  auto_https off",
+        "\tauto_https off",
         "}",
         "",
         f"https://{service.hostname} {{",
-        "  tls /certs/fullchain.pem /certs/privkey.pem",
+        "\ttls /certs/fullchain.pem /certs/privkey.pem",
         "",
-        f"  reverse_proxy {upstream_addr} {{",
+        f"\treverse_proxy {upstream_addr} {{",
     ]
 
     if preserve_host_block:
         lines.append(preserve_host_block)
 
     lines.extend([
-        "    header_up X-Forwarded-Proto https",
-        "    header_up X-Real-IP {remote_host}",
-        "  }",
+        "\t\theader_up X-Forwarded-Proto https",
+        "\t\theader_up X-Real-IP {remote_host}",
+        "\t}",
     ])
 
     if custom_snippet:

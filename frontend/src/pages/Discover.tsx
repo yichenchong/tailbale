@@ -3,11 +3,13 @@ import { useNavigate } from "react-router-dom"
 import { api, type DiscoveredContainer, type DiscoveryResponse, type ServiceListResponse } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { Loader2, Search, Globe, RefreshCw } from "lucide-react"
+import { useTimezone, formatTime } from "@/lib/useTimezone"
 
 const POLL_INTERVAL = 30_000 // 30 seconds
 
 export default function Discover() {
   const navigate = useNavigate()
+  const tz = useTimezone()
   const [containers, setContainers] = useState<DiscoveredContainer[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -82,7 +84,7 @@ export default function Discover() {
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-zinc-400">
-              Updated {lastRefresh.toLocaleTimeString()}
+              Updated {formatTime(lastRefresh, tz)}
             </span>
           )}
           <button

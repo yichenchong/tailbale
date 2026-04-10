@@ -140,6 +140,9 @@ def _to_response(
             last_reconciled_at=status.last_reconciled_at.isoformat() if status.last_reconciled_at else None,
             health_checks=health_checks,
             cert_expires_at=cert.expires_at.isoformat() if cert and cert.expires_at else None,
+            probe_retry_at=status.probe_retry_at.isoformat() if status.probe_retry_at else None,
+            probe_retry_attempt=status.probe_retry_attempt,
+            last_probe_at=status.last_probe_at.isoformat() if status.last_probe_at else None,
         )
     return ServiceResponse(
         id=svc.id,

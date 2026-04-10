@@ -199,6 +199,7 @@ def reconcile_service(
         checks = run_health_checks(db, service, generated_dir, certs_dir, socket_path)
         result["health_checks"] = checks
         status.health_checks = json.dumps(checks)
+        status.last_probe_at = datetime.now(timezone.utc)
 
         # ── Step 12: Determine final phase ──
         phase = aggregate_status(checks)

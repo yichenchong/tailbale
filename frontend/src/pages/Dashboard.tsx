@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/api"
+import { useTimezone, formatDateTime, formatTime as fmtTime } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
 import {
   Loader2,
@@ -46,6 +47,7 @@ interface DashboardSummary {
 }
 
 export default function Dashboard() {
+  const tz = useTimezone()
   const [data, setData] = useState<DashboardSummary | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState("")
@@ -104,7 +106,7 @@ export default function Dashboard() {
         <div className="flex items-center gap-3">
           {lastRefresh && (
             <span className="text-xs text-zinc-400">
-              Updated {lastRefresh.toLocaleTimeString()}
+              Updated {fmtTime(lastRefresh, tz)}
             </span>
           )}
           <button
@@ -174,7 +176,7 @@ export default function Dashboard() {
               {data.recent_errors.slice(0, 8).map((e) => (
                 <li key={e.id} className="text-sm">
                   <span className="font-mono text-xs text-zinc-400">
-                    {e.created_at ? new Date(e.created_at).toLocaleString() : ""}
+                    {e.created_at ? formatDateTime(e.created_at, tz) : ""}
                   </span>
                   <p className="text-zinc-700">{e.message}</p>
                 </li>
@@ -196,7 +198,7 @@ export default function Dashboard() {
             {data.recent_events.slice(0, 10).map((e) => (
               <li key={e.id} className="flex items-start gap-3 text-sm">
                 <span className="w-36 shrink-0 font-mono text-xs text-zinc-400">
-                  {e.created_at ? new Date(e.created_at).toLocaleString() : ""}
+                  {e.created_at ? formatDateTime(e.created_at, tz) : ""}
                 </span>
                 <span className={cn(
                   "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium",

@@ -13,8 +13,9 @@ from app.config import settings
 # Known secret names
 CLOUDFLARE_TOKEN = "cloudflare_token"
 TAILSCALE_AUTH_KEY = "tailscale_authkey"
+TAILSCALE_API_KEY = "tailscale_api_key"
 
-ALL_SECRETS = [CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY]
+ALL_SECRETS = [CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, TAILSCALE_API_KEY]
 
 
 def _secret_path(name: str) -> Path:

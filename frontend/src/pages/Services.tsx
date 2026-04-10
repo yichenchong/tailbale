@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { api, type ServiceItem, type ServiceListResponse } from "@/lib/api"
+import { useTimezone, formatDate } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
 import { Loader2, Plus, ExternalLink, MoreVertical } from "lucide-react"
 
@@ -12,12 +13,12 @@ const PHASE_STYLES: Record<string, string> = {
   failed: "bg-red-100 text-red-700",
 }
 
-function formatCertExpiry(iso: string | null | undefined): { text: string; style: string } {
+function formatCertExpiry(iso: string | null | undefined, tz: string): { text: string; style: string } {
   if (!iso) return { text: "—", style: "text-zinc-400" }
   const expiry = new Date(iso)
   const now = new Date()
   const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
-  const text = expiry.toLocaleDateString()
+  const text = formatDate(iso, tz)
   if (daysLeft < 0) return { text, style: "text-red-600 font-medium" }
   if (daysLeft <= 14) return { text, style: "text-yellow-600 font-medium" }
   return { text, style: "text-zinc-500" }
@@ -25,6 +26,7 @@ function formatCertExpiry(iso: string | null | undefined): { text: string; style
 
 export default function Services() {
   const navigate = useNavigate()
+  const tz = useTimezone()
   const [services, setServices] = useState<ServiceItem[]>([])
   const [loading, setLoading] = useState(true)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
@@ -126,7 +128,7 @@ export default function Services() {
             <tbody className="divide-y divide-zinc-100 bg-white">
               {services.map((svc) => {
                 const phase = svc.status?.phase || "pending"
-                const cert = formatCertExpiry(svc.status?.cert_expires_at)
+                const cert = formatCertExpiry(svc.status?.cert_expires_at, tz)
                 return (
                   <tr key={svc.id} className="hover:bg-zinc-50">
                     <td className="whitespace-nowrap px-4 py-3">

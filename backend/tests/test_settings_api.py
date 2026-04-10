@@ -1,6 +1,6 @@
 """Tests for the Settings API endpoints."""
 
-from app.secrets import CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, read_secret, secret_exists
+from app.secrets import CLOUDFLARE_TOKEN, TAILSCALE_API_KEY, TAILSCALE_AUTH_KEY, read_secret, secret_exists
 
 
 class TestGetSettings:
@@ -16,6 +16,7 @@ class TestGetSettings:
         assert data["cloudflare"]["zone_id"] == ""
         assert data["cloudflare"]["token_configured"] is False
         assert data["tailscale"]["auth_key_configured"] is False
+        assert data["tailscale"]["api_key_configured"] is False
         assert data["tailscale"]["control_url"] == "https://controlplane.tailscale.com"
         assert data["docker"]["socket_path"] == "unix:///var/run/docker.sock"
         assert data["setup_complete"] is False
@@ -99,6 +100,12 @@ class TestUpdateTailscale:
             "default_ts_hostname_prefix": "myedge"
         })
         assert resp.json()["tailscale"]["default_ts_hostname_prefix"] == "myedge"
+
+    def test_update_api_key(self, client, tmp_data_dir):
+        resp = client.put("/api/settings/tailscale", json={"api_key": "tskey-api-abc123"})
+        assert resp.status_code == 200
+        assert resp.json()["tailscale"]["api_key_configured"] is True
+        assert read_secret(TAILSCALE_API_KEY) == "tskey-api-abc123"
 
 
 class TestUpdateDocker:

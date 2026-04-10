@@ -60,6 +60,9 @@ class ServiceStatusResponse(BaseModel):
     last_reconciled_at: str | None = None
     health_checks: dict[str, bool] | None = None
     cert_expires_at: str | None = None
+    probe_retry_at: str | None = None
+    probe_retry_attempt: int | None = None
+    last_probe_at: str | None = None
 
 
 class ServiceResponse(BaseModel):

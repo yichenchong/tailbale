@@ -17,6 +17,7 @@ DEFAULTS = {
     "generated_root": "",
     "cert_root": "",
     "tailscale_state_root": "",
+    "timezone": "UTC",
     "setup_complete": "false",
 }
 

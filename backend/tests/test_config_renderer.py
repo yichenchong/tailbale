@@ -123,6 +123,24 @@ class TestRenderCaddyfile:
         assert "http://nextcloud:443" not in result
         assert "https://nextcloud:443" not in result
 
+    def test_uses_tab_indentation(self):
+        """Caddy expects tab indentation (caddy fmt standard)."""
+        from app.edge.config_renderer import render_caddyfile
+
+        svc = _make_service()
+        result = render_caddyfile(svc)
+
+        # Should use tabs, not spaces, for indentation
+        assert "\tauto_https off" in result
+        assert "\ttls /certs/fullchain.pem" in result
+        assert "\treverse_proxy " in result
+        assert "\t\theader_up X-Forwarded-Proto https" in result
+        # No leading-space indentation
+        for line in result.splitlines():
+            stripped = line.lstrip("\t")
+            if stripped and stripped != line:
+                assert not stripped.startswith("  "), f"Mixed indent: {line!r}"
+
     def test_https_scheme_keeps_prefix(self):
         """When upstream is genuinely HTTPS, the scheme prefix is included."""
         from app.edge.config_renderer import render_caddyfile

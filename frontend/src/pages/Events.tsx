@@ -1,5 +1,6 @@
 import { Fragment, useEffect, useState } from "react"
 import { api } from "@/lib/api"
+import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -65,10 +66,10 @@ export default function Events() {
 
   useEffect(() => { load() }, [search, levelFilter, kindFilter, offset])
 
-  function formatTime(iso: string | null) {
+  const tz = useTimezone()
+  function fmtTime(iso: string | null) {
     if (!iso) return "—"
-    const d = new Date(iso)
-    return d.toLocaleString()
+    return formatDateTime(iso, tz)
   }
 
   return (
@@ -162,7 +163,7 @@ export default function Events() {
                           ) : null}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap text-zinc-500 font-mono text-xs">
-                          {formatTime(evt.created_at)}
+                          {fmtTime(evt.created_at)}
                         </td>
                         <td className="px-3 py-2">
                           <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", LEVEL_STYLES[evt.level] || "bg-zinc-100 text-zinc-600")}>

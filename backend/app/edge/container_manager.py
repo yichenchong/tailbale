@@ -67,13 +67,15 @@ def create_edge_container(
     ensure_edge_image(socket_path)
     client = _get_client(socket_path)
 
-    # Prepare mount paths (these are host-side paths for Docker bind mounts)
-    caddyfile_path = str(generated_dir / service.id / "Caddyfile")
+    # Prepare mount paths (these are host-side paths for Docker bind mounts).
+    # The Caddyfile directory is mounted (not the file itself) to avoid
+    # stale-inode issues when the file is atomically replaced on the host.
+    caddy_config_dir = str(generated_dir / service.id)
     cert_dir = str(certs_dir / service.hostname)
     ts_state_dir = str(tailscale_state_dir / service.edge_container_name)
 
     mounts = [
-        Mount(target="/etc/caddy/Caddyfile", source=caddyfile_path, type="bind", read_only=True),
+        Mount(target="/etc/caddy", source=caddy_config_dir, type="bind", read_only=True),
         Mount(target="/certs", source=cert_dir, type="bind", read_only=True),
         Mount(target="/var/lib/tailscale", source=ts_state_dir, type="bind"),
     ]
@@ -143,14 +145,82 @@ def restart_edge(
     logger.info("Restarted edge container %s", edge_container_name)
 
 
+def _get_tailscale_node_id(
+    container: "docker.models.containers.Container",
+) -> str | None:
+    """Extract the Tailscale node ID from inside a running edge container."""
+    try:
+        exit_code, output = container.exec_run(
+            "tailscale status --json",
+            environment={"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"},
+        )
+        if exit_code != 0:
+            return None
+        status = json.loads(output.decode("utf-8", errors="replace"))
+        return status.get("Self", {}).get("ID")
+    except Exception:
+        return None
+
+
+def _delete_tailscale_device(node_id: str, api_key: str) -> bool:
+    """Delete a device from the tailnet via the Tailscale API.
+
+    Uses ``DELETE /api/v2/device/{nodeId}`` with Basic auth.
+    Returns True on success (200/2xx), False on any failure.
+    """
+    import httpx
+
+    try:
+        resp = httpx.delete(
+            f"https://api.tailscale.com/api/v2/device/{node_id}",
+            auth=(api_key, ""),
+            timeout=10.0,
+        )
+        if resp.is_success:
+            logger.info("Deleted Tailscale device %s via API", node_id)
+            return True
+        logger.warning(
+            "Tailscale API device deletion returned %d for node %s: %s",
+            resp.status_code, node_id, resp.text[:200],
+        )
+        return False
+    except Exception:
+        logger.debug("Tailscale API device deletion failed for node %s", node_id, exc_info=True)
+        return False
+
+
 def remove_edge(
     service_id: str, edge_container_name: str, socket_path: str | None = None
 ) -> None:
-    """Remove an edge container (stop first if running)."""
+    """Remove an edge container (stop first if running).
+
+    Before removal, retrieves the Tailscale node ID from the container
+    and calls the Tailscale API to delete the device from the tailnet,
+    so it doesn't linger as an offline machine in the admin console.
+    Requires a Tailscale API key to be configured.
+    """
     container = _find_edge_container(service_id, edge_container_name, socket_path)
     if not container:
         logger.info("Edge container not found for service %s, nothing to remove", service_id)
         return
+
+    # Best-effort: remove Tailscale device via API before destroying the container
+    if container.status == "running":
+        node_id = _get_tailscale_node_id(container)
+        if node_id:
+            from app.secrets import TAILSCALE_API_KEY, read_secret
+
+            api_key = read_secret(TAILSCALE_API_KEY)
+            if api_key:
+                _delete_tailscale_device(node_id, api_key)
+            else:
+                logger.debug(
+                    "Tailscale API key not configured — skipping device removal for %s",
+                    edge_container_name,
+                )
+        else:
+            logger.debug("Could not get Tailscale node ID for %s", edge_container_name)
+
     container.remove(force=True)
     logger.info("Removed edge container %s", edge_container_name)
 

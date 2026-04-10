@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -19,9 +20,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Retry schedule: seconds to wait before each attempt (exponential-ish backoff).
-# Total coverage: ~15 minutes.
-RETRY_DELAYS = [15, 30, 60, 60, 120, 120, 180, 180]
+# Backoff config
+INITIAL_DELAY = 15        # seconds
+MAX_DELAY = 3600           # 1 hour cap
+MAX_RETRIES = 20           # ~12 hours of retries with exponential backoff
+
+
+def _compute_delay(attempt: int) -> int:
+    """Exponential backoff: 15, 30, 60, 120, 240, ... capped at 3600."""
+    delay = INITIAL_DELAY * (2 ** attempt)
+    return min(delay, MAX_DELAY)
 
 
 def schedule_probe_retry(service_id: str, socket_path: str | None = None) -> None:
@@ -53,7 +61,14 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
     from app.models.service_status import ServiceStatus
     from app.settings_store import get_runtime_paths
 
-    for delay in RETRY_DELAYS:
+    now = lambda: datetime.now(timezone.utc)  # noqa: E731
+
+    for attempt in range(MAX_RETRIES):
+        delay = _compute_delay(attempt)
+
+        # Record the next retry time in the DB so the frontend can show it
+        _update_retry_state(service_id, attempt + 1, delay)
+
         time.sleep(delay)
 
         db = SessionLocal()
@@ -61,6 +76,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
             svc = db.get(Service, service_id)
             if not svc or not svc.enabled:
                 logger.debug("Probe retry: service %s gone or disabled, stopping", service_id)
+                _clear_retry_state(service_id)
                 return
 
             status = db.get(ServiceStatus, service_id)
@@ -70,6 +86,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
             # If already healthy, nothing to do
             if status.phase == "healthy":
                 logger.debug("Probe retry: service %s already healthy", service_id)
+                _clear_retry_state(service_id)
                 return
 
             runtime = get_runtime_paths(db)
@@ -77,6 +94,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                 db, svc, runtime["generated_dir"], runtime["certs_dir"], socket_path,
             )
             new_phase = aggregate_status(checks)
+            status.last_probe_at = now()
 
             # Update status if improved
             if new_phase != status.phase:
@@ -84,6 +102,9 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                 status.phase = new_phase
                 status.health_checks = json.dumps(checks)
                 status.message = None
+                if new_phase == "healthy":
+                    status.probe_retry_at = None
+                    status.probe_retry_attempt = None
                 db.commit()
 
                 level = "info" if new_phase == "healthy" else "warning"
@@ -110,4 +131,42 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
         finally:
             db.close()
 
-    logger.info("Probe retry: exhausted retries for service %s", service_id)
+    # Exhausted all retries — clear retry state
+    _clear_retry_state(service_id)
+    logger.info("Probe retry: exhausted %d retries for service %s", MAX_RETRIES, service_id)
+
+
+def _update_retry_state(service_id: str, attempt: int, delay: int) -> None:
+    """Persist the next retry time so the frontend can display it."""
+    from app.database import SessionLocal
+    from app.models.service_status import ServiceStatus
+
+    db = SessionLocal()
+    try:
+        status = db.get(ServiceStatus, service_id)
+        if status:
+            status.probe_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+            status.probe_retry_attempt = attempt
+            db.commit()
+    except Exception:
+        logger.debug("Failed to update retry state for %s", service_id, exc_info=True)
+    finally:
+        db.close()
+
+
+def _clear_retry_state(service_id: str) -> None:
+    """Clear retry tracking fields when retries are done."""
+    from app.database import SessionLocal
+    from app.models.service_status import ServiceStatus
+
+    db = SessionLocal()
+    try:
+        status = db.get(ServiceStatus, service_id)
+        if status:
+            status.probe_retry_at = None
+            status.probe_retry_attempt = None
+            db.commit()
+    except Exception:
+        logger.debug("Failed to clear retry state for %s", service_id, exc_info=True)
+    finally:
+        db.close()

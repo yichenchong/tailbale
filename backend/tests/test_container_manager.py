@@ -132,7 +132,7 @@ class TestCreateEdgeContainer:
         call_kwargs = mock_client.containers.create.call_args
         mounts = call_kwargs.kwargs["mounts"]
         sources = [m["Source"] for m in mounts]
-        assert str(tmp_path / "generated" / "svc_abc123" / "Caddyfile") in sources
+        assert str(tmp_path / "generated" / "svc_abc123") in sources
         assert str(tmp_path / "certs" / "nextcloud.example.com") in sources
         assert str(tmp_path / "tailscale" / "edge_nextcloud") in sources
 
@@ -205,6 +205,7 @@ class TestRemoveEdge:
         from app.edge.container_manager import remove_edge
 
         mock_container = MagicMock()
+        mock_container.status = "exited"  # not running — skips API call
         mock_find.return_value = mock_container
 
         remove_edge("svc_123", "edge_test")
@@ -217,6 +218,41 @@ class TestRemoveEdge:
         mock_find.return_value = None
         # Should not raise
         remove_edge("svc_123", "edge_test")
+
+    @patch("app.edge.container_manager._delete_tailscale_device")
+    @patch("app.secrets.read_secret")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_calls_tailscale_api_on_removal(self, mock_find, mock_read_secret, mock_delete):
+        from app.edge.container_manager import remove_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        status_json = json.dumps({"Self": {"ID": "node123abc"}}).encode()
+        mock_container.exec_run.return_value = (0, status_json)
+        mock_find.return_value = mock_container
+        mock_read_secret.return_value = "tskey-api-mykey"
+        mock_delete.return_value = True
+
+        remove_edge("svc_123", "edge_test")
+
+        mock_delete.assert_called_once_with("node123abc", "tskey-api-mykey")
+        mock_container.remove.assert_called_once_with(force=True)
+
+    @patch("app.secrets.read_secret")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_skips_api_when_no_api_key(self, mock_find, mock_read_secret):
+        from app.edge.container_manager import remove_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        status_json = json.dumps({"Self": {"ID": "node123abc"}}).encode()
+        mock_container.exec_run.return_value = (0, status_json)
+        mock_find.return_value = mock_container
+        mock_read_secret.return_value = None
+
+        remove_edge("svc_123", "edge_test")
+        # Should still remove the container even without API key
+        mock_container.remove.assert_called_once_with(force=True)
 
 
 class TestRecreateEdge:

@@ -45,7 +45,10 @@ function App() {
           path="setup"
           element={setupComplete ? <Navigate to="/" replace /> : <Setup />}
         />
-        <Route path="login" element={<Login />} />
+        <Route
+          path="login"
+          element={authenticated ? <Navigate to="/" replace /> : <Login />}
+        />
 
         <Route element={<Layout />}>
           <Route

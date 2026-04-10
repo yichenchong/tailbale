@@ -26,6 +26,8 @@ async def lifespan(app: FastAPI):
     # Startup: ensure data directories and database tables exist
     settings.ensure_dirs()
     Base.metadata.create_all(bind=engine)
+    from app.database import run_migrations
+    run_migrations()
 
     # Ensure edge image is built (runs in thread to avoid blocking startup)
     from app.edge.image_builder import ensure_edge_image
