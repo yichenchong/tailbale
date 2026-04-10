@@ -12,7 +12,6 @@ import SettingsPage from "@/pages/SettingsPage"
 import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
 import { api, type AuthStatus } from "@/lib/api"
-import { useDynamicFavicon } from "@/lib/useFavicon"
 
 function App() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
@@ -30,10 +29,6 @@ function App() {
         setAuthenticated(false)
       })
   }, [])
-
-  // Update favicon based on service health (polls every 30s).
-  // Uses raw fetch internally so a 401 won't trigger a redirect loop.
-  useDynamicFavicon(30_000)
 
   // Still loading
   if (setupComplete === null || authenticated === null) return null

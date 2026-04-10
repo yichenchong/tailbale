@@ -1,7 +1,10 @@
 import { Outlet } from "react-router-dom"
 import { Sidebar } from "./Sidebar"
+import { useDynamicFavicon } from "@/lib/useFavicon"
 
 export function Layout() {
+  useDynamicFavicon(30_000)
+
   return (
     <div className="flex h-screen">
       <Sidebar />
