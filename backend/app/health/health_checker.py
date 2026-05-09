@@ -200,16 +200,20 @@ def _check_https_probe(
 ) -> bool:
     """Verify that Caddy inside the edge container is serving HTTPS.
 
-    The probe runs ``wget`` **inside the edge container** rather than
+    The probe runs ``curl`` **inside the edge container** rather than
     connecting from the orchestrator.  This avoids the problem where the
     orchestrator container can't reach Tailscale IPs (only edge containers
     are on the tailnet).
 
-    We exec ``wget --spider --no-check-certificate https://localhost:443/``
-    which verifies Caddy is listening, TLS-terminating, and proxying.
-    ``--no-check-certificate`` is acceptable here because the separate
-    ``cert_present`` / ``cert_not_expiring`` checks already validate the
-    certificate itself.
+    curl is used instead of wget because the edge container's Alpine-based
+    BusyBox wget does not use exit code 8 for HTTP errors (it returns 1 for
+    all failures), making it impossible to distinguish 4xx (acceptable —
+    upstream may require auth) from connection failures. curl exits 0 for
+    any HTTP response and non-zero only for network/TLS failures.
+
+    A ``Host`` header matching the configured hostname is sent so Caddy
+    routes the request through its reverse_proxy rather than returning 421
+    for the unmatched ``localhost`` default.
     """
     if not tailscale_ip:
         return False
@@ -224,25 +228,29 @@ def _check_https_probe(
 
         exit_code, output = container.exec_run(
             [
-                "wget", "--spider", "--quiet",
-                "--no-check-certificate", "--timeout=5",
-                "-O", "/dev/null",
-                f"https://localhost:443/",
+                "curl", "--silent", "--insecure", "--max-time", "5",
+                "-o", "/dev/null",
+                "-w", "%{http_code}",
+                "-H", f"Host: {service.hostname}",
+                "https://localhost:443/",
             ],
             environment={"HOME": "/tmp"},
         )
-        if exit_code == 0:
-            return True
 
-        # wget exit code 8 = server issued an error response (4xx/5xx).
+        # Non-zero exit means a network/TLS failure (connection refused,
+        # timeout, etc.) — Caddy is not reachable.
+        if exit_code != 0:
+            return False
+
+        # -w "%{http_code}" writes the 3-digit status code to stdout.
+        # "000" means no HTTP response was received.
         # 4xx is fine (upstream may require auth); 5xx means broken.
-        # wget --spider treats redirects as success (exit 0).
-        # Exit code 8 covers HTTP errors; check output for 5xx.
-        out_text = output.decode("utf-8", errors="replace") if output else ""
-        if exit_code == 8 and "500" not in out_text and "502" not in out_text and "503" not in out_text:
-            return True
+        raw = (output or b"").decode("utf-8", errors="replace").strip()
+        http_code = raw[-3:] if len(raw) >= 3 else raw
+        if not http_code.isdigit() or http_code == "000":
+            return False
+        return not http_code.startswith("5")
 
-        return False
     except Exception:
         logger.debug("HTTPS probe exec failed for %s", service.edge_container_name, exc_info=True)
         return False

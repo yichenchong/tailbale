@@ -301,7 +301,7 @@ class TestHttpsProbeHealthCheck:
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=None) is False
 
     def test_https_probe_success(self):
-        """Probe succeeds when wget exits 0 inside edge container."""
+        """Probe succeeds when curl exits 0 and returns a 2xx status code."""
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -315,15 +315,16 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        mock_container.exec_run.return_value = (0, b"")
+        # curl exits 0 and writes HTTP status code via -w "%{http_code}"
+        mock_container.exec_run.return_value = (0, b"200")
         mock_client.containers.get.return_value = mock_container
 
         result = _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
         assert result is True
         mock_client.containers.get.assert_called_once_with("e")
 
-    def test_https_probe_runs_wget_in_edge_container(self):
-        """Probe execs wget inside the edge container, not from the orchestrator."""
+    def test_https_probe_runs_curl_in_edge_container(self):
+        """Probe execs curl inside the edge container with the correct Host header."""
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -337,18 +338,19 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        mock_container.exec_run.return_value = (0, b"")
+        mock_container.exec_run.return_value = (0, b"200")
         mock_client.containers.get.return_value = mock_container
 
         _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
 
         mock_container.exec_run.assert_called_once()
         cmd = mock_container.exec_run.call_args[0][0]
-        assert "wget" in cmd
+        assert "curl" in cmd
         assert "https://localhost:443/" in cmd
+        assert "tls.example.com" in " ".join(cmd)
 
     def test_https_probe_5xx_is_failure(self):
-        """wget output containing 5xx status means the probe failed."""
+        """curl returning a 5xx status code means the upstream is broken."""
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -362,8 +364,8 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        # wget exit 8 = server error, output contains 502
-        mock_container.exec_run.return_value = (8, b"502 Bad Gateway")
+        # curl exits 0 (got an HTTP response) but status code is 5xx
+        mock_container.exec_run.return_value = (0, b"502")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
@@ -383,8 +385,8 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        # wget exit 8 = server error, but output is 401 (not 5xx)
-        mock_container.exec_run.return_value = (8, b"401 Unauthorized")
+        # curl exits 0 and returns 401 — Caddy is serving, upstream requires auth
+        mock_container.exec_run.return_value = (0, b"401")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is True
@@ -403,8 +405,8 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        # wget exit 4 = network failure
-        mock_container.exec_run.return_value = (4, b"connection refused")
+        # curl exit 7 = connection refused (Caddy not running)
+        mock_container.exec_run.return_value = (7, b"")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
@@ -423,6 +425,27 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "restarting"
+        mock_client.containers.get.return_value = mock_container
+
+        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
+
+    def test_https_probe_no_response_is_failure(self):
+        """curl returning '000' (no HTTP response received) fails the probe."""
+        from app.health.health_checker import _check_https_probe
+
+        svc = Service(
+            name="Test", upstream_container_id="c1",
+            upstream_container_name="t", upstream_scheme="http",
+            upstream_port=80, hostname="t.example.com",
+            base_domain="example.com", edge_container_name="e",
+            network_name="n", ts_hostname="ts",
+        )
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        # curl exits 0 but %{http_code} is "000" — no HTTP response received
+        mock_container.exec_run.return_value = (0, b"000")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
