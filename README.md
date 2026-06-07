@@ -34,7 +34,6 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 git clone https://github.com/yichenchong/tailbale.git /mnt/user/appdata/tailbale
 cd /mnt/user/appdata/tailbale
 cp backend/.env.example .env
-# Edit .env — at minimum set JWT_SECRET
 
 # Build and run
 docker compose -f docker-compose.prod.yml up -d --build
