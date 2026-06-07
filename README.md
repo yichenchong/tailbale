@@ -31,7 +31,7 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 
 ```bash
 # Clone and configure
-git clone <repo-url> /mnt/user/appdata/tailbale
+git clone https://github.com/yichenchong/tailbale.git /mnt/user/appdata/tailbale
 cd /mnt/user/appdata/tailbale
 cp backend/.env.example .env
 # Edit .env — at minimum set JWT_SECRET
