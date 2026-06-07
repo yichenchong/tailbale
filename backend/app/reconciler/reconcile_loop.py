@@ -24,11 +24,13 @@ def reconcile_all(db: Session, *, socket_path: str | None = None) -> int:
     services = db.query(Service).filter(Service.enabled.is_(True)).all()
     count = 0
     for svc in services:
+        service_id = svc.id
         try:
             reconcile_service(db, svc, socket_path=socket_path)
             count += 1
         except Exception:
-            logger.error("Failed to reconcile service %s", svc.id, exc_info=True)
+            db.rollback()
+            logger.error("Failed to reconcile service %s", service_id, exc_info=True)
             count += 1  # still counts as processed
     return count
 

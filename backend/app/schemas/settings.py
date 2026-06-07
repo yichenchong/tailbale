@@ -7,6 +7,7 @@ class GeneralSettingsUpdate(BaseModel):
     reconcile_interval_seconds: int | None = None
     cert_renewal_window_days: int | None = None
     timezone: str | None = None
+    developer_mode: bool | None = None
 
 
 class CloudflareSettingsUpdate(BaseModel):
@@ -37,7 +38,7 @@ class GeneralSettingsResponse(BaseModel):
     reconcile_interval_seconds: int
     cert_renewal_window_days: int
     timezone: str
-
+    developer_mode: bool
 
 class CloudflareSettingsResponse(BaseModel):
     zone_id: str

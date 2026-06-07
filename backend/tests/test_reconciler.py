@@ -1,12 +1,19 @@
 """Tests for the reconciler engine."""
 
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from sqlalchemy import create_engine, event
+from sqlalchemy.exc import OperationalError
+from sqlalchemy.orm import sessionmaker
 
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler.reconciler import reconcile_service
+from app.database import Base
 
 
 def _create_service(db, **overrides):
@@ -273,3 +280,137 @@ class TestReconcileService:
 
         # Should still complete despite DNS failure
         assert result["phase"] == "healthy"
+
+    @patch(_P_SECRET)
+    def test_marks_service_failed_after_locked_status_update(self, mock_secret, db_session, tmp_data_dir):
+        svc = _create_service(db_session)
+        service_id = svc.id
+        mock_secret.return_value = "ts-key"
+
+        original_flush = db_session.flush
+        raised = False
+
+        def flush_with_lock(*args, **kwargs):
+            nonlocal raised
+            if not raised and (db_session.dirty or db_session.new):
+                raised = True
+                raise OperationalError(
+                    "UPDATE service_status SET phase=? WHERE service_id=?",
+                    ("validating", service_id),
+                    Exception("database is locked"),
+                )
+            return original_flush(*args, **kwargs)
+
+        db_session.flush = flush_with_lock
+        try:
+            result = reconcile_service(db_session, svc)
+        finally:
+            db_session.flush = original_flush
+
+        assert result["phase"] == "failed"
+        assert "database is locked" in result["error"]
+
+        status = db_session.get(ServiceStatus, service_id)
+        assert status is not None
+        assert status.phase == "failed"
+        assert "database is locked" in (status.message or "")
+
+        events = db_session.query(Event).filter(Event.kind == "reconcile_failed").all()
+        assert len(events) == 1
+
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK)
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_serializes_overlapping_reconciles(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        tmp_data_dir,
+    ):
+        db_path = tmp_data_dir / "reconcile-overlap.sqlite"
+        engine = create_engine(
+            f"sqlite:///{db_path}",
+            connect_args={"check_same_thread": False},
+        )
+
+        @event.listens_for(engine, "connect")
+        def set_sqlite_pragma(dbapi_connection, connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.close()
+
+        Base.metadata.create_all(bind=engine)
+        TestSession = sessionmaker(bind=engine)
+
+        seed_db = TestSession()
+        try:
+            svc = _create_service(seed_db)
+            service_id = svc.id
+        finally:
+            seed_db.close()
+
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "config"
+        edge = MagicMock()
+        edge.id = "edge_id"
+        edge.status = "running"
+        mock_find_edge.return_value = edge
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {}
+        mock_aggregate.return_value = "healthy"
+
+        active_calls = 0
+        max_active_calls = 0
+        call_lock = threading.Lock()
+
+        def slow_network(*args, **kwargs):
+            nonlocal active_calls, max_active_calls
+            with call_lock:
+                active_calls += 1
+                max_active_calls = max(max_active_calls, active_calls)
+            try:
+                time.sleep(0.1)
+            finally:
+                with call_lock:
+                    active_calls -= 1
+
+        mock_network.side_effect = slow_network
+
+        errors: list[Exception] = []
+        results: list[dict] = []
+
+        def run_reconcile():
+            db = TestSession()
+            try:
+                svc = db.get(Service, service_id)
+                assert svc is not None
+                results.append(reconcile_service(db, svc))
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                db.close()
+
+        first = threading.Thread(target=run_reconcile)
+        second = threading.Thread(target=run_reconcile)
+        first.start()
+        second.start()
+        first.join()
+        second.join()
+
+        engine.dispose()
+
+        assert errors == []
+        assert len(results) == 2
+        assert max_active_calls == 1
+        assert all(result["phase"] == "healthy" for result in results)

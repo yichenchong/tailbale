@@ -25,7 +25,9 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 - **Unraid 6.12+** with Docker enabled
 - **Domain** managed in Cloudflare
 - **Cloudflare API token** with DNS:Edit permission
-- **Tailscale account** with a reusable auth key
+- **Tailscale account** with both:
+  - a reusable auth key for edge login
+  - an API key for device cleanup and management
 
 ## Quick Start
 

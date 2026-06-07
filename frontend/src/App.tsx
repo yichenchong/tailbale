@@ -41,6 +41,10 @@ function App() {
     setAuthenticated(true)
   }, [])
 
+  const onSetupComplete = useCallback(() => {
+    setSetupComplete(true)
+  }, [])
+
   // Still loading
   if (setupComplete === null || authenticated === null) return null
 
@@ -53,7 +57,7 @@ function App() {
         {/* Setup wizard — redirect to dashboard if already completed */}
         <Route
           path="setup"
-          element={setupComplete ? <Navigate to="/" replace /> : <Setup />}
+          element={setupComplete ? <Navigate to="/" replace /> : <Setup onSetupComplete={onSetupComplete} />}
         />
         <Route
           path="login"

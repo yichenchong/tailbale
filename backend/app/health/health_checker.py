@@ -192,6 +192,54 @@ def _check_caddy_config(service: Service, generated_dir: str | Path) -> bool:
     return (Path(generated_dir) / service.id / "Caddyfile").exists()
 
 
+def _summarize_probe_output(output: bytes | str | None, limit: int = 200) -> str:
+    if output is None:
+        return ""
+    if isinstance(output, bytes):
+        text = output.decode("utf-8", errors="replace")
+    else:
+        text = output
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def _log_https_probe_failure(
+    service: "Service",
+    reason: str,
+    *,
+    tailscale_ip: str | None,
+    container_status: str | None = None,
+    exit_code: int | None = None,
+    http_code: str | None = None,
+    output: bytes | str | None = None,
+) -> None:
+    details: list[str] = []
+    if tailscale_ip:
+        details.append(f"tailscale_ip={tailscale_ip}")
+    if container_status:
+        details.append(f"container_status={container_status}")
+    if exit_code is not None:
+        details.append(f"exit_code={exit_code}")
+    if http_code:
+        details.append(f"http_code={http_code}")
+    rendered_output = _summarize_probe_output(output)
+    if rendered_output:
+        details.append(f"output={rendered_output!r}")
+
+    detail_str = f" ({', '.join(details)})" if details else ""
+    logger.warning(
+        "HTTPS probe failed for %s (%s): %s%s",
+        service.hostname,
+        service.edge_container_name,
+        reason,
+        detail_str,
+    )
+
+
+
+
 def _check_https_probe(
     service: "Service",
     tailscale_ip: str | None,
@@ -216,14 +264,22 @@ def _check_https_probe(
     for the unmatched ``localhost`` default.
     """
     if not tailscale_ip:
+        _log_https_probe_failure(service, "missing Tailscale IP", tailscale_ip=None)
         return False
 
     if not client:
+        _log_https_probe_failure(service, "Docker client unavailable", tailscale_ip=tailscale_ip)
         return False
 
     try:
         container = client.containers.get(service.edge_container_name)
         if container.status != "running":
+            _log_https_probe_failure(
+                service,
+                "edge container not running",
+                tailscale_ip=tailscale_ip,
+                container_status=container.status,
+            )
             return False
 
         exit_code, output = container.exec_run(
@@ -237,22 +293,52 @@ def _check_https_probe(
             environment={"HOME": "/tmp"},
         )
 
-        # Non-zero exit means a network/TLS failure (connection refused,
-        # timeout, etc.) — Caddy is not reachable.
         if exit_code != 0:
+            _log_https_probe_failure(
+                service,
+                "curl returned non-zero",
+                tailscale_ip=tailscale_ip,
+                container_status=container.status,
+                exit_code=exit_code,
+                output=output,
+            )
             return False
 
-        # -w "%{http_code}" writes the 3-digit status code to stdout.
-        # "000" means no HTTP response was received.
-        # 4xx is fine (upstream may require auth); 5xx means broken.
         raw = (output or b"").decode("utf-8", errors="replace").strip()
         http_code = raw[-3:] if len(raw) >= 3 else raw
-        if not http_code.isdigit() or http_code == "000":
+        if not http_code.isdigit():
+            _log_https_probe_failure(
+                service,
+                "curl did not return a valid HTTP status",
+                tailscale_ip=tailscale_ip,
+                container_status=container.status,
+                output=output,
+            )
             return False
-        return not http_code.startswith("5")
+        if http_code == "000":
+            _log_https_probe_failure(
+                service,
+                "no HTTP response received",
+                tailscale_ip=tailscale_ip,
+                container_status=container.status,
+                http_code=http_code,
+                output=output,
+            )
+            return False
+        if http_code.startswith("5"):
+            _log_https_probe_failure(
+                service,
+                "upstream returned 5xx",
+                tailscale_ip=tailscale_ip,
+                container_status=container.status,
+                http_code=http_code,
+                output=output,
+            )
+            return False
+        return True
 
     except Exception:
-        logger.debug("HTTPS probe exec failed for %s", service.edge_container_name, exc_info=True)
+        logger.warning("HTTPS probe exec failed for %s", service.edge_container_name, exc_info=True)
         return False
 
 

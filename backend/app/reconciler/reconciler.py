@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -23,20 +24,34 @@ if TYPE_CHECKING:
     from app.models.service import Service
 
 logger = logging.getLogger(__name__)
+_RECONCILE_MUTEX = threading.Lock()
 
 
 class ReconcileError(Exception):
     """Raised when reconciliation hits a non-recoverable failure."""
 
 
-def _update_phase(db: Session, service_id: str, phase: str, message: str | None = None) -> None:
+def _load_or_create_status(db: Session, service_id: str) -> ServiceStatus:
     status = db.get(ServiceStatus, service_id)
-    if status:
-        status.phase = phase
-        if message is not None:
-            status.message = message
-        db.flush()
+    if status is None:
+        status = ServiceStatus(service_id=service_id, phase="pending")
+        db.add(status)
+    return status
 
+
+def _update_phase(db: Session, service_id: str, phase: str, message: str | None = None) -> None:
+    status = _load_or_create_status(db, service_id)
+    status.phase = phase
+    if message is not None:
+        status.message = message
+    db.flush()
+
+
+def _mark_failed_status(db: Session, service_id: str, message: str) -> None:
+    status = _load_or_create_status(db, service_id)
+    status.phase = "failed"
+    status.message = message
+    status.last_reconciled_at = datetime.now(timezone.utc)
 
 def reconcile_service(
     db: Session,
@@ -65,195 +80,231 @@ def reconcile_service(
     from app.secrets import CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, read_secret
     from app.settings_store import get_setting
 
-    result = {
-        "phase": "pending",
-        "tailscale_ip": None,
-        "health_checks": {},
-        "caddy_reloaded": False,
-        "error": None,
-    }
+    service_id = service.id
+    service_name = service.name
 
-    status = db.get(ServiceStatus, service.id)
-    if not status:
-        status = ServiceStatus(service_id=service.id, phase="pending")
-        db.add(status)
-        db.flush()
+    with _RECONCILE_MUTEX:
+        result = {
+            "phase": "pending",
+            "tailscale_ip": None,
+            "health_checks": {},
+            "caddy_reloaded": False,
+            "error": None,
+        }
 
-    try:
-        # ── Step 1: Validate references / settings ──
-        _update_phase(db, service.id, "validating", "Checking settings and secrets")
+        status = _load_or_create_status(db, service_id)
 
-        ts_authkey = read_secret(TAILSCALE_AUTH_KEY)
-        if not ts_authkey:
-            raise ReconcileError("Tailscale auth key not configured")
+        try:
+            # ── Step 1: Validate references / settings ──
+            _update_phase(db, service_id, "validating", "Checking settings and secrets")
 
-        # Read paths from DB settings (user-configurable) with env fallback
-        from app.settings_store import get_runtime_paths
-        runtime = get_runtime_paths(db)
-        generated_dir = Path(runtime["generated_dir"])
-        certs_dir = Path(runtime["certs_dir"])
-        ts_state_dir = Path(runtime["tailscale_state_dir"])
+            ts_authkey = read_secret(TAILSCALE_AUTH_KEY)
+            if not ts_authkey:
+                raise ReconcileError("Tailscale auth key not configured")
 
-        # Host-side equivalents for Docker bind mounts (differ when
-        # HOST_DATA_DIR is set, i.e. tailBale runs inside a container).
-        host_generated_dir = Path(runtime["host_generated_dir"])
-        host_certs_dir = Path(runtime["host_certs_dir"])
-        host_ts_state_dir = Path(runtime["host_tailscale_state_dir"])
+            # Read paths from DB settings (user-configurable) with env fallback
+            from app.settings_store import get_runtime_paths
+            runtime = get_runtime_paths(db)
+            generated_dir = Path(runtime["generated_dir"])
+            certs_dir = Path(runtime["certs_dir"])
+            ts_state_dir = Path(runtime["tailscale_state_dir"])
 
-        # ── Step 2: Ensure generated directories ──
-        (generated_dir / service.id).mkdir(parents=True, exist_ok=True)
-        (certs_dir / service.hostname).mkdir(parents=True, exist_ok=True)
-        (ts_state_dir / service.edge_container_name).mkdir(parents=True, exist_ok=True)
+            # Host-side equivalents for Docker bind mounts (differ when
+            # HOST_DATA_DIR is set, i.e. tailBale runs inside a container).
+            host_generated_dir = Path(runtime["host_generated_dir"])
+            host_certs_dir = Path(runtime["host_certs_dir"])
+            host_ts_state_dir = Path(runtime["host_tailscale_state_dir"])
 
-        # ── Step 3: Ensure Docker network + app connected ──
-        _update_phase(db, service.id, "creating_network", "Ensuring Docker network")
-        ensure_network(service.network_name, service.upstream_container_id, socket_path)
-        logger.info("Network %s ready for service %s", service.network_name, service.id)
+            # ── Step 2: Ensure generated directories ──
+            (generated_dir / service_id).mkdir(parents=True, exist_ok=True)
+            (certs_dir / service.hostname).mkdir(parents=True, exist_ok=True)
+            (ts_state_dir / service.edge_container_name).mkdir(parents=True, exist_ok=True)
 
-        # ── Step 4: Ensure cert exists ──
-        _update_phase(db, service.id, "ensuring_cert", "Checking certificate")
-        cert_path = certs_dir / service.hostname / "fullchain.pem"
-        if not cert_path.exists():
-            process_service_cert(db, service)
-        else:
-            # Check if renewal is needed
-            expiry = get_cert_expiry(cert_path)
-            cert_renewal_days = int(get_setting(db, "cert_renewal_window_days") or "30")
-            if expiry is not None:
-                from datetime import timedelta
-                if expiry < datetime.now(timezone.utc) + timedelta(days=cert_renewal_days):
-                    process_service_cert(db, service)
+            # ── Step 3: Ensure Docker network + app connected ──
+            _update_phase(db, service_id, "creating_network", "Ensuring Docker network")
+            ensure_network(service.network_name, service.upstream_container_id, socket_path)
+            logger.info("Network %s ready for service %s", service.network_name, service_id)
 
-        # ── Step 5: Render Caddy config ──
-        _update_phase(db, service.id, "rendering_config", "Generating Caddy configuration")
-        new_config = render_caddyfile(service)
-        existing_path = generated_dir / service.id / "Caddyfile"
-        config_changed = True
-        if existing_path.exists():
-            config_changed = existing_path.read_text(encoding="utf-8") != new_config
-        if config_changed:
-            write_caddyfile(service, generated_dir)
+            # ── Step 4: Ensure cert exists ──
+            _update_phase(db, service_id, "ensuring_cert", "Checking certificate")
+            cert_path = certs_dir / service.hostname / "fullchain.pem"
+            if not cert_path.exists():
+                process_service_cert(db, service)
+            else:
+                # Check if renewal is needed
+                expiry = get_cert_expiry(cert_path)
+                cert_renewal_days = int(get_setting(db, "cert_renewal_window_days") or "30")
+                if expiry is not None:
+                    from datetime import timedelta
+                    if expiry < datetime.now(timezone.utc) + timedelta(days=cert_renewal_days):
+                        process_service_cert(db, service)
 
-        # ── Step 6: Ensure edge container exists ──
-        _update_phase(db, service.id, "ensuring_edge", "Ensuring edge container")
-        container = _find_edge_container(service.id, service.edge_container_name, socket_path)
-        if container is None:
-            container_id = create_edge_container(
-                service, ts_authkey,
-                host_generated_dir, host_certs_dir, host_ts_state_dir,
+            # ── Step 5: Render Caddy config ──
+            _update_phase(db, service_id, "rendering_config", "Generating Caddy configuration")
+            new_config = render_caddyfile(service)
+            existing_path = generated_dir / service_id / "Caddyfile"
+            config_changed = True
+            if existing_path.exists():
+                config_changed = existing_path.read_text(encoding="utf-8") != new_config
+            if config_changed:
+                write_caddyfile(service, generated_dir)
+
+            # ── Step 6: Ensure edge container exists ──
+            _update_phase(db, service_id, "ensuring_edge", "Ensuring edge container")
+            container = _find_edge_container(service_id, service.edge_container_name, socket_path)
+            if container is None:
+                container_id = create_edge_container(
+                    service,
+                    ts_authkey,
+                    host_generated_dir,
+                    host_certs_dir,
+                    host_ts_state_dir,
+                    socket_path,
+                )
+                status.edge_container_id = container_id
+                emit_event(
+                    db,
+                    service_id,
+                    "edge_started",
+                    f"Edge container created for '{service_name}'",
+                )
+            else:
+                status.edge_container_id = container.id
+
+            # ── Step 7: Ensure edge container running ──
+            container = _find_edge_container(service_id, service.edge_container_name, socket_path)
+            if container and container.status != "running":
+                start_edge(service_id, service.edge_container_name, socket_path)
+                emit_event(
+                    db,
+                    service_id,
+                    "edge_started",
+                    f"Edge container started for '{service_name}'",
+                )
+
+            # ── Step 8: Detect Tailscale IP ──
+            _update_phase(db, service_id, "detecting_ip", "Waiting for Tailscale IP")
+            ts_ip = detect_tailscale_ip(
+                service_id,
+                service.edge_container_name,
                 socket_path,
+                max_retries=5,
+                retry_delay=1.0,
             )
-            status.edge_container_id = container_id
-            emit_event(db, service.id, "edge_started", f"Edge container created for '{service.name}'")
-        else:
-            status.edge_container_id = container.id
+            if ts_ip:
+                if status.tailscale_ip != ts_ip:
+                    emit_event(
+                        db,
+                        service_id,
+                        "tailscale_ip_acquired",
+                        f"Tailscale IP {ts_ip} assigned to '{service_name}'",
+                        details={"ip": ts_ip},
+                    )
+                status.tailscale_ip = ts_ip
+                result["tailscale_ip"] = ts_ip
 
-        # ── Step 7: Ensure edge container running ──
-        container = _find_edge_container(service.id, service.edge_container_name, socket_path)
-        if container and container.status != "running":
-            start_edge(service.id, service.edge_container_name, socket_path)
-            emit_event(db, service.id, "edge_started", f"Edge container started for '{service.name}'")
+            # ── Step 9: Ensure DNS record ──
+            _update_phase(db, service_id, "ensuring_dns", "Updating DNS record")
+            cf_token = read_secret(CLOUDFLARE_TOKEN)
+            zone_id = get_setting(db, "cf_zone_id")
+            if cf_token and zone_id and ts_ip:
+                try:
+                    reconcile_dns(db, service, ts_ip, cf_token, zone_id)
+                except Exception:
+                    logger.warning("DNS reconciliation failed for %s", service_id, exc_info=True)
+                    emit_event(
+                        db,
+                        service_id,
+                        "dns_update_failed",
+                        "DNS reconciliation failed",
+                        level="warning",
+                    )
 
-        # ── Step 8: Detect Tailscale IP ──
-        _update_phase(db, service.id, "detecting_ip", "Waiting for Tailscale IP")
-        ts_ip = detect_tailscale_ip(
-            service.id, service.edge_container_name, socket_path,
-            max_retries=5, retry_delay=1.0,
-        )
-        if ts_ip:
-            if status.tailscale_ip != ts_ip:
-                emit_event(
-                    db, service.id, "tailscale_ip_acquired",
-                    f"Tailscale IP {ts_ip} assigned to '{service.name}'",
-                    details={"ip": ts_ip},
+            # ── Step 10: Reload Caddy if needed ──
+            if config_changed:
+                _update_phase(db, service_id, "reloading_caddy", "Reloading Caddy")
+                try:
+                    reload_caddy(service_id, service.edge_container_name, socket_path)
+                    result["caddy_reloaded"] = True
+                    emit_event(
+                        db,
+                        service_id,
+                        "caddy_reloaded",
+                        f"Caddy reloaded for '{service_name}'",
+                    )
+                except RuntimeError:
+                    logger.warning("Caddy reload failed for %s", service_id, exc_info=True)
+
+            # ── Step 11: Run health checks ──
+            _update_phase(db, service_id, "checking_health", "Running health checks")
+            checks = run_health_checks(db, service, generated_dir, certs_dir, socket_path)
+            result["health_checks"] = checks
+            status.health_checks = json.dumps(checks)
+            status.last_probe_at = datetime.now(timezone.utc)
+
+            # ── Step 12: Determine final phase ──
+            phase = aggregate_status(checks)
+            status.phase = phase
+            status.message = None
+            status.last_reconciled_at = datetime.now(timezone.utc)
+            result["phase"] = phase
+
+            level = "info" if phase == "healthy" else "warning" if phase == "warning" else "error"
+            emit_event(
+                db,
+                service_id,
+                "reconcile_completed",
+                f"Reconciliation completed for '{service_name}' — {phase}",
+                level=level,
+                details={"phase": phase, "checks": checks},
+            )
+
+            # ── Step 13: Schedule probe retry if HTTPS probe failed ──
+            # When critical checks pass but the HTTPS probe fails (common on
+            # newly-created services), schedule background retries so the
+            # status converges without waiting for the next full sweep.
+            if not checks.get("https_probe_ok") and phase in ("warning", "error"):
+                critical_ok = all(
+                    checks.get(check, False)
+                    for check in (
+                        "edge_container_present",
+                        "edge_container_running",
+                        "tailscale_ip_present",
+                        "cert_present",
+                    )
                 )
-            status.tailscale_ip = ts_ip
-            result["tailscale_ip"] = ts_ip
+                if critical_ok:
+                    from app.reconciler.probe_retry import schedule_probe_retry
 
-        # ── Step 9: Ensure DNS record ──
-        _update_phase(db, service.id, "ensuring_dns", "Updating DNS record")
-        cf_token = read_secret(CLOUDFLARE_TOKEN)
-        zone_id = get_setting(db, "cf_zone_id")
-        if cf_token and zone_id and ts_ip:
-            try:
-                reconcile_dns(db, service, ts_ip, cf_token, zone_id)
-            except Exception:
-                logger.warning("DNS reconciliation failed for %s", service.id, exc_info=True)
-                emit_event(
-                    db, service.id, "dns_update_failed", "DNS reconciliation failed",
-                    level="warning",
-                )
+                    schedule_probe_retry(service_id, socket_path)
 
-        # ── Step 10: Reload Caddy if needed ──
-        if config_changed:
-            _update_phase(db, service.id, "reloading_caddy", "Reloading Caddy")
-            try:
-                reload_caddy(service.id, service.edge_container_name, socket_path)
-                result["caddy_reloaded"] = True
-                emit_event(db, service.id, "caddy_reloaded", f"Caddy reloaded for '{service.name}'")
-            except RuntimeError:
-                logger.warning("Caddy reload failed for %s", service.id, exc_info=True)
+        except ReconcileError as e:
+            db.rollback()
+            logger.error("Reconcile failed for %s: %s", service_id, e)
+            _mark_failed_status(db, service_id, str(e))
+            result["phase"] = "failed"
+            result["error"] = str(e)
+            emit_event(
+                db,
+                service_id,
+                "reconcile_failed",
+                f"Reconciliation failed for '{service_name}': {e}",
+                level="error",
+            )
 
-        # ── Step 11: Run health checks ──
-        _update_phase(db, service.id, "checking_health", "Running health checks")
-        checks = run_health_checks(db, service, generated_dir, certs_dir, socket_path)
-        result["health_checks"] = checks
-        status.health_checks = json.dumps(checks)
-        status.last_probe_at = datetime.now(timezone.utc)
+        except Exception as e:
+            db.rollback()
+            logger.error("Unexpected error reconciling %s: %s", service_id, e, exc_info=True)
+            _mark_failed_status(db, service_id, f"Unexpected error: {e}")
+            result["phase"] = "failed"
+            result["error"] = str(e)
+            emit_event(
+                db,
+                service_id,
+                "reconcile_failed",
+                f"Reconciliation failed for '{service_name}': {e}",
+                level="error",
+            )
 
-        # ── Step 12: Determine final phase ──
-        phase = aggregate_status(checks)
-        status.phase = phase
-        status.message = None
-        status.last_reconciled_at = datetime.now(timezone.utc)
-        result["phase"] = phase
-
-        level = "info" if phase == "healthy" else "warning" if phase == "warning" else "error"
-        emit_event(
-            db, service.id, "reconcile_completed",
-            f"Reconciliation completed for '{service.name}' — {phase}",
-            level=level,
-            details={"phase": phase, "checks": checks},
-        )
-
-        # ── Step 13: Schedule probe retry if HTTPS probe failed ──
-        # When critical checks pass but the HTTPS probe fails (common on
-        # newly-created services), schedule background retries so the
-        # status converges without waiting for the next full sweep.
-        if not checks.get("https_probe_ok") and phase in ("warning", "error"):
-            critical_ok = all(checks.get(c, False) for c in (
-                "edge_container_present", "edge_container_running",
-                "tailscale_ip_present", "cert_present",
-            ))
-            if critical_ok:
-                from app.reconciler.probe_retry import schedule_probe_retry
-                schedule_probe_retry(service.id, socket_path)
-
-    except ReconcileError as e:
-        logger.error("Reconcile failed for %s: %s", service.id, e)
-        status.phase = "failed"
-        status.message = str(e)
-        status.last_reconciled_at = datetime.now(timezone.utc)
-        result["phase"] = "failed"
-        result["error"] = str(e)
-        emit_event(
-            db, service.id, "reconcile_failed",
-            f"Reconciliation failed for '{service.name}': {e}",
-            level="error",
-        )
-
-    except Exception as e:
-        logger.error("Unexpected error reconciling %s: %s", service.id, e, exc_info=True)
-        status.phase = "failed"
-        status.message = f"Unexpected error: {e}"
-        status.last_reconciled_at = datetime.now(timezone.utc)
-        result["phase"] = "failed"
-        result["error"] = str(e)
-        emit_event(
-            db, service.id, "reconcile_failed",
-            f"Reconciliation failed for '{service.name}': {e}",
-            level="error",
-        )
-
-    db.commit()
-    return result
+        db.commit()
+        return result

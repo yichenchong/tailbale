@@ -247,6 +247,43 @@ describe("Setup wizard", () => {
     expect(screen.getByText("Cloudflare Zone ID")).toBeInTheDocument()
   })
 
+  it("requires both Tailscale auth and API keys", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("admin")).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByPlaceholderText("admin"), { target: { value: "u" } })
+    fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "password123" } })
+    fireEvent.change(screen.getByPlaceholderText("Confirm password"), { target: { value: "password123" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => { expect(screen.getByText("Step 2 of 6: Domain")).toBeInTheDocument() })
+    fireEvent.change(screen.getByPlaceholderText("mydomain.com"), { target: { value: "example.com" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => { expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument() })
+    fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => { expect(screen.getByText("Step 4 of 6: ACME Email")).toBeInTheDocument() })
+    fireEvent.change(screen.getByPlaceholderText("you@example.com"), { target: { value: "a@b.com" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => { expect(screen.getByText("Step 5 of 6: Tailscale")).toBeInTheDocument() })
+
+    const nextBtn = screen.getByText("Next").closest("button")!
+    expect(nextBtn).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText("tskey-auth-..."), { target: { value: "tskey-auth-abc" } })
+    expect(nextBtn).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText("tskey-api-..."), { target: { value: "tskey-api-abc" } })
+    expect(nextBtn).not.toBeDisabled()
+  })
+
   it("shows error when save fails", async () => {
     vi.stubGlobal(
       "fetch",
@@ -319,6 +356,7 @@ describe("Setup wizard", () => {
     await waitFor(() => { expect(screen.getByText("Step 5 of 6: Tailscale")).toBeInTheDocument() })
     // Step 5
     fireEvent.change(screen.getByPlaceholderText("tskey-auth-..."), { target: { value: "tskey-auth-abc" } })
+    fireEvent.change(screen.getByPlaceholderText("tskey-api-..."), { target: { value: "tskey-api-abc" } })
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 6 of 6: Docker")).toBeInTheDocument() })
     // Step 6 should show "Complete Setup"
@@ -353,6 +391,7 @@ describe("Setup wizard", () => {
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 5 of 6: Tailscale")).toBeInTheDocument() })
     fireEvent.change(screen.getByPlaceholderText("tskey-auth-..."), { target: { value: "tskey-auth-abc" } })
+    fireEvent.change(screen.getByPlaceholderText("tskey-api-..."), { target: { value: "tskey-api-abc" } })
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 6 of 6: Docker")).toBeInTheDocument() })
 

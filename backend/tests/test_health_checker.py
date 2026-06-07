@@ -276,7 +276,7 @@ class TestHttpsProbeHealthCheck:
 
         assert "https_probe_ok" in checks
 
-    def test_https_probe_false_when_no_ip(self, db_session):
+    def test_https_probe_false_when_no_ip(self, db_session, caplog):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -287,8 +287,9 @@ class TestHttpsProbeHealthCheck:
             network_name="n", ts_hostname="ts",
         )
         assert _check_https_probe(svc, None, "/tmp/certs") is False
+        assert "missing Tailscale IP" in caplog.text
 
-    def test_https_probe_false_when_no_client(self):
+    def test_https_probe_false_when_no_client(self, caplog):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -299,6 +300,7 @@ class TestHttpsProbeHealthCheck:
             network_name="n", ts_hostname="ts",
         )
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=None) is False
+        assert "Docker client unavailable" in caplog.text
 
     def test_https_probe_success(self):
         """Probe succeeds when curl exits 0 and returns a 2xx status code."""
@@ -349,7 +351,7 @@ class TestHttpsProbeHealthCheck:
         assert "https://localhost:443/" in cmd
         assert "tls.example.com" in " ".join(cmd)
 
-    def test_https_probe_5xx_is_failure(self):
+    def test_https_probe_5xx_is_failure(self, caplog):
         """curl returning a 5xx status code means the upstream is broken."""
         from app.health.health_checker import _check_https_probe
 
@@ -364,11 +366,12 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        # curl exits 0 (got an HTTP response) but status code is 5xx
         mock_container.exec_run.return_value = (0, b"502")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
+        assert "upstream returned 5xx" in caplog.text
+        assert "http_code=502" in caplog.text
 
     def test_https_probe_4xx_is_success(self):
         """4xx from upstream (e.g. auth required) still means Caddy is serving."""
@@ -391,7 +394,7 @@ class TestHttpsProbeHealthCheck:
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is True
 
-    def test_https_probe_connection_error_is_failure(self):
+    def test_https_probe_connection_error_is_failure(self, caplog):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -405,13 +408,14 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        # curl exit 7 = connection refused (Caddy not running)
-        mock_container.exec_run.return_value = (7, b"")
+        mock_container.exec_run.return_value = (7, b"curl: (7) Failed to connect")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
+        assert "curl returned non-zero" in caplog.text
+        assert "exit_code=7" in caplog.text
 
-    def test_https_probe_container_not_running(self):
+    def test_https_probe_container_not_running(self, caplog):
         from app.health.health_checker import _check_https_probe
 
         svc = Service(
@@ -428,8 +432,10 @@ class TestHttpsProbeHealthCheck:
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
+        assert "edge container not running" in caplog.text
+        assert "container_status=restarting" in caplog.text
 
-    def test_https_probe_no_response_is_failure(self):
+    def test_https_probe_no_response_is_failure(self, caplog):
         """curl returning '000' (no HTTP response received) fails the probe."""
         from app.health.health_checker import _check_https_probe
 
@@ -444,11 +450,12 @@ class TestHttpsProbeHealthCheck:
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.status = "running"
-        # curl exits 0 but %{http_code} is "000" — no HTTP response received
         mock_container.exec_run.return_value = (0, b"000")
         mock_client.containers.get.return_value = mock_container
 
         assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
+        assert "no HTTP response received" in caplog.text
+        assert "http_code=000" in caplog.text
 
     def test_https_probe_is_warning_check(self):
         from app.health.health_checker import CRITICAL_CHECKS, WARNING_CHECKS

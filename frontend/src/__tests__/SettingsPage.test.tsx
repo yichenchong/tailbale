@@ -9,6 +9,7 @@ const mockSettings = {
     reconcile_interval_seconds: 60,
     cert_renewal_window_days: 30,
     timezone: "UTC",
+    developer_mode: false,
   },
   cloudflare: { zone_id: "zone123", token_configured: true },
   tailscale: {
@@ -90,6 +91,75 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Tailscale")).toBeInTheDocument()
     expect(screen.getByText("Docker")).toBeInTheDocument()
     expect(screen.getByText("Paths")).toBeInTheDocument()
+    expect(screen.queryByText("Developer")).not.toBeInTheDocument()
+
+  })
+
+  it("shows Developer tab when developer mode is enabled", async () => {
+    vi.stubGlobal("fetch", mockFetch({
+      ...mockSettings,
+      general: { ...mockSettings.general, developer_mode: true },
+    }))
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+    expect(screen.getByText("Developer")).toBeInTheDocument()
+  })
+
+  it("saves developer mode from General tab", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/version")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ version: "1.2.3" }),
+        })
+      }
+      if (opts?.method === "PUT" && String(url).includes("/settings/general")) {
+        const body = JSON.parse(String(opts.body))
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            ...mockSettings,
+            general: { ...mockSettings.general, developer_mode: body.developer_mode },
+          }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(mockSettings),
+      })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Developer Mode")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole("checkbox"))
+    fireEvent.click(screen.getByText("Save"))
+
+    await waitFor(() => {
+      expect(screen.getByText("Developer")).toBeInTheDocument()
+    })
+    const putCall = fetchMock.mock.calls.find(
+      (c: unknown[]) =>
+        typeof c[1] === "object" &&
+        (c[1] as RequestInit).method === "PUT"
+    )
+    expect(putCall).toBeDefined()
+    expect(JSON.parse(String((putCall![1] as RequestInit).body))).toMatchObject({ developer_mode: true })
+
   })
 
   it("shows General tab fields by default", async () => {
@@ -263,7 +333,6 @@ describe("SettingsPage", () => {
       vi.fn().mockImplementation(() => {
         callCount++
         if (callCount <= 2) {
-          // Initial settings load + version fetch
           if (callCount === 2) {
             return Promise.resolve({
               ok: true,
@@ -275,7 +344,6 @@ describe("SettingsPage", () => {
             json: () => Promise.resolve(mockSettings),
           })
         }
-        // Test connection result
         return Promise.resolve({
           ok: true,
           json: () =>
@@ -299,6 +367,79 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Docker is reachable")).toBeInTheDocument()
     })
+  })
+
+  it("runs reset setup_complete only after confirmation", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true)
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/version")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ version: "1.2.3" }),
+        })
+      }
+      if (String(url).includes("/settings/developer/reset-setup-complete")) {
+        return new Promise(() => {})
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...mockSettings,
+          general: { ...mockSettings.general, developer_mode: true },
+        }),
+      })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Developer")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Developer"))
+    fireEvent.click(screen.getByRole("button", { name: "Reset setup_complete" }))
+
+    expect(confirm).toHaveBeenCalled()
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/settings/developer/reset-setup-complete"))).toBe(true)
+  })
+
+  it("does not run developer reset when warning is cancelled", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/version")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ version: "1.2.3" }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({
+          ...mockSettings,
+          general: { ...mockSettings.general, developer_mode: true },
+        }),
+      })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Developer")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Developer"))
+    fireEvent.click(screen.getByRole("button", { name: "Reset all" }))
+
+    expect(confirm).toHaveBeenCalled()
+    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/settings/developer/reset-all"))).toBe(false)
   })
 
   it("shows Account tab with password change form", async () => {

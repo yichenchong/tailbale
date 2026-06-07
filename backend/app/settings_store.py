@@ -18,6 +18,7 @@ DEFAULTS = {
     "cert_root": "",
     "tailscale_state_root": "",
     "timezone": "UTC",
+    "developer_mode": "false",
     "setup_complete": "false",
 }
 

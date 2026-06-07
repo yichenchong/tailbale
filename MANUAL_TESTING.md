@@ -11,6 +11,7 @@ order — each section builds on the previous one.
 - [ ] `/api/health` returns `{"status":"ok"}` (curl from Unraid shell)
 - [ ] You have a Cloudflare zone ID + API token with DNS edit permissions
 - [ ] You have a Tailscale auth key (reusable, tagged for the tailnet)
+- [ ] You have a Tailscale API key for device management
 - [ ] At least one other Docker container is running on the host (e.g. Nextcloud,
       Plex, or any simple container like `nginx`)
 
@@ -49,10 +50,11 @@ Open the UI in a browser. You should be redirected to `/setup`.
 ### 1e. Tailscale (Step 4)
 
 - [ ] Enter your Tailscale auth key
-- [ ] Click Next — runs format validation
+- [ ] Enter your Tailscale API key
+- [ ] Click Next — runs auth-key format validation
 - [ ] **Pass**: green banner ("Auth key format looks valid")
-- [ ] **Fail**: red banner if key doesn't start with `tskey-auth-` or
-      `tskey-reusable-`
+- [ ] **Fail**: red banner if the auth key doesn't start with `tskey-auth-` or
+      `tskey-reusable-`, or if the API key doesn't start with `tskey-api-`
 
 ### 1f. Docker (Step 5)
 
@@ -308,6 +310,7 @@ Navigate to **Settings** in the sidebar.
 ### 11c. Tailscale tab
 
 - [ ] Auth key shows "Configured" badge
+- [ ] API key shows "Configured" badge
 - [ ] Click **Validate Key** — should show green "Auth key format looks valid"
 
 ### 11d. Docker tab

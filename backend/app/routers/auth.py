@@ -117,7 +117,12 @@ async def setup_progress(db: Session = Depends(get_db)):
     from the first incomplete step after a page refresh or back navigation.
     """
     from app.models.setting import Setting
-    from app.secrets import CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, secret_exists
+    from app.secrets import (
+        CLOUDFLARE_TOKEN,
+        TAILSCALE_API_KEY,
+        TAILSCALE_AUTH_KEY,
+        secret_exists,
+    )
 
     user_exists = db.query(User).first() is not None
     base_domain_set = db.get(Setting, "base_domain") is not None
@@ -125,6 +130,7 @@ async def setup_progress(db: Session = Depends(get_db)):
     cf_token_set = secret_exists(CLOUDFLARE_TOKEN)
     acme_email_set = db.get(Setting, "acme_email") is not None
     ts_auth_key_set = secret_exists(TAILSCALE_AUTH_KEY)
+    ts_api_key_set = secret_exists(TAILSCALE_API_KEY)
     docker_socket_set = db.get(Setting, "docker_socket_path") is not None
 
     return {
@@ -132,7 +138,7 @@ async def setup_progress(db: Session = Depends(get_db)):
         "base_domain_set": base_domain_set,
         "cloudflare_configured": cf_zone_set or cf_token_set,
         "acme_email_set": acme_email_set,
-        "tailscale_configured": ts_auth_key_set,
+        "tailscale_configured": ts_auth_key_set and ts_api_key_set,
         "docker_configured": docker_socket_set,
     }
 

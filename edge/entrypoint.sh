@@ -42,12 +42,16 @@ if [ ! -S "$TS_SOCKET" ]; then
 fi
 
 # 2. Authenticate with TS_AUTHKEY if state is fresh
+TS_AUTH_FAILED=false
 if [ -n "$TS_AUTHKEY" ]; then
     echo "[edge] Authenticating with Tailscale (hostname: ${TS_HOSTNAME:-edge})..."
-    tailscale up \
+    if ! tailscale up \
         --authkey="$TS_AUTHKEY" \
         --hostname="${TS_HOSTNAME:-edge}" \
-        ${TS_EXTRA_ARGS:-}
+        ${TS_EXTRA_ARGS:-}; then
+        TS_AUTH_FAILED=true
+        echo "[edge] ERROR: Tailscale authentication failed. Check that TS_AUTHKEY is a valid auth key, not an API key."
+    fi
 else
     echo "[edge] No TS_AUTHKEY set, assuming existing state..."
     tailscale up \
@@ -71,7 +75,11 @@ for i in $(seq 1 60); do
 done
 
 if [ "$TS_READY" = false ]; then
-    echo "[edge] WARNING: Tailscale did not reach Running state after 60s, starting Caddy anyway..."
+    if [ "$TS_AUTH_FAILED" = true ]; then
+        echo "[edge] WARNING: Tailscale login failed; continuing so health checks can surface the error without a restart loop."
+    else
+        echo "[edge] WARNING: Tailscale did not reach Running state after 60s, starting Caddy anyway..."
+    fi
 fi
 
 # 4. Start Caddy with the generated Caddyfile

@@ -38,6 +38,7 @@ export interface GeneralSettings {
   reconcile_interval_seconds: number
   cert_renewal_window_days: number
   timezone: string
+  developer_mode: boolean
 }
 
 export interface CloudflareSettings {

@@ -33,7 +33,7 @@ function firstIncompleteStep(progress: SetupProgress): number {
   return 5 // all done, show last step for "Complete Setup"
 }
 
-export default function Setup() {
+export default function Setup({ onSetupComplete }: { onSetupComplete?: () => void }) {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
   const [initializing, setInitializing] = useState(true)
@@ -53,6 +53,7 @@ export default function Setup() {
   const [cfToken, setCfToken] = useState("")
   const [acmeEmail, setAcmeEmail] = useState("")
   const [tsAuthKey, setTsAuthKey] = useState("")
+  const [tsApiKey, setTsApiKey] = useState("")
   const [dockerSocket, setDockerSocket] = useState("unix:///var/run/docker.sock")
 
   // On mount, check which steps are already completed and skip ahead
@@ -113,6 +114,7 @@ export default function Setup() {
       } else if (step === 4) {
         await api.put("/settings/tailscale", {
           ...(tsAuthKey ? { auth_key: tsAuthKey } : {}),
+          ...(tsApiKey ? { api_key: tsApiKey } : {}),
         })
         if (tsAuthKey) {
           const result = await api.post<ConnectionTestResult>("/settings/test/tailscale")
@@ -140,7 +142,8 @@ export default function Setup() {
         setTestResult(null)
       } else {
         await api.put("/settings/setup-complete", {})
-        navigate("/")
+        onSetupComplete?.()
+        navigate("/", { replace: true })
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -161,7 +164,7 @@ export default function Setup() {
     if (step === 1) return baseDomain.length > 0
     if (step === 2) return cfZoneId.length > 0
     if (step === 3) return acmeEmail.includes("@")
-    if (step === 4) return tsAuthKey.length > 0
+    if (step === 4) return tsAuthKey.length > 0 && tsApiKey.length > 0
     return true
   }
 
@@ -296,16 +299,28 @@ export default function Setup() {
         )}
 
         {step === 4 && (
-          <label className="block">
-            <span className="text-sm font-medium text-zinc-700">Tailscale Auth Key</span>
-            <p className="text-xs text-zinc-400 mt-0.5">Reusable auth key from Tailscale admin console. Used to authenticate edge containers.</p>
-            <input
-              type="password" value={tsAuthKey}
-              onChange={(e) => setTsAuthKey(e.target.value)}
-              placeholder="tskey-auth-..."
-              className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
-            />
-          </label>
+          <>
+            <label className="block">
+              <span className="text-sm font-medium text-zinc-700">Tailscale Auth Key</span>
+              <p className="text-xs text-zinc-400 mt-0.5">Reusable auth key from the Tailscale admin console. Must start with tskey-auth- or tskey-reusable-.</p>
+              <input
+                type="password" value={tsAuthKey}
+                onChange={(e) => setTsAuthKey(e.target.value)}
+                placeholder="tskey-auth-..."
+                className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+              />
+            </label>
+            <label className="block">
+              <span className="text-sm font-medium text-zinc-700">Tailscale API Key</span>
+              <p className="text-xs text-zinc-400 mt-0.5">Required for setup. Used to manage tailnet devices when services are recreated or removed. Must start with tskey-api-.</p>
+              <input
+                type="password" value={tsApiKey}
+                onChange={(e) => setTsApiKey(e.target.value)}
+                placeholder="tskey-api-..."
+                className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
+              />
+            </label>
+          </>
         )}
 
         {step === 5 && (

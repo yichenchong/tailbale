@@ -451,27 +451,16 @@ async def disable_service(
     return _to_response(svc, status)
 
 
-@router.delete("/{service_id}", status_code=204)
-async def delete_service(
-    service_id: str,
-    cleanup_dns: bool = False,
-    db: Session = Depends(get_db),
-):
-    """Delete a service exposure and associated records.
 
-    Query params:
-        cleanup_dns: If true, also delete the Cloudflare DNS record.
-    """
-    svc = db.get(Service, service_id)
-    if not svc:
-        raise HTTPException(status_code=404, detail="Service not found")
-
-    # Best-effort: remove edge container and Docker network
+def _delete_service_record(db: Session, svc: Service, *, cleanup_dns: bool) -> None:
+    """Delete one service and best-effort clean up attached resources."""
     import shutil
     from pathlib import Path
 
     from app.edge.container_manager import remove_edge
     from app.edge.network_manager import remove_network
+    from app.models.dns_record import DnsRecord
+    from app.models.job import Job
     from app.settings_store import get_runtime_paths
 
     socket = _get_docker_socket(db)
@@ -484,7 +473,6 @@ async def delete_service(
     except Exception:
         pass
 
-    # Optionally clean up DNS record in Cloudflare before deleting
     if cleanup_dns:
         from app.adapters.dns_reconciler import cleanup_dns_record
         from app.secrets import CLOUDFLARE_TOKEN, read_secret
@@ -493,11 +481,8 @@ async def delete_service(
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
         if cf_token and zone_id:
-            # cleanup_dns_record emits dns_removed or dns_cleanup_failed
-            # events internally — no duplicate event needed here.
             cleanup_dns_record(db, svc, cf_token, zone_id)
 
-    # Clean up generated configs, certs, and Tailscale state on disk
     runtime = get_runtime_paths(db)
     for subdir in [
         Path(runtime["generated_dir"]) / svc.id,
@@ -507,16 +492,12 @@ async def delete_service(
         if subdir.exists():
             shutil.rmtree(subdir, ignore_errors=True)
 
-    # If a DnsRecord with a record_id still exists (cleanup wasn't attempted,
-    # failed, or credentials were unavailable), persist it as an orphan-cleanup
-    # job BEFORE the CASCADE wipes the DnsRecord row.
-    from app.models.dns_record import DnsRecord
-    from app.models.job import Job
     surviving_dns = db.get(DnsRecord, svc.id)
     if surviving_dns and surviving_dns.record_id:
         from app.settings_store import get_setting
+
         orphan_job = Job(
-            service_id=svc.id,  # Will become NULL after CASCADE (SET NULL)
+            service_id=svc.id,
             kind="dns_orphan_cleanup",
             status="pending",
             message=f"Orphaned DNS record for deleted service '{svc.name}'",
@@ -536,9 +517,28 @@ async def delete_service(
         )
 
     name = svc.name
+    service_id = svc.id
+    db.delete(svc)
     _emit_event(db, None, "service_deleted", f"Service '{name}' ({service_id}) deleted")
-    db.delete(svc)  # CASCADE deletes status, certs, dns records
     db.commit()
+
+
+@router.delete("/{service_id}", status_code=204)
+async def delete_service(
+    service_id: str,
+    cleanup_dns: bool = False,
+    db: Session = Depends(get_db),
+):
+    """Delete a service exposure and associated records.
+
+    Query params:
+        cleanup_dns: If true, also delete the Cloudflare DNS record.
+    """
+    svc = db.get(Service, service_id)
+    if not svc:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+    _delete_service_record(db, svc, cleanup_dns=cleanup_dns)
 
 
 # --- Action endpoints ---

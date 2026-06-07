@@ -296,6 +296,17 @@ def _wait_for_running(
     return False
 
 
+def _is_retryable_exec_conflict(exc: Exception) -> bool:
+    """Return True when Docker rejects exec because the container is mid-restart."""
+    if not isinstance(exc, docker.errors.APIError):
+        return False
+
+    message = str(exc).lower()
+    if "wait until the container is running" in message:
+        return True
+    return "is restarting" in message or "is paused" in message
+
+
 def reload_caddy(
     service_id: str,
     edge_container_name: str,
@@ -319,10 +330,27 @@ def reload_caddy(
         )
 
     last_result = ""
+    last_error: docker.errors.APIError | None = None
     for attempt in range(max_retries):
-        exit_code, output = container.exec_run(
-            "caddy reload --config /etc/caddy/Caddyfile"
-        )
+        try:
+            exit_code, output = container.exec_run(
+                "caddy reload --config /etc/caddy/Caddyfile"
+            )
+        except docker.errors.APIError as exc:
+            if not _is_retryable_exec_conflict(exc):
+                raise
+
+            last_error = exc
+            if attempt < max_retries - 1:
+                logger.debug(
+                    "Container %s rejected Caddy reload while restarting, retrying (%d/%d)...",
+                    edge_container_name, attempt + 1, max_retries,
+                )
+                _wait_for_running(container, timeout=10.0, poll_interval=0.5)
+                time.sleep(retry_delay)
+                continue
+            break
+
         last_result = output.decode("utf-8", errors="replace")
         if exit_code == 0:
             logger.info("Reloaded Caddy in edge container %s", edge_container_name)
@@ -339,6 +367,11 @@ def reload_caddy(
 
         # Any other failure — don't retry
         break
+
+    if last_error is not None:
+        raise RuntimeError(
+            f"Caddy reload never reached a stable running container for {edge_container_name}: {last_error}"
+        ) from last_error
 
     raise RuntimeError(f"Caddy reload failed (exit {exit_code}): {last_result}")
 

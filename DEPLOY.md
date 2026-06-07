@@ -5,7 +5,9 @@
 - **Unraid 6.12+** with Docker enabled
 - **Domain** managed in Cloudflare (e.g. `mydomain.com`)
 - **Cloudflare API token** with DNS:Edit permission for your zone
-- **Tailscale account** with a reusable auth key from the admin console
+- **Tailscale account** with both:
+  - a reusable auth key from the admin console
+  - an API key for tailnet device management
 - SSH or terminal access to Unraid
 
 ## Option A: Docker Compose (recommended)
@@ -40,7 +42,7 @@ Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will
 2. **Domain** — enter your base domain (e.g. `mydomain.com`)
 3. **Cloudflare** — zone ID and API token
 4. **ACME Email** — for Let's Encrypt certificate registration
-5. **Tailscale** — your reusable auth key
+5. **Tailscale** — your reusable auth key and API key
 6. **Docker** — socket path (default is correct for Unraid)
 
 ### 4. Verify
@@ -186,7 +188,7 @@ Then update the edge image reference in the orchestrator's container_manager to 
 
 - **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the absolute host path of your data directory (e.g. `/mnt/user/appdata/tailbale/data`). Docker Compose sets this automatically via `${PWD}/data`; for `docker run` you must pass it explicitly.
 - **Can't connect to Docker**: Ensure `/var/run/docker.sock` is mounted and the container user has access
-- **Edge container won't start**: Check Tailscale auth key is valid and reusable
+- **Edge container won't start**: Check the Tailscale auth key is valid and reusable; the API key is also required during setup but is not used for login
 - **Certs not issuing**: Verify Cloudflare API token has DNS:Edit permission for your zone
 - **DNS records not updating**: Check Cloudflare zone ID matches your domain
 - **Invalidate all sessions**: Delete `/data/secrets/.jwt_secret` and restart the container
