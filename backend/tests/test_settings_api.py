@@ -19,6 +19,7 @@ class TestGetSettings:
         assert data["tailscale"]["api_key_configured"] is False
         assert data["tailscale"]["control_url"] == "https://controlplane.tailscale.com"
         assert data["docker"]["socket_path"] == "unix:///var/run/docker.sock"
+        assert data["general"]["developer_mode"] is False
         assert data["setup_complete"] is False
 
 
@@ -59,6 +60,11 @@ class TestUpdateGeneral:
         resp = client.put("/api/settings/general", json={"base_domain": None})
         assert resp.json()["general"]["base_domain"] == "keep.com"
 
+
+    def test_update_developer_mode(self, client):
+        resp = client.put("/api/settings/general", json={"developer_mode": True})
+        assert resp.status_code == 200
+        assert resp.json()["general"]["developer_mode"] is True
 
 class TestUpdateCloudflare:
     def test_update_zone_id(self, client):
@@ -107,6 +113,16 @@ class TestUpdateTailscale:
         assert resp.json()["tailscale"]["api_key_configured"] is True
         assert read_secret(TAILSCALE_API_KEY) == "tskey-api-abc123"
 
+    def test_rejects_invalid_auth_key(self, client, tmp_data_dir):
+        resp = client.put("/api/settings/tailscale", json={"auth_key": "tskey-api-wrong"})
+        assert resp.status_code == 400
+        assert "auth key" in resp.json()["detail"].lower()
+
+    def test_rejects_invalid_api_key(self, client, tmp_data_dir):
+        resp = client.put("/api/settings/tailscale", json={"api_key": "tskey-auth-wrong"})
+        assert resp.status_code == 400
+        assert "api key" in resp.json()["detail"].lower()
+
 
 class TestUpdateDocker:
     def test_update_socket_path(self, client):
@@ -132,7 +148,18 @@ class TestUpdatePaths:
 
 
 class TestSetupComplete:
-    def test_mark_setup_complete(self, client):
+    def test_mark_setup_complete_requires_tailscale_keys(self, client):
+        resp = client.put("/api/settings/setup-complete")
+        assert resp.status_code == 400
+        assert "tailscale auth key" in resp.json()["detail"].lower()
+        assert "api key" in resp.json()["detail"].lower()
+
+    def test_mark_setup_complete(self, client, tmp_data_dir):
+        client.put("/api/settings/tailscale", json={
+            "auth_key": "tskey-auth-abc123",
+            "api_key": "tskey-api-abc123",
+        })
+
         resp = client.put("/api/settings/setup-complete")
         assert resp.status_code == 200
         assert resp.json()["setup_complete"] is True
@@ -140,6 +167,68 @@ class TestSetupComplete:
         # Verify it persists
         resp = client.get("/api/settings")
         assert resp.json()["setup_complete"] is True
+
+
+class TestDeveloperActions:
+    def test_reset_setup_complete_requires_developer_mode(self, client):
+        resp = client.post("/api/settings/developer/reset-setup-complete")
+        assert resp.status_code == 403
+
+    def test_reset_setup_complete_only_flips_setting(self, client):
+        client.put("/api/settings/general", json={"developer_mode": True})
+        client.put("/api/settings/tailscale", json={
+            "auth_key": "tskey-auth-abc123",
+            "api_key": "tskey-api-abc123",
+        })
+        client.put("/api/settings/setup-complete")
+
+        resp = client.post("/api/settings/developer/reset-setup-complete")
+        assert resp.status_code == 200
+
+        settings = client.get("/api/settings").json()
+        assert settings["setup_complete"] is False
+        assert settings["general"]["developer_mode"] is True
+        assert settings["tailscale"]["auth_key_configured"] is True
+        assert settings["tailscale"]["api_key_configured"] is True
+
+    def test_reset_all_clears_services_users_settings_and_secrets(self, client, db_session, tmp_data_dir):
+        from app.models.user import User
+        from app.secrets import write_secret
+
+        client.put("/api/settings/general", json={"developer_mode": True, "base_domain": "custom.example"})
+        client.put("/api/settings/cloudflare", json={"zone_id": "zone123"})
+        client.put("/api/settings/tailscale", json={
+            "auth_key": "tskey-auth-abc123",
+            "api_key": "tskey-api-abc123",
+        })
+        client.put("/api/settings/setup-complete")
+        db_session.add(User(id="usr_reset", username="resetme", password_hash="hash", role="admin"))
+        db_session.commit()
+        client.post("/api/services", json={
+            "name": "Nextcloud",
+            "upstream_container_id": "abc123def456",
+            "upstream_container_name": "nextcloud",
+            "upstream_scheme": "http",
+            "upstream_port": 80,
+            "hostname": "nextcloud.example.com",
+            "base_domain": "example.com",
+        })
+        write_secret("cloudflare_token", "cf-token")
+
+        resp = client.post("/api/settings/developer/reset-all")
+        assert resp.status_code == 200
+
+        settings = client.get("/api/settings").json()
+        assert settings["setup_complete"] is False
+        assert settings["general"]["developer_mode"] is False
+        assert settings["general"]["base_domain"] == "example.com"
+        assert settings["cloudflare"]["token_configured"] is False
+        assert settings["tailscale"]["auth_key_configured"] is False
+        assert settings["tailscale"]["api_key_configured"] is False
+
+        assert db_session.query(User).count() == 0
+        from app.models.service import Service
+        assert db_session.query(Service).count() == 0
 
 
 class TestConnectionTests:

@@ -341,6 +341,45 @@ class TestReloadCaddy:
         with pytest.raises(RuntimeError, match="Edge container not found"):
             reload_caddy("svc_123", "edge_test")
 
+    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_retries_when_container_is_restarting(self, mock_find, mock_sleep):
+        from app.edge.container_manager import reload_caddy
+
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.side_effect = [
+            docker.errors.APIError(
+                '409 Client Error for http+docker://localhost/v1.47/containers/x/exec: '
+                'Conflict ("Container x is restarting, wait until the container is running")'
+            ),
+            (0, b"config reloaded"),
+        ]
+        mock_find.return_value = mock_container
+
+        result = reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
+
+        assert "reloaded" in result
+        assert mock_container.exec_run.call_count == 2
+        mock_container.reload.assert_called()
+
+    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_raises_when_container_never_stabilizes(self, mock_find, mock_sleep):
+        from app.edge.container_manager import reload_caddy
+        import pytest
+
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.side_effect = docker.errors.APIError(
+            '409 Client Error for http+docker://localhost/v1.47/containers/x/exec: '
+            'Conflict ("Container x is restarting, wait until the container is running")'
+        )
+        mock_find.return_value = mock_container
+
+        with pytest.raises(RuntimeError, match="never reached a stable running container"):
+            reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
+
 
 class TestDetectTailscaleIp:
     @patch("app.edge.container_manager.time.sleep")

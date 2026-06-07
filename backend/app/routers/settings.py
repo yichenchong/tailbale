@@ -1,6 +1,6 @@
 import docker
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -20,9 +20,11 @@ from app.schemas.settings import (
     TailscaleSettingsUpdate,
 )
 from app.secrets import (
+    ALL_SECRETS,
     CLOUDFLARE_TOKEN,
     TAILSCALE_API_KEY,
     TAILSCALE_AUTH_KEY,
+    delete_secret,
     read_secret,
     secret_exists,
     write_secret,
@@ -36,6 +38,19 @@ router = APIRouter(
 )
 
 
+def _is_valid_tailscale_auth_key(value: str) -> bool:
+    return value.startswith("tskey-auth-") or value.startswith("tskey-reusable-")
+
+
+def _is_valid_tailscale_api_key(value: str) -> bool:
+    return value.startswith("tskey-api-")
+
+
+def _require_developer_mode(db: Session) -> None:
+    if get_setting(db, "developer_mode") != "true":
+        raise HTTPException(status_code=403, detail="Developer Mode must be enabled first")
+
+
 def _build_response(db: Session) -> AllSettingsResponse:
     s = get_all_settings(db)
     return AllSettingsResponse(
@@ -45,6 +60,7 @@ def _build_response(db: Session) -> AllSettingsResponse:
             reconcile_interval_seconds=int(s["reconcile_interval_seconds"]),
             cert_renewal_window_days=int(s["cert_renewal_window_days"]),
             timezone=s["timezone"],
+            developer_mode=s["developer_mode"] == "true",
         ),
         cloudflare=CloudflareSettingsResponse(
             zone_id=s["cf_zone_id"],
@@ -91,6 +107,8 @@ async def update_general(body: GeneralSettingsUpdate, db: Session = Depends(get_
         set_setting(db, "cert_renewal_window_days", str(body.cert_renewal_window_days))
     if body.timezone is not None:
         set_setting(db, "timezone", body.timezone)
+    if body.developer_mode is not None:
+        set_setting(db, "developer_mode", "true" if body.developer_mode else "false")
     db.commit()
     return _build_response(db)
 
@@ -107,6 +125,17 @@ async def update_cloudflare(body: CloudflareSettingsUpdate, db: Session = Depend
 
 @router.put("/tailscale", response_model=AllSettingsResponse)
 async def update_tailscale(body: TailscaleSettingsUpdate, db: Session = Depends(get_db)):
+    if body.auth_key is not None and not _is_valid_tailscale_auth_key(body.auth_key):
+        raise HTTPException(
+            status_code=400,
+            detail="Tailscale auth key must start with 'tskey-auth-' or 'tskey-reusable-'",
+        )
+    if body.api_key is not None and not _is_valid_tailscale_api_key(body.api_key):
+        raise HTTPException(
+            status_code=400,
+            detail="Tailscale API key must start with 'tskey-api-'",
+        )
+
     if body.auth_key is not None:
         write_secret(TAILSCALE_AUTH_KEY, body.auth_key)
     if body.api_key is not None:
@@ -141,9 +170,51 @@ async def update_paths(body: PathSettingsUpdate, db: Session = Depends(get_db)):
 
 @router.put("/setup-complete", response_model=AllSettingsResponse)
 async def mark_setup_complete(db: Session = Depends(get_db)):
+    if not secret_exists(TAILSCALE_AUTH_KEY) or not secret_exists(TAILSCALE_API_KEY):
+        raise HTTPException(
+            status_code=400,
+            detail="Setup incomplete: configure both the Tailscale auth key and API key first",
+        )
     set_setting(db, "setup_complete", "true")
     db.commit()
     return _build_response(db)
+
+
+@router.post("/developer/reset-setup-complete")
+async def reset_setup_complete(db: Session = Depends(get_db)):
+    _require_developer_mode(db)
+    set_setting(db, "setup_complete", "false")
+    db.commit()
+    return {"success": True, "message": "setup_complete reset"}
+
+
+@router.post("/developer/reset-all")
+async def reset_all(db: Session = Depends(get_db)):
+    _require_developer_mode(db)
+
+    from app.models.event import Event
+    from app.models.job import Job
+    from app.models.service import Service
+    from app.models.setting import Setting
+    from app.models.user import User
+    from app.routers.services import _delete_service_record
+
+    service_ids = [service_id for (service_id,) in db.query(Service.id).all()]
+    for service_id in service_ids:
+        service = db.get(Service, service_id)
+        if service is not None:
+            _delete_service_record(db, service, cleanup_dns=True)
+
+    for secret_name in ALL_SECRETS:
+        delete_secret(secret_name)
+
+    db.query(Job).delete()
+    db.query(Event).delete()
+    db.query(User).delete()
+    db.query(Setting).delete()
+    db.commit()
+
+    return {"success": True, "message": "All setup state reset"}
 
 
 # --- Connection tests ---

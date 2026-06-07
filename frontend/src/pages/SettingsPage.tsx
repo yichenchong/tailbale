@@ -11,8 +11,8 @@ import {
   Loader2,
 } from "lucide-react"
 
-const TABS = ["General", "Cloudflare", "Tailscale", "Docker", "Paths", "Account"] as const
-type Tab = (typeof TABS)[number]
+const ALL_TABS = ["General", "Cloudflare", "Tailscale", "Docker", "Paths", "Account", "Developer"] as const
+type Tab = (typeof ALL_TABS)[number]
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("General")
@@ -38,6 +38,12 @@ export default function SettingsPage() {
   }
 
   useEffect(() => { load() }, [])
+
+  useEffect(() => {
+    if (settings && !settings.general.developer_mode && tab === "Developer") {
+      setTab("General")
+    }
+  }, [settings, tab])
 
   const save = async (section: string, body: Record<string, unknown>) => {
     setSaving(true)
@@ -71,14 +77,17 @@ export default function SettingsPage() {
     )
   }
 
+  const tabs = settings.general.developer_mode
+    ? ALL_TABS
+    : ALL_TABS.filter((item) => item !== "Developer")
+
   return (
     <div>
       <h1 className="text-2xl font-bold">Settings</h1>
       <p className="mt-1 text-sm text-zinc-500">Configure tailBale orchestrator.</p>
 
-      {/* Tab bar */}
       <div className="mt-6 flex gap-1 border-b border-zinc-200">
-        {TABS.map((t) => (
+        {tabs.map((t) => (
           <button
             key={t}
             onClick={() => { setTab(t); setTestResult(null) }}
@@ -94,7 +103,6 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      {/* Tab content */}
       <div className="mt-6 max-w-lg">
         {tab === "General" && (
           <GeneralTab settings={settings.general} onSave={(b) => save("general", b)} saving={saving} version={version} />
@@ -135,12 +143,13 @@ export default function SettingsPage() {
         {tab === "Account" && (
           <AccountTab />
         )}
+        {tab === "Developer" && (
+          <DeveloperTab />
+        )}
       </div>
     </div>
   )
 }
-
-// --- Shared components ---
 
 function Field({
   label,
@@ -227,8 +236,6 @@ function SecretStatus({ configured }: { configured: boolean }) {
   )
 }
 
-// --- Tab components ---
-
 function GeneralTab({
   settings,
   onSave,
@@ -245,6 +252,7 @@ function GeneralTab({
   const [reconcileInterval, setReconcileInterval] = useState(String(settings.reconcile_interval_seconds))
   const [renewalWindow, setRenewalWindow] = useState(String(settings.cert_renewal_window_days))
   const [timezone, setTimezone] = useState(settings.timezone)
+  const [developerMode, setDeveloperMode] = useState(settings.developer_mode)
 
   return (
     <div className="space-y-4">
@@ -277,6 +285,20 @@ function GeneralTab({
         </select>
         <p className="mt-1 text-xs text-zinc-400">Timezone used for all displayed times</p>
       </label>
+      <label className="flex items-start gap-3 rounded-md border border-zinc-200 px-3 py-3">
+        <input
+          type="checkbox"
+          checked={developerMode}
+          onChange={(e) => setDeveloperMode(e.target.checked)}
+          className="mt-0.5 h-4 w-4 rounded border-zinc-300 text-zinc-900 focus:ring-zinc-500"
+        />
+        <span>
+          <span className="block text-sm font-medium text-zinc-700">Developer Mode</span>
+          <span className="mt-1 block text-xs text-zinc-400">
+            Shows advanced reset controls, including setup reset and full data reset.
+          </span>
+        </span>
+      </label>
       <SaveButton
         saving={saving}
         onClick={() =>
@@ -286,11 +308,11 @@ function GeneralTab({
             reconcile_interval_seconds: Number(reconcileInterval),
             cert_renewal_window_days: Number(renewalWindow),
             timezone,
+            developer_mode: developerMode,
           })
         }
       />
 
-      {/* Version info */}
       <div className="mt-6 border-t border-zinc-200 pt-4">
         <div className="text-sm text-zinc-500">
           <span className="font-medium text-zinc-700">tailBale</span>
@@ -544,7 +566,6 @@ function AccountTab() {
 
   return (
     <div className="space-y-6">
-      {/* Password change */}
       <div>
         <h3 className="text-sm font-semibold text-zinc-700">Change Password</h3>
         <div className="mt-3 space-y-3">
@@ -595,7 +616,72 @@ function AccountTab() {
           )}
         </div>
       </div>
+    </div>
+  )
+}
 
+function DeveloperTab() {
+  const [working, setWorking] = useState(false)
+  const [error, setError] = useState("")
+
+  const runReset = async (kind: "reset-setup-complete" | "reset-all") => {
+    const warning =
+      kind === "reset-all"
+        ? "Reset all will delete the current user, remove all services, clear stored secrets and settings, and send you back to setup. Continue?"
+        : "Reset setup_complete will send you back to the setup wizard but keep the existing user, services, and secrets. Continue?"
+
+    if (!window.confirm(warning)) return
+
+    setWorking(true)
+    setError("")
+    try {
+      await api.post(`/settings/developer/${kind}`)
+      window.location.assign("/setup")
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Developer reset failed")
+      setWorking(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+        Dangerous tools. Reset actions are for local testing and recovery only.
+      </div>
+
+      <div className="rounded-md border border-zinc-200 p-4">
+        <h3 className="text-sm font-semibold text-zinc-800">Reset setup_complete</h3>
+        <p className="mt-1 text-sm text-zinc-500">
+          Sends the app back to the setup wizard without deleting users, services, or secrets.
+        </p>
+        <button
+          onClick={() => runReset("reset-setup-complete")}
+          disabled={working}
+          className="mt-3 rounded-md border border-amber-300 px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+        >
+          {working ? "Working..." : "Reset setup_complete"}
+        </button>
+      </div>
+
+      <div className="rounded-md border border-red-200 p-4">
+        <h3 className="text-sm font-semibold text-red-800">Reset all</h3>
+        <p className="mt-1 text-sm text-zinc-500">
+          Attempts to remove every service cleanly, then clears the current user, settings, and stored secrets.
+        </p>
+        <button
+          onClick={() => runReset("reset-all")}
+          disabled={working}
+          className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
+        >
+          {working ? "Working..." : "Reset all"}
+        </button>
+      </div>
+
+      {error && (
+        <div className="flex items-center gap-2 rounded-md bg-red-50 px-3 py-2 text-sm text-red-800">
+          <XCircle className="h-4 w-4" /> {error}
+        </div>
+      )}
     </div>
   )
 }

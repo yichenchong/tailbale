@@ -191,6 +191,11 @@ class TestAuthStatus:
             json={"username": "admin", "password": "securepassword123"},
         )
         _set_auth_cookie(auth_client, login_resp.cookies["access_token"])
+        auth_client.put("/api/settings/tailscale", json={
+            "auth_key": "tskey-auth-abc123",
+            "api_key": "tskey-api-abc123",
+        })
+
 
         auth_client.put("/api/settings/setup-complete", json={})
 
@@ -245,6 +250,20 @@ class TestSetupProgress:
         resp = auth_client.get("/api/auth/setup-progress")
         data = resp.json()
         assert data["acme_email_set"] is True
+
+    def test_tailscale_requires_auth_and_api_key(self, auth_client, tmp_data_dir):
+        from app.secrets import write_secret, TAILSCALE_AUTH_KEY, TAILSCALE_API_KEY
+
+        setup_resp = _setup_user(auth_client)
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
+
+        write_secret(TAILSCALE_AUTH_KEY, "tskey-auth-abc123")
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.json()["tailscale_configured"] is False
+
+        write_secret(TAILSCALE_API_KEY, "tskey-api-abc123")
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.json()["tailscale_configured"] is True
 
     def test_is_publicly_accessible(self, auth_client):
         """setup-progress must work without auth (it's used before login)."""
