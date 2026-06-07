@@ -33,7 +33,7 @@ function firstIncompleteStep(progress: SetupProgress): number {
   return 5 // all done, show last step for "Complete Setup"
 }
 
-export default function Setup() {
+export default function Setup({ onSetupComplete }: { onSetupComplete?: () => void }) {
   const navigate = useNavigate()
   const [step, setStep] = useState(0)
   const [initializing, setInitializing] = useState(true)
@@ -140,7 +140,8 @@ export default function Setup() {
         setTestResult(null)
       } else {
         await api.put("/settings/setup-complete", {})
-        navigate("/")
+        onSetupComplete?.()
+        navigate("/", { replace: true })
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
