@@ -14,11 +14,18 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 ```
 
 1. **Discover** running Docker containers on your Unraid server
-2. **Expose** a container through the wizard — tailBale creates:
-   - A dedicated edge container with Tailscale + Caddy
-   - A Let's Encrypt certificate via DNS-01 challenge (Cloudflare)
-   - A DNS A record pointing `service.yourdomain.com` to the edge's Tailscale IP
-3. **Access** your service from any device on your tailnet at `https://service.yourdomain.com`
+2. **Complete the setup wizard** — tailBale stores and validates:
+   - base domain
+   - Cloudflare zone ID + API token
+   - ACME email
+   - Tailscale reusable auth key
+   - Tailscale API key
+   - Docker socket path
+3. **Expose** a container through the UI — tailBale creates:
+   - a dedicated edge container with Tailscale + Caddy
+   - a Let's Encrypt certificate via DNS-01 challenge (Cloudflare)
+   - a DNS A record pointing `service.yourdomain.com` to the edge's Tailscale IP
+4. **Access** your service from any device on your tailnet at `https://service.yourdomain.com`
 
 ## Prerequisites
 
@@ -44,6 +51,17 @@ docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 See [DEPLOY.md](DEPLOY.md) for detailed deployment instructions, environment variables, and troubleshooting.
+
+## Notable Behavior
+
+- **Edge container per service** — each exposure gets its own Docker network, edge container, Tailscale identity, and certificate material.
+- **Developer Mode** — in **Settings → General**, enable Developer Mode to reveal the **Developer** tab with:
+  - `Reset setup_complete`
+  - `Reset all`
+- **Tailscale keys are different**:
+  - **Auth key**: used by the edge container to run `tailscale up`
+  - **API key**: used by tailBale to clean up tailnet devices on recreate/delete
+- **HTTPS probe failures are logged explicitly** — probe failures now log whether the cause was missing Tailscale IP, non-running edge container, curl failure, no HTTP response, or upstream 5xx.
 
 ## Stack
 

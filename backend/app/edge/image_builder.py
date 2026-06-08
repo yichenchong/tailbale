@@ -26,6 +26,25 @@ def edge_image_exists(socket_path: str | None = None) -> bool:
         return False
 
 
+
+def _remove_image_if_present(
+    client: docker.DockerClient,
+    image_id: str | None,
+    *,
+    reason: str,
+) -> None:
+    if not image_id:
+        return
+    try:
+        client.images.remove(image=image_id, force=True)
+        logger.info("Removed superseded edge image %s (%s)", image_id, reason)
+    except docker.errors.ImageNotFound:
+        return
+    except docker.errors.APIError:
+        logger.warning("Failed to remove superseded edge image %s", image_id, exc_info=True)
+
+
+
 def build_edge_image(socket_path: str | None = None) -> str:
     """Build the edge image from the bundled context. Returns the image ID."""
     if not _EDGE_CONTEXT.is_dir():
@@ -60,11 +79,13 @@ def ensure_edge_image(socket_path: str | None = None) -> None:
     so that containers created from it carry the correct code.
     """
     client = _get_client(socket_path)
+    previous_image_id: str | None = None
     try:
         image = client.images.get(EDGE_IMAGE)
+        previous_image_id = image.id
         image_version = (image.labels or {}).get("tailbale.version")
         if image_version == __version__:
-            logger.debug("Edge image %s already at version %s", EDGE_IMAGE, __version__)
+            logger.info("Edge image %s already at version %s", EDGE_IMAGE, __version__)
             return
         logger.info(
             "Edge image version mismatch (image=%s, orchestrator=%s), rebuilding...",
@@ -73,7 +94,13 @@ def ensure_edge_image(socket_path: str | None = None) -> None:
     except docker.errors.ImageNotFound:
         logger.info("Edge image %s not found, building...", EDGE_IMAGE)
 
-    build_edge_image(socket_path)
+    new_image_id = build_edge_image(socket_path)
+    if previous_image_id and previous_image_id != new_image_id:
+        _remove_image_if_present(
+            client,
+            previous_image_id,
+            reason=f"replaced by {new_image_id}",
+        )
 
 
 def _get_client(socket_path: str | None = None) -> docker.DockerClient:

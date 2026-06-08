@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 # lego stores certs under .lego/certificates/ by default
 LEGO_BINARY = "lego"
 
+LEGO_TIMEOUT_SECONDS = 5
+LEGO_OVERALL_REQUEST_LIMIT = 1
+
+
+def _format_lego_output(output: str | None, limit: int = 500) -> str:
+    if not output:
+        return ""
+    collapsed = " ".join(output.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 3] + "..."
+
 
 def _run_lego(
     args: list[str],
@@ -35,23 +47,45 @@ def _run_lego(
         LEGO_BINARY,
         "--path", str(lego_dir),
         "--dns", "cloudflare",
+        "--overall-request-limit", str(LEGO_OVERALL_REQUEST_LIMIT),
         *args,
     ]
 
     logger.info("Running lego: %s", " ".join(cmd))
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        env=env,
-        timeout=300,
-    )
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=LEGO_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stdout = _format_lego_output(exc.stdout)
+        stderr = _format_lego_output(exc.stderr)
+        logger.error(
+            "lego timed out after %ss (stdout=%r, stderr=%r)",
+            LEGO_TIMEOUT_SECONDS,
+            stdout,
+            stderr,
+        )
+        raise RuntimeError(
+            f"lego timed out after {LEGO_TIMEOUT_SECONDS}s"
+            + (f": {stderr}" if stderr else "")
+        ) from exc
 
     if result.returncode != 0:
-        logger.error("lego failed (exit %d): %s", result.returncode, result.stderr)
-        raise RuntimeError(f"lego failed: {result.stderr.strip()}")
+        stdout = _format_lego_output(result.stdout)
+        stderr = _format_lego_output(result.stderr)
+        logger.error(
+            "lego failed (exit %d, stdout=%r, stderr=%r)",
+            result.returncode,
+            stdout,
+            stderr,
+        )
+        raise RuntimeError(f"lego failed: {stderr or stdout or 'unknown error'}")
 
-    logger.info("lego succeeded: %s", result.stdout.strip()[:200])
+    logger.info("lego succeeded: %s", _format_lego_output(result.stdout, limit=200))
     return result
 
 

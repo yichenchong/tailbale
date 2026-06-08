@@ -1,6 +1,6 @@
 """Authentication router: login, logout, session check, and initial user setup."""
 
-from fastapi import APIRouter, Depends, HTTPException, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -12,7 +12,7 @@ from app.auth import (
     verify_password,
 )
 from app.config import settings
-from app.database import get_db
+from app.database import commit_with_lock, get_db
 from app.models.user import User
 from app.schemas.auth import (
     AuthStatusResponse,
@@ -82,7 +82,7 @@ async def change_password(
     if not verify_password(body.current_password, user.password_hash, db):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     user.password_hash = hash_password(body.new_password, db)
-    db.commit()
+    commit_with_lock(db)
     return {"ok": True}
 
 
@@ -101,7 +101,7 @@ async def setup_user(
         role="admin",
     )
     db.add(user)
-    db.commit()
+    commit_with_lock(db)
     db.refresh(user)
 
     token = create_access_token(user.id)

@@ -88,7 +88,8 @@ class TestConnectContainer:
         mock_container.attrs = {"NetworkSettings": {"Networks": {}}}
         mock_client.containers.get.return_value = mock_container
 
-        connect_container("edge_net_test", "container_123")
+        result = connect_container("edge_net_test", "container_123")
+        assert result == mock_container.id
         mock_network.connect.assert_called_once_with(mock_container)
 
     @patch("app.edge.network_manager.docker.DockerClient")
@@ -105,8 +106,30 @@ class TestConnectContainer:
         }
         mock_client.containers.get.return_value = mock_container
 
-        connect_container("edge_net_test", "container_123")
+        result = connect_container("edge_net_test", "container_123")
+        assert result == mock_container.id
         mock_network.connect.assert_not_called()
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_falls_back_to_container_name_when_id_is_stale(self, mock_cls):
+        from app.edge.network_manager import connect_container
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_client.networks.get.return_value = mock_network
+        mock_container = MagicMock()
+        mock_container.id = "resolved_456"
+        mock_container.attrs = {"NetworkSettings": {"Networks": {}}}
+        mock_client.containers.get.side_effect = [
+            docker.errors.NotFound("not found"),
+            mock_container,
+        ]
+
+        result = connect_container("edge_net_test", "stale_123", container_name="app")
+
+        assert result == "resolved_456"
+        mock_network.connect.assert_called_once_with(mock_container)
 
 
 class TestEnsureNetwork:
@@ -132,4 +155,4 @@ class TestEnsureNetwork:
         mock_client.containers.get.return_value = mock_container
 
         result = ensure_network("edge_net_test", "app_container_id")
-        assert result == "new_net_id"
+        assert result == ("new_net_id", mock_container.id)

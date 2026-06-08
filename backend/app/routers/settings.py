@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
-from app.database import get_db
+from app.database import commit_with_lock, get_db
 from app.schemas.settings import (
     AllSettingsResponse,
     CloudflareSettingsResponse,
@@ -109,7 +109,7 @@ async def update_general(body: GeneralSettingsUpdate, db: Session = Depends(get_
         set_setting(db, "timezone", body.timezone)
     if body.developer_mode is not None:
         set_setting(db, "developer_mode", "true" if body.developer_mode else "false")
-    db.commit()
+    commit_with_lock(db)
     return _build_response(db)
 
 
@@ -119,7 +119,7 @@ async def update_cloudflare(body: CloudflareSettingsUpdate, db: Session = Depend
         set_setting(db, "cf_zone_id", body.zone_id)
     if body.token is not None:
         write_secret(CLOUDFLARE_TOKEN, body.token)
-    db.commit()
+    commit_with_lock(db)
     return _build_response(db)
 
 
@@ -144,7 +144,7 @@ async def update_tailscale(body: TailscaleSettingsUpdate, db: Session = Depends(
         set_setting(db, "ts_control_url", body.control_url)
     if body.default_ts_hostname_prefix is not None:
         set_setting(db, "ts_default_hostname_prefix", body.default_ts_hostname_prefix)
-    db.commit()
+    commit_with_lock(db)
     return _build_response(db)
 
 
@@ -152,7 +152,7 @@ async def update_tailscale(body: TailscaleSettingsUpdate, db: Session = Depends(
 async def update_docker(body: DockerSettingsUpdate, db: Session = Depends(get_db)):
     if body.socket_path is not None:
         set_setting(db, "docker_socket_path", body.socket_path)
-    db.commit()
+    commit_with_lock(db)
     return _build_response(db)
 
 
@@ -164,7 +164,7 @@ async def update_paths(body: PathSettingsUpdate, db: Session = Depends(get_db)):
         set_setting(db, "cert_root", body.cert_root)
     if body.tailscale_state_root is not None:
         set_setting(db, "tailscale_state_root", body.tailscale_state_root)
-    db.commit()
+    commit_with_lock(db)
     return _build_response(db)
 
 
@@ -176,7 +176,7 @@ async def mark_setup_complete(db: Session = Depends(get_db)):
             detail="Setup incomplete: configure both the Tailscale auth key and API key first",
         )
     set_setting(db, "setup_complete", "true")
-    db.commit()
+    commit_with_lock(db)
     return _build_response(db)
 
 
@@ -184,7 +184,7 @@ async def mark_setup_complete(db: Session = Depends(get_db)):
 async def reset_setup_complete(db: Session = Depends(get_db)):
     _require_developer_mode(db)
     set_setting(db, "setup_complete", "false")
-    db.commit()
+    commit_with_lock(db)
     return {"success": True, "message": "setup_complete reset"}
 
 
@@ -212,7 +212,7 @@ async def reset_all(db: Session = Depends(get_db)):
     db.query(Event).delete()
     db.query(User).delete()
     db.query(Setting).delete()
-    db.commit()
+    commit_with_lock(db)
 
     return {"success": True, "message": "All setup state reset"}
 

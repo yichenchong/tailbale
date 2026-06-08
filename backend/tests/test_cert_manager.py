@@ -1,5 +1,6 @@
 """Tests for the certificate manager module."""
 
+import subprocess
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +29,8 @@ class TestRunLego:
         assert "lego" in cmd[0]
         assert "--dns" in cmd
         assert "cloudflare" in cmd
+        assert "--overall-request-limit" in cmd
+        assert call_kwargs.kwargs["timeout"] == 5
 
     @patch("app.certs.cert_manager.subprocess.run")
     def test_raises_on_failure(self, mock_run, tmp_path):
@@ -37,6 +40,19 @@ class TestRunLego:
 
         with pytest.raises(RuntimeError, match="lego failed"):
             _run_lego(["run"], cloudflare_token="bad", lego_dir=tmp_path)
+
+    @patch("app.certs.cert_manager.subprocess.run")
+    def test_raises_on_timeout(self, mock_run, tmp_path):
+        from app.certs.cert_manager import _run_lego
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=["lego", "run"],
+            timeout=5,
+            output="waiting for retry after 31h",
+            stderr="429 rateLimited",
+        )
+
+        with pytest.raises(RuntimeError, match="lego timed out after 5s"):
+            _run_lego(["run"], cloudflare_token="cf-token", lego_dir=tmp_path)
 
 
 class TestIssueCert:

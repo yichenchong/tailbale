@@ -18,6 +18,7 @@ from app.adapters.cloudflare_adapter import (
     find_record,
     update_a_record,
 )
+from app.database import flush_with_lock
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
 
@@ -73,7 +74,7 @@ def reconcile_dns(
             record_type="A",
         )
         db.add(dns_record)
-        db.flush()
+        flush_with_lock(db)
 
     # Check Cloudflare for existing record
     existing = find_record(cf_token, zone_id, hostname, "A")

@@ -254,6 +254,17 @@ class TestRemoveEdge:
         # Should still remove the container even without API key
         mock_container.remove.assert_called_once_with(force=True)
 
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_remove_edge_ignores_missing_container_on_remove(self, mock_find):
+        from app.edge.container_manager import remove_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_container.remove.side_effect = docker.errors.NotFound("gone")
+        mock_find.return_value = mock_container
+
+        remove_edge("svc_123", "edge_test")
+
 
 class TestRecreateEdge:
     @patch("app.edge.container_manager.start_edge")

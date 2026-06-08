@@ -7,7 +7,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
-from app.database import get_db
+from app.database import commit_with_lock, flush_with_lock, get_db
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
@@ -243,7 +243,7 @@ async def create_service(body: ServiceCreate, background_tasks: BackgroundTasks,
         app_profile=body.app_profile,
     )
     db.add(svc)
-    db.flush()  # Generate ID
+    flush_with_lock(db)  # Generate ID
 
     # Create initial status
     status = ServiceStatus(service_id=svc.id, phase="pending", message="Awaiting first reconciliation")
@@ -251,7 +251,7 @@ async def create_service(body: ServiceCreate, background_tasks: BackgroundTasks,
 
     _emit_event(db, svc.id, "service_created", f"Service '{svc.name}' created for {svc.hostname}")
 
-    db.commit()
+    commit_with_lock(db)
     db.refresh(svc)
     db.refresh(status)
 
@@ -392,7 +392,7 @@ async def update_service(service_id: str, body: ServiceUpdate, db: Session = Dep
     if changes:
         _emit_event(db, svc.id, "service_updated", f"Service '{svc.name}' updated", details=changes)
 
-    db.commit()
+    commit_with_lock(db)
     db.refresh(svc)
     status = db.get(ServiceStatus, service_id)
     return _to_response(svc, status)
@@ -445,7 +445,7 @@ async def disable_service(
             # cleanup_dns_record already emits dns_removed or dns_cleanup_failed
             # events internally — no need to duplicate here.
 
-    db.commit()
+    commit_with_lock(db)
     db.refresh(svc)
     status = db.get(ServiceStatus, service_id)
     return _to_response(svc, status)
@@ -520,7 +520,7 @@ def _delete_service_record(db: Session, svc: Service, *, cleanup_dns: bool) -> N
     service_id = svc.id
     db.delete(svc)
     _emit_event(db, None, "service_deleted", f"Service '{name}' ({service_id}) deleted")
-    db.commit()
+    commit_with_lock(db)
 
 
 @router.delete("/{service_id}", status_code=204)
@@ -566,7 +566,7 @@ async def reload_service(service_id: str, db: Session = Depends(get_db)):
     try:
         output = reload_caddy(svc.id, svc.edge_container_name, _get_docker_socket(db))
         _emit_event(db, svc.id, "caddy_reloaded", f"Caddy reloaded for '{svc.name}'")
-        db.commit()
+        commit_with_lock(db)
         return {"success": True, "message": "Caddy config reloaded", "output": output}
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from None
@@ -581,7 +581,7 @@ async def restart_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
     try:
         restart_edge(svc.id, svc.edge_container_name, _get_docker_socket(db))
         _emit_event(db, svc.id, "edge_restarted", f"Edge container restarted for '{svc.name}'")
-        db.commit()
+        commit_with_lock(db)
         return {"success": True, "message": "Edge container restarted"}
     except RuntimeError as e:
         raise HTTPException(status_code=500, detail=str(e)) from None
@@ -614,7 +614,7 @@ async def recreate_edge_endpoint(service_id: str, db: Session = Depends(get_db))
             status.edge_container_id = container_id
 
         _emit_event(db, svc.id, "edge_recreated", f"Edge container recreated for '{svc.name}'")
-        db.commit()
+        commit_with_lock(db)
         return {"success": True, "message": "Edge container recreated", "container_id": container_id}
     except HTTPException:
         raise
@@ -832,7 +832,7 @@ async def update_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
                 thread_db, svc.id, "edge_updated",
                 f"Edge container updated to v{__version__} for '{svc.name}'",
             )
-            thread_db.commit()
+            commit_with_lock(thread_db)
             return container_id
         finally:
             thread_db.close()

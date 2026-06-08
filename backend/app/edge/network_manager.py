@@ -41,32 +41,66 @@ def remove_network(network_name: str, socket_path: str | None = None) -> None:
         logger.info("Network %s not found, nothing to remove", network_name)
 
 
+
+
+def _resolve_container(
+    client: docker.DockerClient,
+    container_id: str,
+    container_name: str | None = None,
+):
+    try:
+        return client.containers.get(container_id)
+    except docker.errors.NotFound:
+        if not container_name:
+            raise
+        container = client.containers.get(container_name)
+        logger.info(
+            "Resolved upstream container %s to new ID %s after stale ID %s was missing",
+            container_name,
+            container.id,
+            container_id,
+        )
+        return container
+
+
 def connect_container(
-    network_name: str, container_id: str, socket_path: str | None = None
-) -> None:
-    """Connect a container to a network (idempotent)."""
+    network_name: str,
+    container_id: str,
+    socket_path: str | None = None,
+    container_name: str | None = None,
+) -> str:
+    """Connect a container to a network (idempotent). Returns the resolved container ID."""
     client = _get_client(socket_path)
     network = client.networks.get(network_name)
-    container = client.containers.get(container_id)
+    container = _resolve_container(client, container_id, container_name)
 
     # Check if already connected
     container.reload()
     connected_networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
     if network_name in connected_networks:
-        logger.info("Container %s already on network %s", container_id, network_name)
-        return
+        logger.info("Container %s already on network %s", container.id, network_name)
+        return container.id
 
     network.connect(container)
-    logger.info("Connected container %s to network %s", container_id, network_name)
+    logger.info("Connected container %s to network %s", container.id, network_name)
+    return container.id
 
 
 def ensure_network(
-    network_name: str, app_container_id: str, socket_path: str | None = None
-) -> str:
+    network_name: str,
+    app_container_id: str,
+    socket_path: str | None = None,
+    app_container_name: str | None = None,
+) -> tuple[str, str]:
     """Idempotent: create network if absent, connect app container if not connected.
 
-    Returns the network ID.
+    Returns ``(network_id, resolved_container_id)``.
     """
     network_id = create_network(network_name, socket_path)
-    connect_container(network_name, app_container_id, socket_path)
-    return network_id
+    resolved_container_id = connect_container(
+        network_name,
+        app_container_id,
+        socket_path,
+        app_container_name,
+    )
+    return network_id, resolved_container_id

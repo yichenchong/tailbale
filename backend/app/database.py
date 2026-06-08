@@ -1,8 +1,9 @@
 import logging
+import threading
+from contextlib import contextmanager
 
 from sqlalchemy import create_engine, event, inspect, text
-from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,24 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.close()
 
 SessionLocal = sessionmaker(bind=engine)
+
+_DB_WRITE_MUTEX = threading.RLock()
+
+
+@contextmanager
+def db_write_lock():
+    with _DB_WRITE_MUTEX:
+        yield
+
+
+def commit_with_lock(db: Session) -> None:
+    with db_write_lock():
+        db.commit()
+
+
+def flush_with_lock(db: Session) -> None:
+    with db_write_lock():
+        db.flush()
 
 
 def get_db():

@@ -15,6 +15,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING
 
+from app.database import commit_with_lock
+
 if TYPE_CHECKING:
     pass
 
@@ -75,7 +77,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
         try:
             svc = db.get(Service, service_id)
             if not svc or not svc.enabled:
-                logger.debug("Probe retry: service %s gone or disabled, stopping", service_id)
+                logger.info("Probe retry: service %s gone or disabled, stopping", service_id)
                 _clear_retry_state(service_id)
                 return
 
@@ -85,7 +87,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
 
             # If already healthy, nothing to do
             if status.phase == "healthy":
-                logger.debug("Probe retry: service %s already healthy", service_id)
+                logger.info("Probe retry: service %s already healthy", service_id)
                 _clear_retry_state(service_id)
                 return
 
@@ -105,7 +107,6 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                 if new_phase == "healthy":
                     status.probe_retry_at = None
                     status.probe_retry_attempt = None
-                db.commit()
 
                 level = "info" if new_phase == "healthy" else "warning"
                 emit_event(
@@ -114,6 +115,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                     level=level,
                     details={"phase": new_phase, "checks": checks},
                 )
+                commit_with_lock(db)
                 logger.info(
                     "Probe retry: service %s improved %s -> %s",
                     service_id, old_phase, new_phase,
@@ -124,10 +126,10 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
             else:
                 # Update health checks even if phase didn't change
                 status.health_checks = json.dumps(checks)
-                db.commit()
+                commit_with_lock(db)
 
         except Exception:
-            logger.debug("Probe retry error for %s", service_id, exc_info=True)
+            logger.info("Probe retry error for %s", service_id, exc_info=True)
         finally:
             db.close()
 
@@ -147,9 +149,9 @@ def _update_retry_state(service_id: str, attempt: int, delay: int) -> None:
         if status:
             status.probe_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
             status.probe_retry_attempt = attempt
-            db.commit()
+            commit_with_lock(db)
     except Exception:
-        logger.debug("Failed to update retry state for %s", service_id, exc_info=True)
+        logger.info("Failed to update retry state for %s", service_id, exc_info=True)
     finally:
         db.close()
 
@@ -165,8 +167,8 @@ def _clear_retry_state(service_id: str) -> None:
         if status:
             status.probe_retry_at = None
             status.probe_retry_attempt = None
-            db.commit()
+            commit_with_lock(db)
     except Exception:
-        logger.debug("Failed to clear retry state for %s", service_id, exc_info=True)
+        logger.info("Failed to clear retry state for %s", service_id, exc_info=True)
     finally:
         db.close()

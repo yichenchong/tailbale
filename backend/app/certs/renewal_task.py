@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.certs.cert_manager import get_cert_expiry, issue_cert, renew_cert
-from app.database import SessionLocal
+from app.database import SessionLocal, commit_with_lock, flush_with_lock
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
@@ -67,13 +67,12 @@ def process_service_cert(db: Session, svc: Service) -> None:
     lego_dir = certs_root / ".lego"
     fullchain_path = cert_dir / "fullchain.pem"
 
-    # Get or create cert record
     cert_record = db.get(Certificate, svc.id)
     if not cert_record:
         cert_record = Certificate(service_id=svc.id, hostname=svc.hostname)
         db.add(cert_record)
-        db.flush()
-
+        flush_with_lock(db)
+        commit_with_lock(db)
     # Check if we should skip due to recent failure
     now = datetime.now(timezone.utc)
     if cert_record.next_retry_at:
@@ -81,8 +80,8 @@ def process_service_cert(db: Session, svc: Service) -> None:
         if retry_at.tzinfo is None:
             retry_at = retry_at.replace(tzinfo=timezone.utc)
         if now < retry_at:
-            logger.debug(
-                "Skipping %s: next retry at %s", svc.hostname, cert_record.next_retry_at
+            logger.info(
+                "Skipping %s: next cert retry at %s", svc.hostname, cert_record.next_retry_at
             )
             return
 
@@ -97,9 +96,9 @@ def process_service_cert(db: Session, svc: Service) -> None:
             needs_renew = True
 
     if not needs_issue and not needs_renew:
-        # Cert exists and not expiring soon — update record and return
         cert_record.expires_at = current_expiry
         cert_record.last_failure = None
+        commit_with_lock(db)
         return
 
     try:
@@ -121,12 +120,12 @@ def process_service_cert(db: Session, svc: Service) -> None:
                 f"Certificate renewed for {svc.hostname}",
             )
 
-        # Update cert record on success
         new_expiry = get_cert_expiry(cert_dir / "fullchain.pem")
         cert_record.expires_at = new_expiry
         cert_record.last_renewed_at = now
         cert_record.last_failure = None
         cert_record.next_retry_at = None
+        commit_with_lock(db)
 
     except Exception as e:
         error_msg = str(e)[:500]
@@ -139,6 +138,7 @@ def process_service_cert(db: Session, svc: Service) -> None:
             db, svc.id, "cert_failed", "error",
             f"Certificate operation failed for {svc.hostname}: {error_msg}",
         )
+        commit_with_lock(db)
 
 
 def run_renewal_scan() -> int:
@@ -153,7 +153,6 @@ def run_renewal_scan() -> int:
         for svc in services:
             try:
                 process_service_cert(db, svc)
-                db.commit()
                 processed += 1
             except Exception:
                 db.rollback()

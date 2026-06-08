@@ -7,7 +7,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
-from app.database import get_db
+from app.database import commit_with_lock, get_db
+from app.events.event_emitter import emit_event as _emit_event
 from app.models.event import Event
 from app.models.job import Job
 
@@ -116,9 +117,8 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             status_code=422,
             detail="Cloudflare API token is not configured",
         )
-
     job.status = "running"
-    db.flush()
+    commit_with_lock(db)
 
     try:
         from app.adapters.cloudflare_adapter import delete_a_record, find_record
@@ -143,7 +143,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             )
 
         db.delete(job)
-        db.commit()
+        commit_with_lock(db)
         return {"success": True, "message": f"DNS record for '{hostname}' cleaned up"}
 
     except Exception as exc:
@@ -160,7 +160,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             details={"record_id": record_id, "hostname": hostname, "error": error_msg},
             level="warning",
         )
-        db.commit()
+        commit_with_lock(db)
         raise HTTPException(status_code=502, detail=f"Cloudflare API error: {error_msg}")
 
 
@@ -185,4 +185,4 @@ async def dismiss_orphan_job(job_id: str, db: Session = Depends(get_db)):
         details={"record_id": details.get("record_id"), "hostname": hostname, "job_id": job.id},
     )
     db.delete(job)
-    db.commit()
+    commit_with_lock(db)

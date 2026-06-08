@@ -96,6 +96,42 @@ class TestReconcileService:
         events = db_session.query(Event).filter(Event.kind == "reconcile_completed").all()
         assert len(events) == 1
 
+
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK)
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_updates_stale_upstream_container_id_after_restart(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        svc = _create_service(db_session, upstream_container_id="stale123", upstream_container_name="testapp")
+
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "caddyfile content"
+        mock_find_edge.return_value = None
+        mock_create_edge.return_value = "container123"
+        mock_network.return_value = ("net123", "fresh456")
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {"edge_container_running": True}
+        mock_aggregate.return_value = "healthy"
+
+        reconcile_service(db_session, svc)
+
+        updated = db_session.get(Service, svc.id)
+        assert updated is not None
+        assert updated.upstream_container_id == "fresh456"
+
     @patch(_P_SECRET)
     def test_fails_without_ts_authkey(self, mock_secret, db_session, tmp_data_dir):
         svc = _create_service(db_session)
@@ -412,5 +448,5 @@ class TestReconcileService:
 
         assert errors == []
         assert len(results) == 2
-        assert max_active_calls == 1
+        assert max_active_calls == 2
         assert all(result["phase"] == "healthy" for result in results)

@@ -185,7 +185,7 @@ def _delete_tailscale_device(node_id: str, api_key: str) -> bool:
         )
         return False
     except Exception:
-        logger.debug("Tailscale API device deletion failed for node %s", node_id, exc_info=True)
+        logger.info("Tailscale API device deletion failed for node %s", node_id, exc_info=True)
         return False
 
 
@@ -214,16 +214,22 @@ def remove_edge(
             if api_key:
                 _delete_tailscale_device(node_id, api_key)
             else:
-                logger.debug(
+                logger.info(
                     "Tailscale API key not configured — skipping device removal for %s",
                     edge_container_name,
                 )
         else:
-            logger.debug("Could not get Tailscale node ID for %s", edge_container_name)
+            logger.info("Could not get Tailscale node ID for %s", edge_container_name)
 
-    container.remove(force=True)
-    logger.info("Removed edge container %s", edge_container_name)
-
+    try:
+        container.remove(force=True)
+        logger.info("Removed edge container %s", edge_container_name)
+    except docker.errors.NotFound:
+        logger.info("Edge container %s already removed", edge_container_name)
+        return
+    except docker.errors.APIError:
+        logger.warning("Failed to remove edge container %s", edge_container_name, exc_info=True)
+        return
 
 def recreate_edge(
     service: Service,
@@ -342,7 +348,7 @@ def reload_caddy(
 
             last_error = exc
             if attempt < max_retries - 1:
-                logger.debug(
+                logger.info(
                     "Container %s rejected Caddy reload while restarting, retrying (%d/%d)...",
                     edge_container_name, attempt + 1, max_retries,
                 )
@@ -358,7 +364,7 @@ def reload_caddy(
 
         # "connection refused" means the admin API isn't up yet — retry
         if "connection refused" in last_result and attempt < max_retries - 1:
-            logger.debug(
+            logger.info(
                 "Caddy admin API not ready in %s, retrying (%d/%d)...",
                 edge_container_name, attempt + 1, max_retries,
             )
@@ -406,7 +412,7 @@ def detect_tailscale_ip(
             container.reload()
             if container.status != "running":
                 if not _wait_for_running(container, timeout=10.0):
-                    logger.debug("Container %s left running state on attempt %d", edge_container_name, attempt + 1)
+                    logger.info("Container %s left running state on attempt %d", edge_container_name, attempt + 1)
                     if attempt < max_retries - 1:
                         time.sleep(retry_delay)
                     continue
@@ -435,7 +441,7 @@ def detect_tailscale_ip(
                         logger.info("Detected Tailscale IP %s for %s (via status)", addr, edge_container_name)
                         return addr
         except Exception:
-            logger.debug("Attempt %d failed for %s", attempt + 1, edge_container_name, exc_info=True)
+            logger.info("Attempt %d failed for %s", attempt + 1, edge_container_name, exc_info=True)
 
         if attempt < max_retries - 1:
             time.sleep(retry_delay)

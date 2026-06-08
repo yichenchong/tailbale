@@ -165,6 +165,56 @@ describe("Setup wizard", () => {
     expect(screen.getByText("Next").closest("button")).not.toBeDisabled()
   })
 
+
+  it("pressing Enter moves to the next field", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("admin")).toBeInTheDocument()
+    })
+
+    const username = screen.getByPlaceholderText("admin")
+    const password = screen.getByPlaceholderText("Password")
+    username.focus()
+    fireEvent.keyDown(username, { key: "Enter", code: "Enter" })
+
+    expect(password).toHaveFocus()
+  })
+
+  it("pressing Enter on the last field advances to the next step", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("admin")).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText("admin"), {
+      target: { value: "testuser" },
+    })
+    fireEvent.change(screen.getByPlaceholderText("Password"), {
+      target: { value: "password123" },
+    })
+    const confirm = screen.getByPlaceholderText("Confirm password")
+    fireEvent.change(confirm, {
+      target: { value: "password123" },
+    })
+    fireEvent.keyDown(confirm, { key: "Enter", code: "Enter" })
+
+    await waitFor(() => {
+      expect(screen.getByText("Step 2 of 6: Domain")).toBeInTheDocument()
+    })
+  })
+
   it("Back button is disabled on first step", async () => {
     vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
     const { default: Setup } = await import("@/pages/Setup")

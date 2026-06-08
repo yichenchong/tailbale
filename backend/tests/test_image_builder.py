@@ -115,8 +115,11 @@ class TestEnsureEdgeImage:
         mock_image.labels = {"tailbale.version": "0.0.1-old"}
         mock_client.images.get.return_value = mock_image
 
+        mock_build.return_value = "sha256:new"
+        mock_image.id = "sha256:old"
         ensure_edge_image()
         mock_build.assert_called_once()
+        mock_client.images.remove.assert_called_once_with(image="sha256:old", force=True)
 
     @patch("app.edge.image_builder.build_edge_image")
     @patch("app.edge.image_builder._get_client")
@@ -130,5 +133,8 @@ class TestEnsureEdgeImage:
         mock_image.labels = {}
         mock_client.images.get.return_value = mock_image
 
+        mock_build.return_value = "sha256:new"
+        mock_image.id = "sha256:old"
         ensure_edge_image()
         mock_build.assert_called_once()
+        mock_client.images.remove.assert_called_once_with(image="sha256:old", force=True)
