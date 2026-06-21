@@ -74,6 +74,96 @@ class TestRemoveNetwork:
         # Should not raise
         remove_network("edge_net_nonexistent")
 
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_disconnects_endpoints_then_removes_on_active_endpoints(self, mock_cls):
+        """Regression: the upstream container stays attached after the edge
+        container is removed, so the first ``network.remove()`` fails with
+        "has active endpoints". The network must be torn down by disconnecting
+        the lingering endpoint(s) and retrying, not leaked."""
+        from app.edge.network_manager import remove_network
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_network.name = "edge_net_test"
+        mock_network.attrs = {"Containers": {"upstream_cid": {"Name": "app"}}}
+        mock_network.remove.side_effect = [
+            docker.errors.APIError(
+                "error while removing network: network edge_net_test id has active endpoints"
+            ),
+            None,
+        ]
+        mock_client.networks.get.return_value = mock_network
+
+        remove_network("edge_net_test")
+
+        mock_network.disconnect.assert_called_once_with("upstream_cid", force=True)
+        assert mock_network.remove.call_count == 2
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_disconnects_all_endpoints(self, mock_cls):
+        """Every attached container is force-disconnected before the retry."""
+        from app.edge.network_manager import remove_network
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_network.name = "edge_net_test"
+        mock_network.attrs = {"Containers": {"c1": {}, "c2": {}}}
+        mock_network.remove.side_effect = [docker.errors.APIError("has active endpoints"), None]
+        mock_client.networks.get.return_value = mock_network
+
+        remove_network("edge_net_test")
+
+        disconnected = {c.args[0] for c in mock_network.disconnect.call_args_list}
+        assert disconnected == {"c1", "c2"}
+        for c in mock_network.disconnect.call_args_list:
+            assert c.kwargs == {"force": True}
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_does_not_disconnect_when_remove_succeeds(self, mock_cls):
+        """When the network has no lingering endpoints, remove succeeds directly
+        and no containers are disconnected."""
+        from app.edge.network_manager import remove_network
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_network.remove.return_value = None
+        mock_client.networks.get.return_value = mock_network
+
+        remove_network("edge_net_test")
+
+        mock_network.remove.assert_called_once()
+        mock_network.disconnect.assert_not_called()
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_retry_failure_does_not_raise_and_is_logged(self, mock_cls, caplog):
+        """If the network still cannot be removed after disconnecting endpoints
+        (e.g. a leftover endpoint Docker refuses to drop, or a transient daemon
+        error), remove_network must not raise — the sole caller suppresses
+        exceptions, so a raise would leak the network silently. The failure is
+        logged so the leak is observable."""
+        import logging
+
+        from app.edge.network_manager import remove_network
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_network.name = "edge_net_test"
+        mock_network.attrs = {"Containers": {"stuck_cid": {}}}
+        mock_network.remove.side_effect = docker.errors.APIError("has active endpoints")
+        mock_client.networks.get.return_value = mock_network
+
+        with caplog.at_level(logging.WARNING):
+            # Must not raise even though both remove attempts fail.
+            remove_network("edge_net_test")
+
+        assert mock_network.remove.call_count == 2
+        mock_network.disconnect.assert_called_once_with("stuck_cid", force=True)
+        assert any("may leak" in r.message for r in caplog.records)
+
 
 class TestConnectContainer:
     @patch("app.edge.network_manager.docker.DockerClient")

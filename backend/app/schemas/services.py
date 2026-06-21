@@ -20,6 +20,12 @@ class ServiceCreate(BaseModel):
     custom_caddy_snippet: str | None = None
     app_profile: str | None = None
 
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v):
+        # Strip before length checks so a whitespace-only name fails min_length.
+        return v.strip() if isinstance(v, str) else v
+
     @field_validator("hostname")
     @classmethod
     def validate_hostname(cls, v: str) -> str:
@@ -40,6 +46,12 @@ class ServiceUpdate(BaseModel):
     preserve_host_header: bool | None = None
     custom_caddy_snippet: str | None = None
     app_profile: str | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v):
+        # Strip before length checks so a whitespace-only name fails min_length.
+        return v.strip() if isinstance(v, str) else v
 
     @field_validator(
         "name",

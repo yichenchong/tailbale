@@ -583,6 +583,52 @@ class TestCorsOptions:
         assert resp.headers["access-control-allow-origin"] == "*"
         assert "access-control-allow-credentials" not in resp.headers
 
+
+class TestJwtSecretLoading:
+    """Regression: a persisted-but-empty/corrupt JWT secret file must never
+    yield an empty HMAC key (an empty key makes every JWT trivially forgeable,
+    a silent full auth bypass). It must heal by regenerating a fresh secret."""
+
+    def test_whitespace_only_file_is_regenerated(self, tmp_path):
+        from app.config import _load_or_create_jwt_secret
+
+        secret_file = tmp_path / "secrets" / ".jwt_secret"
+        secret_file.parent.mkdir(parents=True)
+        secret_file.write_text("   \n", encoding="utf-8")
+
+        secret = _load_or_create_jwt_secret(tmp_path)
+        assert secret, "must not return an empty/blank secret"
+        # The corrupt file is healed in place with the returned secret.
+        assert secret_file.read_text(encoding="utf-8").strip() == secret
+
+    def test_zero_byte_file_is_regenerated(self, tmp_path):
+        from app.config import _load_or_create_jwt_secret
+
+        secret_file = tmp_path / "secrets" / ".jwt_secret"
+        secret_file.parent.mkdir(parents=True)
+        secret_file.write_text("", encoding="utf-8")
+
+        secret = _load_or_create_jwt_secret(tmp_path)
+        assert secret
+        assert secret_file.read_text(encoding="utf-8").strip() == secret
+
+    def test_valid_secret_is_preserved(self, tmp_path):
+        from app.config import _load_or_create_jwt_secret
+
+        secret_file = tmp_path / "secrets" / ".jwt_secret"
+        secret_file.parent.mkdir(parents=True)
+        secret_file.write_text("an-existing-real-secret", encoding="utf-8")
+
+        assert _load_or_create_jwt_secret(tmp_path) == "an-existing-real-secret"
+
+    def test_missing_file_is_generated_and_persisted(self, tmp_path):
+        from app.config import _load_or_create_jwt_secret
+
+        secret = _load_or_create_jwt_secret(tmp_path)
+        assert secret
+        persisted = (tmp_path / "secrets" / ".jwt_secret").read_text(encoding="utf-8").strip()
+        assert persisted == secret
+
 # ---------------------------------------------------------------------------
 # Deprecation warning regression check
 # ---------------------------------------------------------------------------

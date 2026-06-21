@@ -12,7 +12,12 @@ def _load_or_create_jwt_secret(data_dir: Path) -> str:
     """Read JWT secret from data dir, or generate and persist one on first run."""
     secret_file = data_dir / "secrets" / ".jwt_secret"
     if secret_file.exists():
-        return secret_file.read_text(encoding="utf-8").strip()
+        existing = secret_file.read_text(encoding="utf-8").strip()
+        if existing:
+            return existing
+        # A persisted-but-empty/corrupt file (e.g. truncated by a botched backup
+        # restore or a 0-byte volume mount) would yield an empty HMAC key, making
+        # every JWT trivially forgeable. Fall through to regenerate instead.
     secret_file.parent.mkdir(parents=True, exist_ok=True)
     secret = secrets.token_urlsafe(64)
     fd, tmp_name = tempfile.mkstemp(
@@ -104,5 +109,5 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-if not settings.jwt_secret:
+if not settings.jwt_secret.strip():
     settings.jwt_secret = _load_or_create_jwt_secret(settings.data_dir)

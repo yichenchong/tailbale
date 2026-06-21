@@ -1,9 +1,16 @@
 """Regression tests for serialized database write helpers."""
 
 
+import threading
+
 import pytest
 
-from app.database import commit_with_lock, db_write_section, flush_with_lock
+from app.database import (
+    _DB_WRITE_MUTEX,
+    commit_with_lock,
+    db_write_section,
+    flush_with_lock,
+)
 
 
 class FakeSession:
@@ -71,3 +78,75 @@ def test_flush_with_lock_rolls_back_and_reraises_on_flush_error():
         flush_with_lock(db)
 
     assert db.calls == ["flush", "rollback"]
+
+
+def test_db_write_mutex_is_reentrant():
+    """The write mutex MUST be reentrant.
+
+    ``commit_with_lock`` / ``flush_with_lock`` are always invoked *inside* a
+    ``db_write_section`` (which already holds the mutex). If the mutex were a
+    plain ``threading.Lock`` instead of an ``RLock`` every write in the app
+    would deadlock on this re-entry.
+    """
+    assert _DB_WRITE_MUTEX.acquire(blocking=False)
+    try:
+        # Re-acquire from the same thread: only succeeds for a reentrant lock.
+        assert _DB_WRITE_MUTEX.acquire(blocking=False)
+        _DB_WRITE_MUTEX.release()
+    finally:
+        _DB_WRITE_MUTEX.release()
+
+
+def test_commit_and_flush_nest_inside_db_write_section_without_deadlock():
+    """Exercise the canonical app pattern: flush/commit nested in a section.
+
+    Runs in a short-lived worker thread guarded by a timeout so a reentrancy
+    regression surfaces as a failed assertion rather than hanging the suite.
+    """
+    db = FakeSession()
+    done = threading.Event()
+
+    def worker():
+        with db_write_section(db):
+            flush_with_lock(db)
+            commit_with_lock(db)
+        done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    assert done.wait(timeout=5), (
+        "flush/commit deadlocked inside db_write_section — write mutex not reentrant"
+    )
+    assert db.calls == ["no_autoflush_enter", "flush", "commit", "no_autoflush_exit"]
+
+
+def test_db_write_section_serializes_writers_across_threads():
+    """Two threads must not be inside a write section simultaneously."""
+    db = FakeSession()
+    holder_inside = threading.Event()
+    release_holder = threading.Event()
+    contender_acquired = threading.Event()
+
+    def holder():
+        with db_write_section(db):
+            holder_inside.set()
+            release_holder.wait(timeout=5)
+
+    def contender():
+        assert holder_inside.wait(timeout=5)
+        # The mutex is held by `holder`; a non-blocking acquire from this
+        # separate thread MUST fail, proving writes are serialized.
+        if _DB_WRITE_MUTEX.acquire(blocking=False):
+            _DB_WRITE_MUTEX.release()
+            contender_acquired.set()
+
+    th = threading.Thread(target=holder, daemon=True)
+    tc = threading.Thread(target=contender, daemon=True)
+    th.start()
+    tc.start()
+    tc.join(timeout=5)
+    release_holder.set()
+    th.join(timeout=5)
+
+    assert not contender_acquired.is_set(), (
+        "a second thread entered a db_write_section while another held it"
+    )

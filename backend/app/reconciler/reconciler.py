@@ -208,11 +208,23 @@ def _reconcile_service_locked(
 
         _update_phase(db, service_id, "rendering_config", "Generating Caddy configuration")
         new_config = render_caddyfile(service)
-        existing_path = generated_dir / service_id / "Caddyfile"
+        service_config_dir = generated_dir / service_id
+        existing_path = service_config_dir / "Caddyfile"
+        # ".reload_pending" marks that the on-disk Caddyfile changed but the
+        # running Caddy has not yet successfully reloaded it. Set when a config
+        # change is detected, cleared only after reload_caddy succeeds — so a
+        # reload failure is retried on the next reconcile even though the file on
+        # disk already matches desired (config_changed would otherwise be False,
+        # leaving Caddy serving stale config while the service reports healthy).
+        reload_pending_path = service_config_dir / ".reload_pending"
         config_changed = True
         if existing_path.exists():
             config_changed = existing_path.read_text(encoding="utf-8") != new_config
         if config_changed:
+            # Mark reload pending BEFORE writing so a crash/failure between the
+            # two can never leave a changed on-disk config with no pending-reload
+            # marker (which is exactly the desync this guards against).
+            reload_pending_path.write_text("1", encoding="utf-8")
             write_caddyfile(service, generated_dir)
 
         _update_phase(db, service_id, "ensuring_edge", "Ensuring edge container")
@@ -288,11 +300,12 @@ def _reconcile_service_locked(
                     },
                 )
 
-        if config_changed:
+        if config_changed or reload_pending_path.exists():
             _update_phase(db, service_id, "reloading_caddy", "Reloading Caddy")
             try:
                 reload_caddy(service_id, service.edge_container_name, socket_path)
                 result["caddy_reloaded"] = True
+                reload_pending_path.unlink(missing_ok=True)
                 _persist_status(
                     db,
                     service_id,

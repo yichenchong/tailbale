@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/api"
-import { useTimezone, formatDateTime, formatTime as fmtTime } from "@/lib/useTimezone"
+import { useTimezone, formatDateTime, formatTime as fmtTime, parseBackendDate } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
 import {
   Loader2,
@@ -151,7 +151,7 @@ export default function Dashboard() {
             <ul className="mt-3 space-y-2">
               {data.expiring_certs.map((c) => {
                 const days = c.expires_at
-                  ? Math.ceil((new Date(c.expires_at).getTime() - Date.now()) / 86400000)
+                  ? Math.ceil((parseBackendDate(c.expires_at).getTime() - Date.now()) / 86400000)
                   : null
                 return (
                   <li key={c.service_id} className="flex items-center justify-between text-sm">

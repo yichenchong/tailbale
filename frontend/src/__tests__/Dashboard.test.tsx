@@ -352,4 +352,34 @@ describe("Dashboard page", () => {
     expect(screen.getByText("42")).toBeInTheDocument()
     expect(screen.queryByText("7")).not.toBeInTheDocument()
   })
+
+  it("computes expiring cert days in UTC for offset-less timestamps", async () => {
+    // Backend expires_at serializes naive (no offset) but means UTC. On a
+    // +09:00 host a raw `new Date()` parse loses ~9h and drops the day count.
+    const originalTz = process.env.TZ
+    process.env.TZ = "Asia/Tokyo"
+    try {
+      const naive = new Date(Date.now() + 10.25 * 86400000).toISOString().replace("Z", "")
+      const data = {
+        ...mockSummary,
+        expiring_certs: [
+          { service_id: "svc_1", service_name: "Nextcloud", hostname: "nextcloud.example.com", expires_at: naive },
+        ],
+      }
+      vi.stubGlobal("fetch", mockFetch(data))
+      const { default: Dashboard } = await import("@/pages/Dashboard")
+      render(
+        <MemoryRouter>
+          <Dashboard />
+        </MemoryRouter>
+      )
+      await waitFor(() => {
+        expect(screen.getByText("11d left")).toBeInTheDocument()
+      })
+      expect(screen.queryByText("10d left")).not.toBeInTheDocument()
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ
+      else process.env.TZ = originalTz
+    }
+  })
 })

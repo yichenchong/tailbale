@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { api, type ServiceItem, type ServiceListResponse } from "@/lib/api"
-import { useTimezone, formatDate } from "@/lib/useTimezone"
+import { useTimezone } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
+import { formatCertExpiry } from "@/lib/certStatus"
 import { Loader2, Plus, ExternalLink, MoreVertical } from "lucide-react"
 
 const PHASE_STYLES: Record<string, string> = {
@@ -11,17 +12,6 @@ const PHASE_STYLES: Record<string, string> = {
   warning: "bg-yellow-100 text-yellow-700",
   error: "bg-red-100 text-red-700",
   failed: "bg-red-100 text-red-700",
-}
-
-function formatCertExpiry(iso: string | null | undefined, tz: string): { text: string; style: string } {
-  if (!iso) return { text: "—", style: "text-zinc-400" }
-  const expiry = new Date(iso)
-  const now = new Date()
-  const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
-  const text = formatDate(iso, tz)
-  if (daysLeft < 0) return { text, style: "text-red-600 font-medium" }
-  if (daysLeft <= 14) return { text, style: "text-yellow-600 font-medium" }
-  return { text, style: "text-zinc-500" }
 }
 
 function servicePath(svcId: string, path = ""): string {

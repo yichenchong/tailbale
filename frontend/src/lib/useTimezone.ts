@@ -48,6 +48,29 @@ export function useTimezone(): string {
   return tz
 }
 
+/**
+ * Parse a backend timestamp string into a Date.
+ *
+ * Backend `created_at`/`updated_at`/event timestamps come from SQLite
+ * `func.now()` and serialize via `datetime.isoformat()` with NO timezone
+ * designator (e.g. "2026-06-21T12:00:00") even though they represent UTC.
+ * JavaScript parses such date-time strings as *local* time, so a later
+ * `toLocaleString({ timeZone })` re-projects them into the configured zone —
+ * a double offset that shows the wrong time on non-UTC browsers. Strings that
+ * already carry a designator ("...Z" or "...+00:00") parse correctly and must
+ * be left untouched. Normalize only the naive case to UTC.
+ * @internal exported for tests
+ */
+export function parseBackendDate(value: string): Date {
+  const tIndex = value.indexOf("T")
+  if (tIndex !== -1) {
+    const timePart = value.slice(tIndex + 1)
+    const hasDesignator = /[zZ]$/.test(value) || /[+-]\d\d(?::?\d\d)?$/.test(timePart)
+    if (!hasDesignator) return new Date(`${value}Z`)
+  }
+  return new Date(value)
+}
+
 /** Format a date string or Date using the configured timezone. */
 export function formatDateTime(
   date: string | Date | null | undefined,
@@ -55,7 +78,7 @@ export function formatDateTime(
   options?: Intl.DateTimeFormatOptions,
 ): string {
   if (!date) return ""
-  const d = typeof date === "string" ? new Date(date) : date
+  const d = typeof date === "string" ? parseBackendDate(date) : date
   if (isNaN(d.getTime())) return ""
   return d.toLocaleString(undefined, { timeZone: timezone, ...options })
 }

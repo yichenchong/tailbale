@@ -502,6 +502,59 @@ class TestReconcileService:
         status = db_session.get(ServiceStatus, svc.id)
         assert status.phase == "failed"
 
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK)
+    @patch(_P_CERT)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_failed_caddy_reload_is_retried_next_reconcile(
+        self, mock_secret, mock_render, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        # write_caddyfile is intentionally NOT mocked so the real Caddyfile is
+        # written to disk. The bug: once the desired config is on disk, a naive
+        # disk-vs-render diff reports "unchanged" and never retries a reload that
+        # previously failed, leaving Caddy on stale config while reporting healthy.
+        svc = _create_service(db_session)
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "v2 config"
+        edge = MagicMock()
+        edge.id = "e1"
+        edge.status = "running"
+        mock_find_edge.return_value = edge
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {}
+        mock_aggregate.return_value = "healthy"
+
+        # First reconcile: new config is written, but the reload fails.
+        mock_reload.side_effect = RuntimeError("admin api connection refused")
+        first = reconcile_service(db_session, svc)
+        assert first["phase"] == "failed"
+        assert "Caddy reload failed" in first["error"]
+
+        caddyfile = Path(tmp_data_dir) / "generated" / svc.id / "Caddyfile"
+        assert caddyfile.read_text(encoding="utf-8") == "v2 config"
+
+        # Second reconcile: the on-disk config already equals desired, so the
+        # disk diff is "unchanged" — yet the reload MUST still be retried because
+        # the running Caddy never picked up the new config.
+        mock_reload.reset_mock()
+        mock_reload.side_effect = None
+        mock_reload.return_value = "ok"
+        second = reconcile_service(db_session, svc)
+
+        assert second["phase"] == "healthy"
+        mock_reload.assert_called_once()
+        assert second["caddy_reloaded"] is True
+
     @patch(_P_SECRET)
     def test_marks_service_failed_after_locked_status_update(self, mock_secret, db_session, tmp_data_dir):
         svc = _create_service(db_session)

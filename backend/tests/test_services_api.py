@@ -147,6 +147,23 @@ class TestCreateService:
         resp = client.post("/api/services", json={"name": "Incomplete"})
         assert resp.status_code == 422
 
+    def test_whitespace_only_name_rejected(self, client):
+        # A blank-after-strip name must fail min_length, not create a nameless service.
+        resp = _create_service(client, name="   ")
+        assert resp.status_code == 422
+
+    def test_surrounding_whitespace_in_name_trimmed(self, client):
+        resp = _create_service(client, name="  Trimmed App  ")
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "Trimmed App"
+
+    def test_max_length_enforced_after_strip(self, client):
+        # 132 raw chars stripping to exactly 128 must be accepted, proving max_length
+        # is applied AFTER the strip (a pre-strip check would reject the raw length).
+        resp = _create_service(client, name="  " + "x" * 128 + "  ")
+        assert resp.status_code == 201
+        assert resp.json()["name"] == "x" * 128
+
     def test_slug_generation(self, client):
         resp = _create_service(
             client,
@@ -1635,6 +1652,24 @@ class TestUpdateNameValidation:
     def test_update_valid_name_accepted(self, client):
         svc_id = _create_service(client).json()["id"]
         resp = client.put(f"/api/services/{svc_id}", json={"name": "x" * 128})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "x" * 128
+
+    def test_update_whitespace_only_name_rejected(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "   "})
+        assert resp.status_code == 422
+
+    def test_update_trims_surrounding_whitespace(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "  Renamed  "})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "Renamed"
+
+    def test_update_max_length_enforced_after_strip(self, client):
+        svc_id = _create_service(client).json()["id"]
+        # Raw length 132 strips to exactly 128 — accepted only if max_length is post-strip.
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "  " + "x" * 128 + "  "})
         assert resp.status_code == 200
         assert resp.json()["name"] == "x" * 128
 

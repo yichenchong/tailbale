@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type ServiceItem, type ServiceUpdateRequest } from "@/lib/api"
-import { useTimezone, formatDate, formatDateTime } from "@/lib/useTimezone"
+import { useTimezone, formatDate, formatDateTime, parseBackendDate } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
 import {
   Loader2,
@@ -385,7 +385,7 @@ export default function ServiceDetail() {
             <Row label="Cert Expiry" value={service.status?.cert_expires_at ? formatDate(service.status.cert_expires_at, tz) : "—"} />
             <Row label="Phase" value={phase} />
             <Row label="Message" value={service.status?.message || "—"} />
-            <Row label="Last Reconciled" value={service.status?.last_reconciled_at || "Never"} />
+            <Row label="Last Reconciled" value={service.status?.last_reconciled_at ? formatDateTime(service.status.last_reconciled_at, tz) : "Never"} />
             {edgeVersion && (
               <>
                 <Row label="Edge Version" value={edgeVersion.edge_version || "unknown"} />
@@ -609,7 +609,7 @@ function ProbeRetryBanner({
     return () => clearInterval(id)
   }, [])
 
-  const retryDate = new Date(retryAt)
+  const retryDate = parseBackendDate(retryAt)
   const diffMs = retryDate.getTime() - Date.now()
 
   let timeLabel: string

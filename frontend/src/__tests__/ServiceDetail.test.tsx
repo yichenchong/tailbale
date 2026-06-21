@@ -354,4 +354,58 @@ describe("ServiceDetail page", () => {
       expect(screen.getByText("Back to Services")).toBeInTheDocument()
     })
   })
+
+  it("shows a live countdown for an offset-less probe retry timestamp", async () => {
+    // probe_retry_at serializes naive (no offset) but means UTC. On a +09:00
+    // host a raw `new Date()` parse would shift it ~9h into the past and the
+    // banner would read "any moment now" instead of the real countdown.
+    const originalTz = process.env.TZ
+    process.env.TZ = "Asia/Tokyo"
+    try {
+      const retryNaive = new Date(Date.now() + 30_000).toISOString().replace("Z", "")
+      const svc = {
+        ...mockService,
+        status: {
+          ...mockService.status,
+          health_checks: { ...mockService.status.health_checks, https_probe_ok: false },
+          probe_retry_at: retryNaive,
+          probe_retry_attempt: 2,
+        },
+      }
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(svc),
+      }))
+      await renderWithRoute("/services/svc_abc123")
+      const banner = await screen.findByText(/HTTPS probe retry/)
+      expect(banner.textContent).toMatch(/in \d+s/)
+      expect(banner.textContent).not.toMatch(/any moment now/)
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ
+      else process.env.TZ = originalTz
+    }
+  })
+
+  it("localizes a non-null Last Reconciled timestamp instead of showing the raw ISO string", async () => {
+    // last_reconciled_at serializes naive (no offset) but means UTC. The
+    // Runtime row used to render it verbatim, leaking a raw "2026-06-21T12:00:00"
+    // string that ignored the configured timezone unlike every sibling row.
+    const { formatDateTime, _resetTimezoneCache } = await import("@/lib/useTimezone")
+    _resetTimezoneCache()
+    const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone
+    const naive = "2026-06-21T12:00:00"
+    const svc = {
+      ...mockService,
+      status: { ...mockService.status, last_reconciled_at: naive },
+    }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(svc),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    const expected = formatDateTime(naive, browserTz)
+    expect(await screen.findByText(expected)).toBeInTheDocument()
+    // The raw, un-localized ISO string must never reach the user.
+    expect(screen.queryByText(naive)).not.toBeInTheDocument()
+  })
 })

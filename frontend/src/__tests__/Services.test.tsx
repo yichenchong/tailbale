@@ -227,4 +227,23 @@ describe("Services page", () => {
       expect(screen.getByText("Discover Containers")).toBeInTheDocument()
     })
   })
+
+  it("buckets cert expiry days using UTC for offset-less timestamps", async () => {
+    // Backend cert_expires_at serializes naive (no offset) but means UTC.
+    // Forcing a +09:00 host makes a raw `new Date()` parse drop the count by a
+    // day and cross the 14-day warning threshold; parseBackendDate must not.
+    const originalTz = process.env.TZ
+    process.env.TZ = "Asia/Tokyo"
+    try {
+      const { formatCertExpiry } = await import("@/lib/certStatus")
+      const naive = new Date(Date.now() + 14.25 * 86400000)
+        .toISOString()
+        .replace("Z", "")
+      // 14.25 days out -> ceil = 15 -> outside the <=14 warning bucket.
+      expect(formatCertExpiry(naive, "UTC").style).toBe("text-zinc-500")
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ
+      else process.env.TZ = originalTz
+    }
+  })
 })

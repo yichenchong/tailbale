@@ -42,16 +42,74 @@ def create_network(network_name: str, socket_path: str | None = None) -> str:
         _close_client(client)
 
 
+def _disconnect_all_endpoints(network: docker.models.networks.Network) -> None:
+    """Force-disconnect every container still attached to a network.
+
+    The per-service network keeps the upstream container attached (connected
+    via ``ensure_network``). After the edge container is removed the upstream
+    endpoint lingers, so Docker refuses ``network.remove()`` with
+    "has active endpoints". Disconnect them so the network can be torn down.
+    """
+    try:
+        network.reload()
+    except docker.errors.APIError:
+        logger.debug("Failed to reload network %s before disconnect", network.name, exc_info=True)
+    endpoints = network.attrs.get("Containers") or {}
+    for container_id in list(endpoints):
+        try:
+            network.disconnect(container_id, force=True)
+            logger.info("Disconnected container %s from network %s", container_id, network.name)
+        except docker.errors.NotFound:
+            continue
+        except docker.errors.APIError:
+            logger.warning(
+                "Failed to disconnect container %s from network %s",
+                container_id, network.name, exc_info=True,
+            )
+
+
 def remove_network(network_name: str, socket_path: str | None = None) -> None:
-    """Remove a network if it exists."""
+    """Remove a network if it exists.
+
+    Any still-attached endpoints (notably the upstream container connected via
+    ``ensure_network``) are disconnected first so Docker does not refuse the
+    removal with "has active endpoints" and leak the per-service network.
+    """
     client = _get_client(socket_path)
     try:
         try:
             network = client.networks.get(network_name)
-            network.remove()
-            logger.info("Removed network %s", network_name)
         except docker.errors.NotFound:
             logger.info("Network %s not found, nothing to remove", network_name)
+            return
+
+        try:
+            network.remove()
+            logger.info("Removed network %s", network_name)
+            return
+        except docker.errors.NotFound:
+            return
+        except docker.errors.APIError:
+            # Most likely "has active endpoints" — disconnect attached
+            # containers and retry once.
+            logger.info(
+                "Network %s could not be removed directly, disconnecting endpoints first",
+                network_name,
+            )
+
+        _disconnect_all_endpoints(network)
+        try:
+            network.remove()
+            logger.info("Removed network %s after disconnecting endpoints", network_name)
+        except docker.errors.NotFound:
+            logger.info("Network %s already removed", network_name)
+        except docker.errors.APIError:
+            logger.warning(
+                "Network %s could not be removed even after disconnecting endpoints; "
+                "it may leak. Manual cleanup may be required.",
+                network_name,
+                exc_info=True,
+            )
     finally:
         _close_client(client)
 
