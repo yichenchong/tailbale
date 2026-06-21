@@ -53,23 +53,30 @@ export default function Dashboard() {
   const [error, setError] = useState("")
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const requestIdRef = useRef(0)
 
   const load = useCallback(async (showSpinner = false) => {
+    const requestId = ++requestIdRef.current
     if (showSpinner) setLoading(true)
     try {
       const result = await api.get<DashboardSummary>("/dashboard/summary")
+      if (requestId !== requestIdRef.current) return
       setData(result)
       setError("")
       setLastRefresh(new Date())
     } catch (e) {
+      if (requestId !== requestIdRef.current) return
       setError(e instanceof Error ? e.message : "Failed to load")
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
   }, [])
 
   useEffect(() => {
     load(true)
+    return () => {
+      requestIdRef.current += 1
+    }
   }, [load])
 
   // Auto-refresh every 30s

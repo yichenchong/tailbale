@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react"
+import { Fragment, useCallback, useEffect, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
@@ -41,9 +41,11 @@ export default function Events() {
   const [kindFilter, setKindFilter] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
+  const requestIdRef = useRef(0)
   const limit = 50
 
-  async function load() {
+  const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current
     setLoading(true)
     setError("")
     try {
@@ -55,21 +57,28 @@ export default function Events() {
       params.set("offset", String(offset))
       const qs = params.toString()
       const data = await api.get<EventsResponse>(`/events${qs ? `?${qs}` : ""}`)
+      if (requestId !== requestIdRef.current) return
       setEvents(data.events)
       setTotal(data.total)
     } catch (e: unknown) {
+      if (requestId !== requestIdRef.current) return
       setError(e instanceof Error ? e.message : "Failed to load events")
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
-  }
+  }, [search, levelFilter, kindFilter, offset])
 
-  useEffect(() => { load() }, [search, levelFilter, kindFilter, offset])
+  useEffect(() => { void load() }, [load])
 
   const tz = useTimezone()
   function fmtTime(iso: string | null) {
     if (!iso) return "—"
     return formatDateTime(iso, tz)
+  }
+
+  const toggleEventDetails = (evt: EventItem) => {
+    if (!evt.details) return
+    setExpandedId((current) => current === evt.id ? null : evt.id)
   }
 
   return (
@@ -154,12 +163,24 @@ export default function Events() {
                   return (
                     <Fragment key={evt.id}>
                       <tr
-                        className="border-t hover:bg-zinc-50 cursor-pointer"
-                        onClick={() => setExpandedId(expanded ? null : evt.id)}
+                        className={cn("border-t hover:bg-zinc-50", evt.details && "cursor-pointer")}
+                        onClick={() => toggleEventDetails(evt)}
                       >
                         <td className="px-3 py-2">
                           {evt.details ? (
-                            expanded ? <ChevronDown className="h-4 w-4 text-zinc-400" /> : <ChevronRight className="h-4 w-4 text-zinc-400" />
+                            <button
+                              type="button"
+                              aria-label={`${expanded ? "Collapse" : "Expand"} details for ${evt.message}`}
+                              aria-expanded={expanded}
+                              aria-controls={`event-details-${evt.id}`}
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                toggleEventDetails(evt)
+                              }}
+                              className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                            >
+                              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                            </button>
                           ) : null}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap text-zinc-500 font-mono text-xs">
@@ -175,7 +196,7 @@ export default function Events() {
                         <td className="px-3 py-2">{evt.message}</td>
                       </tr>
                       {expanded && evt.details && (
-                        <tr className="border-t bg-zinc-50">
+                        <tr id={`event-details-${evt.id}`} className="border-t bg-zinc-50">
                           <td colSpan={5} className="px-6 py-3">
                             <pre className="text-xs text-zinc-700 whitespace-pre-wrap font-mono">
                               {JSON.stringify(evt.details, null, 2)}

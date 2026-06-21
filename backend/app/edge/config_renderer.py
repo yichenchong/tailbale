@@ -35,10 +35,7 @@ def render_caddyfile(service: Service) -> str:
     # scheme prefix when the upstream actually speaks HTTPS.  Omitting the
     # scheme for HTTP avoids Caddy's scheme/port conflict check (it rejects
     # ``http://<host>:443`` because 443 is the conventional HTTPS port).
-    if service.upstream_scheme == "https":
-        upstream_addr = f"https://{upstream}"
-    else:
-        upstream_addr = upstream  # plain address — Caddy uses HTTP by default
+    upstream_addr = f"https://{upstream}" if service.upstream_scheme == "https" else upstream
 
     # Caddy expects tab indentation (caddy fmt standard).
     lines = [

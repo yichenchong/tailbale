@@ -13,7 +13,7 @@ def _make_service(**overrides):
     svc.upstream_port = overrides.get("upstream_port", 80)
     svc.upstream_scheme = overrides.get("upstream_scheme", "http")
     svc.preserve_host_header = overrides.get("preserve_host_header", True)
-    svc.custom_caddy_snippet = overrides.get("custom_caddy_snippet", None)
+    svc.custom_caddy_snippet = overrides.get("custom_caddy_snippet")
     return svc
 
 

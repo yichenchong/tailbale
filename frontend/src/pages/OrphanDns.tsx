@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-react"
@@ -37,24 +37,31 @@ export default function OrphanDns() {
   const [error, setError] = useState("")
   const [actionLoading, setActionLoading] = useState<Record<string, string>>({})
   const [successMessage, setSuccessMessage] = useState("")
+  const requestIdRef = useRef(0)
 
-  async function load() {
+  const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current
     setLoading(true)
     setError("")
     try {
       const data = await api.get<JobsResponse>("/jobs?kind=dns_orphan_cleanup")
+      if (requestId !== requestIdRef.current) return
       setJobs(data.jobs)
       setTotal(data.total)
     } catch (e: unknown) {
+      if (requestId !== requestIdRef.current) return
       setError(e instanceof Error ? e.message : "Failed to load orphan records")
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
-  }
+  }, [])
 
   useEffect(() => {
     load()
-  }, [])
+    return () => {
+      requestIdRef.current += 1
+    }
+  }, [load])
 
   async function handleRetry(job: OrphanJob) {
     setActionLoading((prev) => ({ ...prev, [job.id]: "retry" }))

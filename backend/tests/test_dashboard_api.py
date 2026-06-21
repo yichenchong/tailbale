@@ -1,6 +1,6 @@
 """Tests for the Dashboard summary API endpoint."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from app.models.certificate import Certificate
 from app.models.event import Event
@@ -53,7 +53,7 @@ class TestDashboardSummary:
         cert = Certificate(
             service_id=svc.id,
             hostname=svc.hostname,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=10),
+            expires_at=datetime.now(UTC) + timedelta(days=10),
         )
         db_session.add(cert)
         db_session.commit()
@@ -68,7 +68,7 @@ class TestDashboardSummary:
         cert = Certificate(
             service_id=svc.id,
             hostname=svc.hostname,
-            expires_at=datetime.now(timezone.utc) + timedelta(days=60),
+            expires_at=datetime.now(UTC) + timedelta(days=60),
         )
         db_session.add(cert)
         db_session.commit()

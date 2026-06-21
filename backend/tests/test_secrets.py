@@ -1,4 +1,8 @@
 """Tests for file-based secret storage."""
+import os
+import stat
+
+import pytest
 
 from app.secrets import (
     CLOUDFLARE_TOKEN,
@@ -60,3 +64,28 @@ class TestSecretStorage:
         from app.config import settings
         tmp_files = list(settings.secrets_dir.glob("*.tmp"))
         assert len(tmp_files) == 0
+
+    def test_write_uses_owner_only_permissions_even_with_permissive_umask(self, tmp_data_dir):
+        old_umask = os.umask(0)
+        try:
+            write_secret("test_key", "value")
+        finally:
+            os.umask(old_umask)
+
+        from app.config import settings
+
+        secret_path = settings.secrets_dir / "test_key"
+        assert stat.S_IMODE(secret_path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+
+    def test_rejects_secret_names_that_escape_secrets_dir(self, tmp_data_dir):
+        for bad_name in ("../escape", "..", "/tmp/escape", "nested/secret", r"nested\secret"):
+            with pytest.raises(ValueError):
+                write_secret(bad_name, "value")
+            with pytest.raises(ValueError):
+                read_secret(bad_name)
+            with pytest.raises(ValueError):
+                secret_exists(bad_name)
+            with pytest.raises(ValueError):
+                delete_secret(bad_name)
+
+        assert not (tmp_data_dir / "escape").exists()

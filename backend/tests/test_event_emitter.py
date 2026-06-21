@@ -49,6 +49,13 @@ class TestEmitEvent:
         assert parsed["hostname"] == "test.example.com"
         assert parsed["ip"] == "100.64.0.1"
 
+    def test_empty_details_are_preserved(self, db_session):
+        emit_event(db_session, None, "empty_details", "Empty details", details={})
+        db_session.flush()
+
+        evt = db_session.query(Event).first()
+        assert json.loads(evt.details) == {}
+
     def test_custom_level(self, db_session):
         emit_event(db_session, None, "test_error", "Bad thing", level="error")
         db_session.flush()

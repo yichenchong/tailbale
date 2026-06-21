@@ -5,7 +5,7 @@ import { useStaticFavicon } from "@/lib/useFavicon"
 import { Loader2, LogIn } from "lucide-react"
 
 export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
-  useStaticFavicon("/favicon.svg")
+  useStaticFavicon("/favicon-healthy.svg")
   const navigate = useNavigate()
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")

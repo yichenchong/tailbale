@@ -47,6 +47,19 @@ describe("Setup wizard", () => {
     expect(screen.getByText("Loading setup progress...")).toBeInTheDocument()
   })
 
+  it("shows setup progress load errors instead of silently assuming a fresh install", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("network down")))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("network down")).toBeInTheDocument()
+    })
+  })
+
   it("renders first step with account fields on fresh install", async () => {
     vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
     const { default: Setup } = await import("@/pages/Setup")
@@ -230,6 +243,41 @@ describe("Setup wizard", () => {
     expect(backBtn).toBeDisabled()
   })
 
+  it("disables Back while the current step is saving", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/auth/setup-progress")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ ...FRESH_PROGRESS, user_exists: true }),
+        })
+      }
+      if (opts?.method === "PUT" && String(url).includes("/settings/general")) {
+        return new Promise(() => {})
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve({ success: true, message: "OK" }),
+      })
+    }))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Step 2 of 6: Domain")).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText("mydomain.com"), { target: { value: "example.com" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+
+    await waitFor(() => {
+      expect(screen.getByText("Saving...")).toBeInTheDocument()
+    })
+    expect(screen.getByText("Back").closest("button")).toBeDisabled()
+  })
+
   it("advances to Domain step after account creation", async () => {
     vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
     const { default: Setup } = await import("@/pages/Setup")
@@ -297,6 +345,62 @@ describe("Setup wizard", () => {
     expect(screen.getByText("Cloudflare Zone ID")).toBeInTheDocument()
   })
 
+  it("requires Cloudflare zone ID and API token before continuing", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText("admin")).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByPlaceholderText("admin"), { target: { value: "testuser" } })
+    fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "password123" } })
+    fireEvent.change(screen.getByPlaceholderText("Confirm password"), { target: { value: "password123" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => { expect(screen.getByText("Step 2 of 6: Domain")).toBeInTheDocument() })
+    fireEvent.change(screen.getByPlaceholderText("mydomain.com"), { target: { value: "example.com" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => { expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument() })
+
+    const nextBtn = screen.getByText("Next").closest("button")!
+    expect(nextBtn).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    expect(nextBtn).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText("API token..."), { target: { value: "cf-token" } })
+    expect(nextBtn).not.toBeDisabled()
+  })
+
+  it("allows Cloudflare zone ID when token already exists", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress({
+      ...FRESH_PROGRESS,
+      user_exists: true,
+      base_domain_set: true,
+      cloudflare_token_set: true,
+    }))
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
+    })
+
+    const nextBtn = screen.getByText("Next").closest("button")!
+    expect(nextBtn).toBeDisabled()
+
+    fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    expect(nextBtn).not.toBeDisabled()
+  })
+
   it("requires both Tailscale auth and API keys", async () => {
     vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
     const { default: Setup } = await import("@/pages/Setup")
@@ -318,6 +422,7 @@ describe("Setup wizard", () => {
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument() })
     fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    fireEvent.change(screen.getByPlaceholderText("API token..."), { target: { value: "cf-token" } })
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 4 of 6: ACME Email")).toBeInTheDocument() })
     fireEvent.change(screen.getByPlaceholderText("you@example.com"), { target: { value: "a@b.com" } })
@@ -398,6 +503,7 @@ describe("Setup wizard", () => {
     await waitFor(() => { expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument() })
     // Step 3
     fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    fireEvent.change(screen.getByPlaceholderText("API token..."), { target: { value: "cf-token" } })
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 4 of 6: ACME Email")).toBeInTheDocument() })
     // Step 4
@@ -435,6 +541,7 @@ describe("Setup wizard", () => {
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument() })
     fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    fireEvent.change(screen.getByPlaceholderText("API token..."), { target: { value: "cf-token" } })
     fireEvent.click(screen.getByText("Next").closest("button")!)
     await waitFor(() => { expect(screen.getByText("Step 4 of 6: ACME Email")).toBeInTheDocument() })
     fireEvent.change(screen.getByPlaceholderText("you@example.com"), { target: { value: "a@b.com" } })
@@ -571,6 +678,35 @@ describe("Setup wizard resume", () => {
     // Next should be enabled even though domain input is empty
     // (because the step is already completed)
     expect(screen.getByText("Next").closest("button")).not.toBeDisabled()
+  })
+
+  it("does not overwrite completed blank steps when clicking Next", async () => {
+    const fetchMock = mockFetchWithProgress({
+      ...FRESH_PROGRESS,
+      user_exists: true,
+      base_domain_set: true,
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Setup } = await import("@/pages/Setup")
+    render(
+      <MemoryRouter>
+        <Setup />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Back").closest("button")!)
+    expect(screen.getByText("Step 2 of 6: Domain")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+    await waitFor(() => {
+      expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
+    })
+
+    const calls = fetchMock.mock.calls.map((c: unknown[]) => c[0] as string)
+    expect(calls.some((url: string) => url.includes("/settings/general"))).toBe(false)
   })
 
   it("skips account creation API call when user already exists", async () => {

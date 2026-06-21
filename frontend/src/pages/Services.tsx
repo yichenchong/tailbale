@@ -24,6 +24,10 @@ function formatCertExpiry(iso: string | null | undefined, tz: string): { text: s
   return { text, style: "text-zinc-500" }
 }
 
+function servicePath(svcId: string, path = ""): string {
+  return `/services/${encodeURIComponent(svcId)}${path}`
+}
+
 export default function Services() {
   const navigate = useNavigate()
   const tz = useTimezone()
@@ -32,26 +36,34 @@ export default function Services() {
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
-  const load = () => {
+  const load = async () => {
     setLoading(true)
-    api.get<ServiceListResponse>("/services")
-      .then((data) => setServices(data.services))
-      .finally(() => setLoading(false))
+    setError(null)
+    try {
+      const data = await api.get<ServiceListResponse>("/services")
+      setServices(data.services)
+    } catch (e) {
+      setServices([])
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setLoading(false)
+    }
   }
 
-  useEffect(() => { load() }, [])
+  useEffect(() => { void load() }, [])
 
   const doAction = async (svcId: string, path: string, method: "post" | "put" = "post", body?: unknown) => {
     setOpenMenuId(null)
     setMenuPos(null)
     try {
       if (method === "put") {
-        await api.put(`/services/${svcId}${path}`, body)
+        await api.put(servicePath(svcId, path), body)
       } else {
-        await api.post(`/services/${svcId}${path}`)
+        await api.post(servicePath(svcId, path))
       }
-      load()
+      void load()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setActionMsg(msg)
@@ -64,8 +76,8 @@ export default function Services() {
     setMenuPos(null)
     if (!window.confirm(`Delete service "${svc.name}"? This cannot be undone.`)) return
     try {
-      await api.delete(`/services/${svc.id}`)
-      load()
+      await api.delete(servicePath(svc.id))
+      void load()
     } catch (e) {
       setActionMsg(e instanceof Error ? e.message : String(e))
       setTimeout(() => setActionMsg(null), 3000)
@@ -100,7 +112,11 @@ export default function Services() {
         <div className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{actionMsg}</div>
       )}
 
-      {services.length === 0 ? (
+      {error ? (
+        <div className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+          Unable to load services: {error}
+        </div>
+      ) : services.length === 0 ? (
         <div className="mt-8 rounded-md bg-zinc-50 px-4 py-12 text-center">
           <p className="text-sm text-zinc-500">No services exposed yet.</p>
           <button
@@ -187,15 +203,19 @@ export default function Services() {
                               <Link to={`/services/${svc.id}`} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                 View Details
                               </Link>
-                              <button onClick={() => doAction(svc.id, "/reload")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                Reload Caddy
-                              </button>
-                              <button onClick={() => doAction(svc.id, "/restart-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                Restart Edge
-                              </button>
-                              <button onClick={() => doAction(svc.id, "/recreate-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                Recreate Edge
-                              </button>
+                              {svc.enabled && (
+                                <>
+                                  <button onClick={() => doAction(svc.id, "/reload")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                    Reload Caddy
+                                  </button>
+                                  <button onClick={() => doAction(svc.id, "/restart-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                    Restart Edge
+                                  </button>
+                                  <button onClick={() => doAction(svc.id, "/recreate-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                    Recreate Edge
+                                  </button>
+                                </>
+                              )}
                               {svc.enabled ? (
                                 <button onClick={() => doAction(svc.id, "/disable")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                   Disable

@@ -10,13 +10,13 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from sqlalchemy.orm import Session
 
-from app.database import commit_with_lock, db_write_lock
+from app.database import commit_with_lock, db_write_section, rollback_with_lock
 from app.events.event_emitter import emit_event
 from app.models.service_status import ServiceStatus
 
@@ -53,7 +53,7 @@ def _persist_status(
     last_reconciled_at: datetime | None | object = _UNSET,
     event: dict | None = None,
 ) -> None:
-    with _RECONCILE_MUTEX, db_write_lock():
+    with _RECONCILE_MUTEX, db_write_section(db):
         status = _load_or_create_status(db, service_id)
         if phase is not _UNSET:
             status.phase = phase
@@ -78,7 +78,7 @@ def _persist_status(
                 level=event.get("level", "info"),
                 details=event.get("details"),
             )
-        db.commit()
+        commit_with_lock(db)
 
 
 def _update_phase(db: Session, service_id: str, phase: str, message: str | None = None) -> None:
@@ -96,6 +96,27 @@ def reconcile_service(
     Returns a summary dict with keys:
       phase, tailscale_ip, health_checks, caddy_reloaded, error
     """
+
+    result = {
+        "phase": "pending",
+        "tailscale_ip": None,
+        "health_checks": {},
+        "caddy_reloaded": False,
+        "error": None,
+    }
+
+    with _RECONCILE_MUTEX:
+        return _reconcile_service_locked(db, service, socket_path=socket_path, result=result)
+
+
+def _reconcile_service_locked(
+    db: Session,
+    service: Service,
+    *,
+    socket_path: str | None,
+    result: dict,
+) -> dict:
+    """Run reconciliation while holding the process-local reconcile mutex."""
     from app.adapters.dns_reconciler import reconcile_dns
     from app.certs.cert_manager import get_cert_expiry
     from app.certs.renewal_task import process_service_cert
@@ -108,19 +129,29 @@ def reconcile_service(
         start_edge,
     )
     from app.edge.network_manager import ensure_network
-    from app.health.health_checker import aggregate_status, run_health_checks
+    from app.health.health_checker import CRITICAL_CHECKS, aggregate_status, run_health_checks
+    from app.models.service import Service
     from app.secrets import CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, read_secret
-    from app.settings_store import get_setting
+    from app.settings_store import get_positive_int_setting, get_setting
 
     service_id = service.id
+
+    # Honor disable: never converge a service the operator turned off. Re-read
+    # inside the reconcile mutex so a disable that committed while we waited is
+    # respected — this covers both the manual /reconcile trigger (no enabled
+    # filter) and a periodic sweep that snapshotted this service before the
+    # disable landed. Without this, reconcile silently restarts the edge and
+    # recreates the public DNS record for a service taken offline.
+    fresh = db.get(Service, service_id, populate_existing=True)
+    if fresh is None:
+        result["phase"] = "deleted"
+        return result
+    if not fresh.enabled:
+        _update_phase(db, service_id, "disabled", "Service is disabled")
+        result["phase"] = "disabled"
+        return result
+    service = fresh
     service_name = service.name
-    result = {
-        "phase": "pending",
-        "tailscale_ip": None,
-        "health_checks": {},
-        "caddy_reloaded": False,
-        "error": None,
-    }
 
     try:
         _update_phase(db, service_id, "validating", "Checking settings and secrets")
@@ -155,8 +186,9 @@ def reconcile_service(
             else service.upstream_container_id
         )
         if resolved_upstream_id != service.upstream_container_id:
-            service.upstream_container_id = resolved_upstream_id
-            commit_with_lock(db)
+            with db_write_section(db):
+                service.upstream_container_id = resolved_upstream_id
+                commit_with_lock(db)
         logger.info("Network %s ready for service %s", service.network_name, service_id)
 
         _update_phase(db, service_id, "ensuring_cert", "Checking certificate")
@@ -165,10 +197,13 @@ def reconcile_service(
             process_service_cert(db, service)
         else:
             expiry = get_cert_expiry(cert_path)
-            cert_renewal_days = int(get_setting(db, "cert_renewal_window_days") or "30")
-            if expiry is not None:
+            cert_renewal_days = get_positive_int_setting(db, "cert_renewal_window_days")
+            if expiry is None:
+                process_service_cert(db, service)
+            else:
                 from datetime import timedelta
-                if expiry < datetime.now(timezone.utc) + timedelta(days=cert_renewal_days):
+                expiry_utc = expiry if expiry.tzinfo else expiry.replace(tzinfo=UTC)
+                if expiry_utc <= datetime.now(UTC) + timedelta(days=cert_renewal_days):
                     process_service_cert(db, service)
 
         _update_phase(db, service_id, "rendering_config", "Generating Caddy configuration")
@@ -266,15 +301,16 @@ def reconcile_service(
                         "message": f"Caddy reloaded for '{service_name}'",
                     },
                 )
-            except RuntimeError:
+            except RuntimeError as e:
                 logger.warning("Caddy reload failed for %s", service_id, exc_info=True)
+                raise ReconcileError(f"Caddy reload failed: {e}") from e
 
         _update_phase(db, service_id, "checking_health", "Running health checks")
         checks = run_health_checks(db, service, generated_dir, certs_dir, socket_path)
         result["health_checks"] = checks
 
         phase = aggregate_status(checks)
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         result["phase"] = phase
         level = "info" if phase == "healthy" else "warning" if phase == "warning" else "error"
         _persist_status(
@@ -294,22 +330,14 @@ def reconcile_service(
         )
 
         if not checks.get("https_probe_ok") and phase in ("warning", "error"):
-            critical_ok = all(
-                checks.get(check, False)
-                for check in (
-                    "edge_container_present",
-                    "edge_container_running",
-                    "tailscale_ip_present",
-                    "cert_present",
-                )
-            )
+            critical_ok = all(checks.get(check, False) for check in CRITICAL_CHECKS)
             if critical_ok:
                 from app.reconciler.probe_retry import schedule_probe_retry
 
                 schedule_probe_retry(service_id, socket_path)
 
     except ReconcileError as e:
-        db.rollback()
+        rollback_with_lock(db)
         logger.error("Reconcile failed for %s: %s", service_id, e)
         result["phase"] = "failed"
         result["error"] = str(e)
@@ -318,7 +346,7 @@ def reconcile_service(
             service_id,
             phase="failed",
             message=str(e),
-            last_reconciled_at=datetime.now(timezone.utc),
+            last_reconciled_at=datetime.now(UTC),
             event={
                 "kind": "reconcile_failed",
                 "message": f"Reconciliation failed for '{service_name}': {e}",
@@ -327,7 +355,7 @@ def reconcile_service(
         )
 
     except Exception as e:
-        db.rollback()
+        rollback_with_lock(db)
         logger.error("Unexpected error reconciling %s: %s", service_id, e, exc_info=True)
         result["phase"] = "failed"
         result["error"] = str(e)
@@ -336,7 +364,7 @@ def reconcile_service(
             service_id,
             phase="failed",
             message=f"Unexpected error: {e}",
-            last_reconciled_at=datetime.now(timezone.utc),
+            last_reconciled_at=datetime.now(UTC),
             event={
                 "kind": "reconcile_failed",
                 "message": f"Reconciliation failed for '{service_name}': {e}",

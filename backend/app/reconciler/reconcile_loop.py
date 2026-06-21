@@ -13,6 +13,7 @@ import logging
 
 from sqlalchemy.orm import Session
 
+from app.database import rollback_with_lock
 from app.models.service import Service
 from app.reconciler.reconciler import reconcile_service
 
@@ -29,7 +30,7 @@ def reconcile_all(db: Session, *, socket_path: str | None = None) -> int:
             reconcile_service(db, svc, socket_path=socket_path)
             count += 1
         except Exception:
-            db.rollback()
+            rollback_with_lock(db)
             logger.error("Failed to reconcile service %s", service_id, exc_info=True)
             count += 1  # still counts as processed
     return count
@@ -55,12 +56,12 @@ async def reconcile_loop() -> None:
     while True:
         try:
             from app.database import SessionLocal
-            from app.settings_store import get_setting
+            from app.settings_store import get_positive_int_setting, get_setting
 
             def _run_sweep() -> tuple[int, int]:
                 db = SessionLocal()
                 try:
-                    iv = int(get_setting(db, "reconcile_interval_seconds") or "60")
+                    iv = get_positive_int_setting(db, "reconcile_interval_seconds")
                     docker_socket = get_setting(db, "docker_socket_path") or None
                     cnt = reconcile_all(db, socket_path=docker_socket)
                     return cnt, iv

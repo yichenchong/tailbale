@@ -1,7 +1,13 @@
 """Tests for the settings key-value store."""
 
 from app.models.setting import Setting
-from app.settings_store import DEFAULTS, get_all_settings, get_setting, set_setting
+from app.settings_store import (
+    DEFAULTS,
+    get_all_settings,
+    get_positive_int_setting,
+    get_setting,
+    set_setting,
+)
 
 
 class TestSettingsStore:
@@ -38,6 +44,17 @@ class TestSettingsStore:
         assert result["setup_complete"] == "true"
         # Non-overridden keys still have defaults
         assert result["acme_email"] == DEFAULTS["acme_email"]
+
+    def test_get_positive_int_setting_uses_stored_positive_value(self, db_session):
+        set_setting(db_session, "reconcile_interval_seconds", "120")
+        assert get_positive_int_setting(db_session, "reconcile_interval_seconds") == 120
+
+    def test_get_positive_int_setting_falls_back_for_stale_invalid_values(self, db_session):
+        set_setting(db_session, "reconcile_interval_seconds", "not-an-int")
+        set_setting(db_session, "cert_renewal_window_days", "0")
+
+        assert get_positive_int_setting(db_session, "reconcile_interval_seconds") == 60
+        assert get_positive_int_setting(db_session, "cert_renewal_window_days") == 30
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +102,7 @@ class TestRuntimePaths:
 
     def test_host_paths_translated_when_host_data_dir_set(self, db_session):
         """With HOST_DATA_DIR, host paths replace data_dir prefix."""
-        from pathlib import Path, PurePosixPath
+        from pathlib import Path
 
         from app.config import settings as app_settings
         from app.settings_store import get_runtime_paths
@@ -108,6 +125,30 @@ class TestRuntimePaths:
             assert paths["host_generated_dir"].endswith("generated")
             assert paths["host_certs_dir"].endswith("certs")
             assert paths["host_tailscale_state_dir"].endswith("tailscale")
+        finally:
+            app_settings.data_dir = original_data
+            app_settings.host_data_dir = original_host
+
+    def test_host_paths_do_not_rewrite_paths_outside_data_dir(self, db_session):
+        """Custom roots outside DATA_DIR are not remapped with string replacement."""
+        from pathlib import Path
+
+        from app.config import settings as app_settings
+        from app.settings_store import get_runtime_paths, set_setting
+
+        original_host = app_settings.host_data_dir
+        original_data = app_settings.data_dir
+        app_settings.data_dir = Path("/data")
+        app_settings.host_data_dir = Path("/host/data")
+        set_setting(db_session, "generated_root", "/srv/data/generated")
+        set_setting(db_session, "cert_root", "/data-extra/certs")
+        set_setting(db_session, "tailscale_state_root", "/data/tailscale")
+        db_session.flush()
+        try:
+            paths = get_runtime_paths(db_session)
+            assert paths["host_generated_dir"] == "/srv/data/generated"
+            assert paths["host_certs_dir"] == "/data-extra/certs"
+            assert paths["host_tailscale_state_dir"] == "/host/data/tailscale"
         finally:
             app_settings.data_dir = original_data
             app_settings.host_data_dir = original_host

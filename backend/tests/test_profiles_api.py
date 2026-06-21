@@ -22,6 +22,12 @@ class TestDetectProfile:
     def test_detect_vaultwarden(self):
         assert detect_profile("vaultwarden/server:latest") == "vaultwarden"
 
+    def test_detection_ignores_registry_host(self):
+        assert detect_profile("registry.nextcloud.example.com/team/nginx:latest") is None
+
+    def test_detection_handles_digest_reference(self):
+        assert detect_profile("ghcr.io/immich-app/immich-server@sha256:abc123") == "immich"
+
     def test_no_match(self):
         assert detect_profile("nginx:latest") is None
 
@@ -37,6 +43,7 @@ class TestProfilesAPI:
         assert "nextcloud" in profiles
         assert "generic" in profiles
         assert profiles["nextcloud"]["recommended_port"] == 80
+        assert profiles["nextcloud"]["image_patterns"] == ["nextcloud"]
 
     def test_detect_endpoint_match(self, client):
         resp = client.get("/api/profiles/detect?image=linuxserver/nextcloud:28")

@@ -10,7 +10,7 @@
   - an API key for tailnet device management
 - SSH or terminal access to Unraid
 
-## Option A: Docker Compose (recommended)
+## Option A: deploy.sh (recommended)
 
 ### 1. Clone the repo on your Unraid server
 
@@ -23,16 +23,24 @@ cd tailbale
 ### 2. Build and start
 
 ```bash
-# Docker Compose v2 (plugin):
-docker compose -f docker-compose.prod.yml up -d --build
+# Safe for first-time deploys, upgrades, and non-executable checkouts:
+bash ./deploy.sh
 
-# Docker Compose v1 (standalone binary, common on Unraid):
-docker-compose -f docker-compose.prod.yml up -d --build
+# Optional host port, host data path, or runtime override:
+HOST_PORT=6790 HOST_DATA_DIR=/mnt/user/appdata/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
 ```
 
-> **Tip**: If you get `unknown shorthand flag: 'f'`, you have the v1 binary —
-> use `docker-compose` (hyphenated) instead of `docker compose` (subcommand).
-> If neither works, use **Option B** below.
+> `deploy.sh` delegates to `redeploy.sh`, which builds both images from the
+> repository checkout and replaces any existing `tailbale` container. The script
+> forwards the runtime variables listed below (`HOST`, `PORT`, `COOKIE_SECURE`,
+> `CORS_ORIGINS`, `JWT_EXPIRY_HOURS`, and data/socket settings).
+>
+> If you prefer Compose, set `HOST_DATA_DIR` explicitly and use
+> `HOST_DATA_DIR=/mnt/user/appdata/tailbale/data docker compose -f docker-compose.prod.yml up -d --build`
+> (or the v1 `docker-compose` binary). Do not switch between Compose and
+> `deploy.sh` without first stopping/removing the container created by the other
+> mode; they use different Docker ownership metadata and can otherwise conflict
+> on the container name or host port.
 
 ### 3. Access the setup wizard
 
@@ -56,14 +64,14 @@ Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will
 ```bash
 cd /mnt/user/appdata/tailbale
 git pull
-docker compose -f docker-compose.prod.yml up -d --build
+bash ./deploy.sh
 ```
 
 ---
 
 ## Option B: Manual Docker Run
 
-If you prefer not to use docker compose:
+If you prefer to run the Docker commands manually:
 
 ### 1. Build the image
 
@@ -75,7 +83,7 @@ docker build -t tailbale:latest .
 ### 2. Build the edge image
 
 ```bash
-docker build -t tailbale-edge:latest ./edge
+docker build -t tailbale-edge:latest --label "tailbale.version=$(tr -d '\n' < VERSION)" ./edge
 ```
 
 ### 3. Run the orchestrator
@@ -83,6 +91,7 @@ docker build -t tailbale-edge:latest ./edge
 ```bash
 docker run -d \
   --name tailbale \
+  --label tailbale.main=true \
   --restart unless-stopped \
   -p 6780:8080 \
   -v /mnt/user/appdata/tailbale/data:/data \
@@ -105,10 +114,11 @@ Then open `http://<unraid-ip>:6780` to complete setup.
 ### Rebuilding the Orchestrator
 ```bash
 docker build -t tailbale:latest .
-docker build -t tailbale-edge:latest ./edge
-docker rm -f tailbale
+docker build -t tailbale-edge:latest --label "tailbale.version=$(tr -d '\n' < VERSION)" ./edge
+docker rm -f tailbale || true
 docker run -d \
   --name tailbale \
+  --label tailbale.main=true \
   --restart unless-stopped \
   -p 6780:8080 \
   -v /mnt/user/appdata/tailbale/data:/data \
@@ -120,11 +130,17 @@ docker run -d \
   tailbale:latest
 ```
 
-Or use the convenience script (auto-detects the host data path):
+Or use the convenience script directly (auto-detects the host data path, forwards
+documented runtime overrides, and is safe on first deploy, even if the scripts
+are not executable):
 
 ```bash
-./redeploy.sh
+bash ./deploy.sh
 ```
+
+If you switch between manual/Compose deployments and `deploy.sh`, stop and remove
+the container from the previous mode first so Docker does not keep the old
+container name or host port reserved.
 
 ---
 
@@ -148,7 +164,7 @@ secret will be generated automatically.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `HOST_DATA_DIR` | **Yes** (containerised) | same as `DATA_DIR` | Absolute host-side path to the data directory. Required when running inside Docker so edge container bind mounts resolve correctly. |
+| `HOST_DATA_DIR` | **Yes** for Compose/manual Docker; auto-detected by `deploy.sh` | repo `data` directory for `deploy.sh` | Absolute host-side path to the data directory. `deploy.sh` resolves relative values before passing them to Docker; Compose requires an explicit absolute value and uses it for both the `/data` bind mount and edge-container bind sources. |
 | `DATA_DIR` | No | `/data` | Data directory inside the container |
 | `JWT_EXPIRY_HOURS` | No | `24` | Session duration in hours |
 | `COOKIE_SECURE` | No | `false` | Set `true` if behind HTTPS |
@@ -162,8 +178,7 @@ secret will be generated automatically.
 ```bash
 cd /mnt/user/appdata/tailbale
 git pull
-docker compose -f docker-compose.prod.yml up -d --build   # v2
-# or: docker-compose -f docker-compose.prod.yml up -d --build  # v1
+bash ./deploy.sh
 ```
 
 Your data in `/data` is preserved across rebuilds.
@@ -186,7 +201,7 @@ Then update the edge image reference in the orchestrator's container_manager to 
 
 ## Troubleshooting
 
-- **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the absolute host path of your data directory (e.g. `/mnt/user/appdata/tailbale/data`). Docker Compose sets this automatically via `${PWD}/data`; for `docker run` you must pass it explicitly.
+- **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the host path of your data directory (e.g. `/mnt/user/appdata/tailbale/data`). `deploy.sh` resolves relative paths to absolute paths; Docker Compose now requires `HOST_DATA_DIR` explicitly so it cannot accidentally use the caller's working directory.
 - **Can't connect to Docker**: Ensure `/var/run/docker.sock` is mounted and the container user has access
 - **Edge container won't start**: Check the Tailscale auth key is valid and reusable; the API key is also required during setup but is not used for login
 - **Certs not issuing**: Verify Cloudflare API token has DNS:Edit permission for your zone

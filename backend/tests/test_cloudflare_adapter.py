@@ -43,6 +43,24 @@ class TestListZones:
         with pytest.raises(RuntimeError, match="Invalid token"):
             list_zones("bad-token")
 
+    @patch("app.adapters.cloudflare_adapter.httpx.get")
+    def test_non_json_edge_error_is_clear(self, mock_get):
+        import json as _json
+
+        from app.adapters.cloudflare_adapter import list_zones
+
+        # Cloudflare's edge can return an HTML 5xx page instead of JSON; the
+        # adapter must translate that into a clear status-coded error rather
+        # than leaking a raw JSONDecodeError as the cert/DNS failure reason.
+        resp = MagicMock()
+        resp.status_code = 502
+        resp.text = "<html><body>502 Bad Gateway</body></html>"
+        resp.json.side_effect = _json.JSONDecodeError("Expecting value", "doc", 0)
+        mock_get.return_value = resp
+
+        with pytest.raises(RuntimeError, match="non-JSON response \\(HTTP 502\\)"):
+            list_zones("cf-token")
+
 
 class TestGetZone:
     @patch("app.adapters.cloudflare_adapter.httpx.get")

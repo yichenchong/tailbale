@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type ServiceItem, type ServiceUpdateRequest } from "@/lib/api"
 import { useTimezone, formatDate, formatDateTime } from "@/lib/useTimezone"
@@ -78,6 +78,8 @@ export default function ServiceDetail() {
   const [logsTab, setLogsTab] = useState<"edge" | "events">("edge")
   const [edgeVersion, setEdgeVersion] = useState<{ orchestrator_version: string; edge_version: string | null; up_to_date: boolean } | null>(null)
   const [updatingEdge, setUpdatingEdge] = useState(false)
+  const loadSeq = useRef(0)
+  const edgeVersionSeq = useRef(0)
 
   // Edit form state
   const [editName, setEditName] = useState("")
@@ -86,12 +88,20 @@ export default function ServiceDetail() {
   const [editHealthcheck, setEditHealthcheck] = useState("")
   const [editPreserveHost, setEditPreserveHost] = useState(true)
   const [editSnippet, setEditSnippet] = useState("")
+  const normalizedEditName = editName.trim()
+  const parsedEditPort = Number(editPort)
+  const editPortValid = Number.isInteger(parsedEditPort) && parsedEditPort >= 1 && parsedEditPort <= 65535
+  const canSave = Boolean(normalizedEditName) && editPortValid && !saving
+  const servicePath = useCallback((path = "") => `/services/${encodeURIComponent(id || "")}${path}`, [id])
 
-  const load = async () => {
+
+  const load = useCallback(async () => {
+    const seq = ++loadSeq.current
     setLoading(true)
     setError(null)
     try {
-      const svc = await api.get<ServiceItem>(`/services/${id}`)
+      const svc = await api.get<ServiceItem>(servicePath())
+      if (seq !== loadSeq.current) return
       setService(svc)
       setEditName(svc.name)
       setEditPort(String(svc.upstream_port))
@@ -100,25 +110,28 @@ export default function ServiceDetail() {
       setEditPreserveHost(svc.preserve_host_header)
       setEditSnippet(svc.custom_caddy_snippet || "")
     } catch {
+      if (seq !== loadSeq.current) return
       setError("Service not found")
     } finally {
-      setLoading(false)
+      if (seq === loadSeq.current) setLoading(false)
     }
-  }
+  }, [servicePath])
 
-  const loadEdgeVersion = async () => {
+  const loadEdgeVersion = useCallback(async () => {
+    const seq = ++edgeVersionSeq.current
+    setEdgeVersion(null)
     try {
-      const v = await api.get<{ orchestrator_version: string; edge_version: string | null; up_to_date: boolean }>(`/services/${id}/edge-version`)
-      setEdgeVersion(v)
+      const v = await api.get<{ orchestrator_version: string; edge_version: string | null; up_to_date: boolean }>(servicePath("/edge-version"))
+      if (seq === edgeVersionSeq.current) setEdgeVersion(v)
     } catch { /* ignore */ }
-  }
+  }, [servicePath])
 
   const handleUpdateEdge = async () => {
     setUpdatingEdge(true)
     try {
-      await api.post(`/services/${id}/update-edge`)
+      await api.post(servicePath("/update-edge"))
       await loadEdgeVersion()
-      load()
+      void load()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setActionMsg(msg)
@@ -128,20 +141,45 @@ export default function ServiceDetail() {
     }
   }
 
-  useEffect(() => { load(); loadEdgeVersion() }, [id])
+  useEffect(() => {
+    setEditing(false)
+    setConfirmDelete(false)
+    setCleanupDns(true)
+    setConfirmDisable(false)
+    setConfirmRecreate(false)
+    setActionMsg(null)
+  }, [id])
+
+  useEffect(() => {
+    void load()
+    void loadEdgeVersion()
+    return () => {
+      loadSeq.current += 1
+      edgeVersionSeq.current += 1
+    }
+  }, [load, loadEdgeVersion])
 
   const handleSave = async () => {
+    if (!normalizedEditName) {
+      setError("Service name is required")
+      return
+    }
+    if (!editPortValid) {
+      setError("Upstream port must be a whole number from 1 to 65535")
+      return
+    }
     setSaving(true)
+    setError(null)
     try {
       const body: ServiceUpdateRequest = {
-        name: editName,
-        upstream_port: Number(editPort),
+        name: normalizedEditName,
+        upstream_port: parsedEditPort,
         upstream_scheme: editScheme,
-        healthcheck_path: editHealthcheck || null,
+        healthcheck_path: editHealthcheck.trim() || null,
         preserve_host_header: editPreserveHost,
         custom_caddy_snippet: editSnippet || null,
       }
-      const svc = await api.put<ServiceItem>(`/services/${id}`, body)
+      const svc = await api.put<ServiceItem>(servicePath(), body)
       setService(svc)
       setEditing(false)
     } catch (e) {
@@ -156,10 +194,10 @@ export default function ServiceDetail() {
     setConfirmDisable(false)
     try {
       if (service.enabled) {
-        const svc = await api.post<ServiceItem>(`/services/${id}/disable`)
+        const svc = await api.post<ServiceItem>(servicePath("/disable"))
         setService(svc)
       } else {
-        const svc = await api.put<ServiceItem>(`/services/${id}`, { enabled: true })
+        const svc = await api.put<ServiceItem>(servicePath(), { enabled: true })
         setService(svc)
       }
     } catch (e) {
@@ -176,7 +214,7 @@ export default function ServiceDetail() {
     setDeleting(true)
     try {
       const qs = cleanupDns ? "?cleanup_dns=true" : ""
-      await api.delete(`/services/${id}${qs}`)
+      await api.delete(servicePath(qs))
       navigate("/services")
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -187,8 +225,8 @@ export default function ServiceDetail() {
   const handleAction = async (path: string) => {
     setActionMsg(null)
     try {
-      await api.post(`/services/${id}${path}`)
-      load()
+      await api.post(servicePath(path))
+      void load()
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e)
       setActionMsg(msg)
@@ -277,6 +315,7 @@ export default function ServiceDetail() {
               <label className="block">
                 <span className="text-xs font-medium text-zinc-600">Upstream Port</span>
                 <input type="number" value={editPort} onChange={(e) => setEditPort(e.target.value)}
+                  min={1} max={65535} step={1}
                   className="mt-1 block w-full rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500" />
               </label>
               <label className="block">
@@ -303,7 +342,7 @@ export default function ServiceDetail() {
                   className="mt-1 block w-full rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500" />
               </label>
               <div className="flex gap-2">
-                <button onClick={handleSave} disabled={saving}
+                <button onClick={handleSave} disabled={!canSave}
                   className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50">
                   {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
                   Save
@@ -437,39 +476,43 @@ export default function ServiceDetail() {
               {service.enabled ? <><PowerOff className="h-4 w-4" /> Disable</> : <><Power className="h-4 w-4" /> Enable</>}
             </button>
           )}
-          <button onClick={() => handleAction("/reload")}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-            <RefreshCw className="h-4 w-4" /> Reload Caddy
-          </button>
-          <button onClick={() => handleAction("/restart-edge")}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-            <RotateCcw className="h-4 w-4" /> Restart Edge
-          </button>
-
-          {/* Recreate Edge with confirmation */}
-          {confirmRecreate ? (
-            <div className="flex items-center gap-2 rounded-md border border-yellow-200 bg-yellow-50 px-3 py-1.5">
-              <span className="text-sm text-yellow-800">Recreate edge? This will cause brief downtime.</span>
-              <button onClick={handleRecreateEdge}
-                className="rounded bg-yellow-600 px-2 py-1 text-xs font-medium text-white hover:bg-yellow-700">
-                Recreate
+          {service.enabled && (
+            <>
+              <button onClick={() => handleAction("/reload")}
+                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                <RefreshCw className="h-4 w-4" /> Reload Caddy
               </button>
-              <button onClick={() => setConfirmRecreate(false)}
-                className="text-xs text-yellow-700 hover:underline">Cancel</button>
-            </div>
-          ) : (
-            <button onClick={() => setConfirmRecreate(true)}
-              className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-              <PackagePlus className="h-4 w-4" /> Recreate Edge
-            </button>
-          )}
+              <button onClick={() => handleAction("/restart-edge")}
+                className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                <RotateCcw className="h-4 w-4" /> Restart Edge
+              </button>
 
-          {edgeVersion && !edgeVersion.up_to_date && (
-            <button onClick={handleUpdateEdge} disabled={updatingEdge}
-              className="inline-flex items-center gap-1.5 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-1.5 text-sm font-medium text-yellow-700 hover:bg-yellow-100 disabled:opacity-50">
-              {updatingEdge ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-              Update Edge
-            </button>
+              {/* Recreate Edge with confirmation */}
+              {confirmRecreate ? (
+                <div className="flex items-center gap-2 rounded-md border border-yellow-200 bg-yellow-50 px-3 py-1.5">
+                  <span className="text-sm text-yellow-800">Recreate edge? This will cause brief downtime.</span>
+                  <button onClick={handleRecreateEdge}
+                    className="rounded bg-yellow-600 px-2 py-1 text-xs font-medium text-white hover:bg-yellow-700">
+                    Recreate
+                  </button>
+                  <button onClick={() => setConfirmRecreate(false)}
+                    className="text-xs text-yellow-700 hover:underline">Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmRecreate(true)}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
+                  <PackagePlus className="h-4 w-4" /> Recreate Edge
+                </button>
+              )}
+
+              {edgeVersion && !edgeVersion.up_to_date && (
+                <button onClick={handleUpdateEdge} disabled={updatingEdge}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-yellow-300 bg-yellow-50 px-3 py-1.5 text-sm font-medium text-yellow-700 hover:bg-yellow-100 disabled:opacity-50">
+                  {updatingEdge ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  Update Edge
+                </button>
+              )}
+            </>
           )}
           <button onClick={() => handleAction("/renew-cert")}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">

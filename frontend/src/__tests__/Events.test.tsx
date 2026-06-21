@@ -232,6 +232,35 @@ describe("Events page", () => {
     })
   })
 
+  it("exposes event details through an accessible expand button", async () => {
+    vi.stubGlobal("fetch", mockFetch(mockEvents))
+    const { default: Events } = await import("@/pages/Events")
+    render(
+      <MemoryRouter>
+        <Events />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(
+        screen.getByText("Certificate issued for nextcloud.example.com")
+      ).toBeInTheDocument()
+    })
+
+    const expand = screen.getByRole("button", {
+      name: "Expand details for Certificate issued for nextcloud.example.com",
+    })
+    expect(expand).toHaveAttribute("aria-expanded", "false")
+
+    fireEvent.click(expand)
+
+    expect(
+      screen.getByRole("button", {
+        name: "Collapse details for Certificate issued for nextcloud.example.com",
+      })
+    ).toHaveAttribute("aria-expanded", "true")
+    expect(screen.getByText(/"hostname"/)).toBeInTheDocument()
+  })
+
   it("shows pagination when total exceeds limit", async () => {
     const manyEvents = {
       events: mockEvents.events,

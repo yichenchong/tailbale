@@ -1,8 +1,8 @@
 """Tests for the cert renewal background task."""
 
-from datetime import datetime, timedelta, timezone
+import threading
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
-
 
 from app.models.certificate import Certificate
 from app.models.event import Event
@@ -49,6 +49,71 @@ class TestProcessServiceCert:
         cert = db_session.get(Certificate, svc.id)
         assert cert is None
 
+    @patch("app.certs.renewal_task.read_secret")
+    def test_skips_disabled_service_before_reading_secrets(self, mock_secret, db_session):
+        from app.certs.renewal_task import process_service_cert
+
+        svc = _create_service(db_session, enabled=False)
+
+        process_service_cert(db_session, svc)
+
+        mock_secret.assert_not_called()
+        assert db_session.get(Certificate, svc.id) is None
+
+    @patch("app.certs.renewal_task.read_secret")
+    def test_skips_deleted_stale_service_before_reading_secrets(self, mock_secret, db_session):
+        from app.certs.renewal_task import process_service_cert
+
+        svc = _create_service(db_session)
+        service_id = svc.id
+        db_session.delete(svc)
+        db_session.commit()
+
+        process_service_cert(db_session, svc)
+
+        mock_secret.assert_not_called()
+        assert db_session.get(Certificate, service_id) is None
+
+
+    @patch("app.certs.renewal_task.read_secret")
+    def test_process_service_cert_serializes_with_reconcile_mutex(self, mock_secret, db_session):
+        from sqlalchemy.orm import sessionmaker
+
+        from app.certs.renewal_task import process_service_cert
+        from app.reconciler.reconciler import _RECONCILE_MUTEX
+
+        mock_secret.return_value = None
+        svc = _create_service(db_session)
+        service_id = svc.id
+        TestSession = sessionmaker(bind=db_session.get_bind())
+        started = threading.Event()
+        completed = threading.Event()
+        errors: list[Exception] = []
+
+        def run_cert_check():
+            thread_db = TestSession()
+            try:
+                thread_svc = thread_db.get(Service, service_id)
+                started.set()
+                process_service_cert(thread_db, thread_svc)
+                completed.set()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                thread_db.close()
+
+        with _RECONCILE_MUTEX:
+            worker = threading.Thread(target=run_cert_check)
+            worker.start()
+            assert started.wait(1)
+            assert not completed.wait(0.05)
+
+        worker.join(1)
+        assert not worker.is_alive()
+        assert errors == []
+        assert completed.is_set()
+
+
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.issue_cert")
     @patch("app.certs.renewal_task.read_secret")
@@ -57,7 +122,7 @@ class TestProcessServiceCert:
 
         mock_secret.return_value = "cf-token"
         # First call: no cert exists; second call after issue: new expiry
-        mock_expiry.side_effect = [None, datetime(2027, 6, 1, tzinfo=timezone.utc)]
+        mock_expiry.side_effect = [None, datetime(2027, 6, 1, tzinfo=UTC)]
 
         svc = _create_service(db_session)
         process_service_cert(db_session, svc)
@@ -80,8 +145,8 @@ class TestProcessServiceCert:
 
         mock_secret.return_value = "cf-token"
         # Cert exists but expires in 10 days (within 30-day renewal window)
-        soon = datetime.now(timezone.utc) + timedelta(days=10)
-        renewed = datetime.now(timezone.utc) + timedelta(days=90)
+        soon = datetime.now(UTC) + timedelta(days=10)
+        renewed = datetime.now(UTC) + timedelta(days=90)
         mock_expiry.side_effect = [soon, renewed]
 
         svc = _create_service(db_session)
@@ -98,7 +163,7 @@ class TestProcessServiceCert:
 
         mock_secret.return_value = "cf-token"
         # Cert expires in 60 days — no renewal needed
-        far_future = datetime.now(timezone.utc) + timedelta(days=60)
+        far_future = datetime.now(UTC) + timedelta(days=60)
         mock_expiry.return_value = far_future
 
         svc = _create_service(db_session)
@@ -114,6 +179,27 @@ class TestProcessServiceCert:
             Event.kind.in_(["cert_issued", "cert_renewed"])
         ).all()
         assert len(events) == 0
+
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_stale_invalid_renewal_window_falls_back_to_default(
+        self, mock_secret, mock_expiry, db_session
+    ):
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        mock_expiry.return_value = datetime.now(UTC) + timedelta(days=60)
+        set_setting(db_session, "cert_renewal_window_days", "not-an-int")
+        db_session.commit()
+
+        svc = _create_service(db_session)
+
+        process_service_cert(db_session, svc)
+
+        cert = db_session.get(Certificate, svc.id)
+        assert cert is not None
+        assert cert.last_failure is None
 
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.issue_cert")
@@ -139,6 +225,30 @@ class TestProcessServiceCert:
         assert events[0].level == "error"
 
     @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.issue_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_records_failure_when_issued_cert_is_unreadable(
+        self, mock_secret, mock_issue, mock_expiry, db_session
+    ):
+        from app.certs.renewal_task import process_service_cert
+
+        mock_secret.return_value = "cf-token"
+        mock_expiry.side_effect = [None, None]
+
+        svc = _create_service(db_session)
+        process_service_cert(db_session, svc)
+
+        mock_issue.assert_called_once()
+        cert = db_session.get(Certificate, svc.id)
+        assert cert is not None
+        assert cert.last_failure is not None
+        assert "unreadable certificate" in cert.last_failure
+
+        assert db_session.query(Event).filter(Event.kind == "cert_issued").count() == 0
+        assert db_session.query(Event).filter(Event.kind == "cert_failed").count() == 1
+
+
+    @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.read_secret")
     def test_skips_before_retry_time(self, mock_secret, mock_expiry, db_session):
         from app.certs.renewal_task import process_service_cert
@@ -153,7 +263,7 @@ class TestProcessServiceCert:
             service_id=svc.id,
             hostname=svc.hostname,
             last_failure="previous error",
-            next_retry_at=datetime.now(timezone.utc) + timedelta(hours=3),
+            next_retry_at=datetime.now(UTC) + timedelta(hours=3),
         )
         db_session.add(cert_record)
         db_session.commit()
@@ -222,6 +332,7 @@ class TestCertRenewalDbPaths:
 
     def test_get_certs_root_respects_db_override(self, db_session):
         from pathlib import Path
+
         from app.certs.renewal_task import _get_certs_root
         from app.settings_store import set_setting
 
@@ -235,9 +346,10 @@ class TestCertRenewalDbPaths:
     @patch("app.certs.renewal_task.issue_cert")
     @patch("app.certs.renewal_task.read_secret")
     def test_issue_cert_uses_db_cert_path(self, mock_secret, mock_issue, mock_expiry, db_session):
+        from pathlib import Path
+
         from app.certs.renewal_task import process_service_cert
         from app.settings_store import set_setting
-        from pathlib import Path
 
         mock_secret.return_value = "cf-token"
         mock_expiry.side_effect = [None, None]

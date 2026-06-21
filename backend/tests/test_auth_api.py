@@ -16,6 +16,7 @@ def auth_client(tmp_data_dir):
     import app.database as database_module
 
     original_engine = database_module.engine
+    original_session_local = database_module.SessionLocal
 
     engine = create_engine(
         "sqlite:///:memory:",
@@ -24,6 +25,7 @@ def auth_client(tmp_data_dir):
     )
     Base.metadata.create_all(bind=engine)
     database_module.engine = engine
+    database_module.SessionLocal = sessionmaker(bind=engine)
     TestSession = sessionmaker(bind=engine)
 
     def _override_get_db():
@@ -42,6 +44,7 @@ def auth_client(tmp_data_dir):
         yield c
     app.dependency_overrides.clear()
     database_module.engine = original_engine
+    database_module.SessionLocal = original_session_local
 
 
 def _setup_user(client, username="admin", password="securepassword123"):
@@ -56,6 +59,24 @@ def _setup_user(client, username="admin", password="securepassword123"):
 def _set_auth_cookie(client, cookie_value):
     """Set the access_token cookie on the client instance (avoids per-request deprecation)."""
     client.cookies.set("access_token", cookie_value)
+
+
+def _configure_setup_prerequisites(client):
+    client.put("/api/settings/general", json={
+        "base_domain": "example.com",
+        "acme_email": "admin@example.com",
+    })
+    client.put("/api/settings/cloudflare", json={
+        "zone_id": "zone123",
+        "token": "cf-token",
+    })
+    client.put("/api/settings/tailscale", json={
+        "auth_key": "tskey-auth-abc123",
+        "api_key": "tskey-api-abc123",
+    })
+    client.put("/api/settings/docker", json={
+        "socket_path": "unix:///var/run/docker.sock",
+    })
 
 
 class TestSetupUser:
@@ -75,6 +96,24 @@ class TestSetupUser:
         assert resp.status_code == 409
         assert "already exists" in resp.json()["detail"]
 
+    def test_hash_failure_does_not_claim_bootstrap(self, auth_client, monkeypatch):
+        def fail_hash(_password, _db):
+            raise RuntimeError("hash failed")
+        monkeypatch.setattr("app.routers.auth.hash_password", fail_hash)
+
+        with pytest.raises(RuntimeError, match="hash failed"):
+            auth_client.post(
+                "/api/auth/setup-user",
+                json={"username": "admin", "password": "securepassword123"},
+            )
+
+        progress = auth_client.get("/api/auth/setup-progress").json()
+        assert progress["user_exists"] is False
+
+        monkeypatch.undo()
+        resp = _setup_user(auth_client)
+        assert resp.status_code == 200
+
     def test_empty_username_rejected(self, auth_client):
         resp = auth_client.post(
             "/api/auth/setup-user",
@@ -82,12 +121,36 @@ class TestSetupUser:
         )
         assert resp.status_code == 422
 
+    def test_whitespace_username_rejected(self, auth_client):
+        resp = auth_client.post(
+            "/api/auth/setup-user",
+            json={"username": "   ", "password": "securepassword123"},
+        )
+        assert resp.status_code == 422
+
+    def test_username_is_trimmed(self, auth_client):
+        resp = _setup_user(auth_client, username="  admin  ")
+        assert resp.status_code == 200
+        assert resp.json()["user"]["username"] == "admin"
+
     def test_short_password_rejected(self, auth_client):
         resp = auth_client.post(
             "/api/auth/setup-user",
             json={"username": "admin", "password": "short"},
         )
         assert resp.status_code == 422
+
+    def test_existing_user_check_skips_hashing(self, auth_client, monkeypatch):
+        """Once a user exists, setup-user must 409 BEFORE the expensive bcrypt
+        hash (prevents unauthenticated CPU amplification)."""
+        _setup_user(auth_client)
+
+        def boom(*_a, **_k):
+            raise AssertionError("hash_password must not run once a user exists")
+
+        monkeypatch.setattr("app.routers.auth.hash_password", boom)
+        resp = _setup_user(auth_client, username="another")
+        assert resp.status_code == 409
 
 
 class TestLogin:
@@ -101,6 +164,15 @@ class TestLogin:
         assert resp.status_code == 200
         assert resp.json()["user"]["username"] == "admin"
         assert "access_token" in resp.cookies
+
+    def test_login_username_is_trimmed(self, auth_client):
+        _setup_user(auth_client)
+        auth_client.cookies.clear()
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "  admin  ", "password": "securepassword123"},
+        )
+        assert resp.status_code == 200
 
     def test_wrong_password(self, auth_client):
         _setup_user(auth_client)
@@ -118,6 +190,23 @@ class TestLogin:
             json={"username": "nobody", "password": "whatever"},
         )
         assert resp.status_code == 401
+
+    def test_nonexistent_user_runs_dummy_verify(self, auth_client, monkeypatch):
+        """Login on an unknown username must still run a bcrypt verification so
+        its timing matches a real check (prevents username enumeration)."""
+        calls = []
+        import app.routers.auth as auth_module
+        real = auth_module.dummy_verify_password
+        monkeypatch.setattr(
+            auth_module, "dummy_verify_password",
+            lambda plain, db: calls.append(plain) or real(plain, db),
+        )
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "nobody", "password": "whatever"},
+        )
+        assert resp.status_code == 401
+        assert calls == ["whatever"]
 
     def test_missing_fields(self, auth_client):
         resp = auth_client.post("/api/auth/login", json={})
@@ -191,13 +280,10 @@ class TestAuthStatus:
             json={"username": "admin", "password": "securepassword123"},
         )
         _set_auth_cookie(auth_client, login_resp.cookies["access_token"])
-        auth_client.put("/api/settings/tailscale", json={
-            "auth_key": "tskey-auth-abc123",
-            "api_key": "tskey-api-abc123",
-        })
+        _configure_setup_prerequisites(auth_client)
 
-
-        auth_client.put("/api/settings/setup-complete", json={})
+        resp = auth_client.put("/api/settings/setup-complete", json={})
+        assert resp.status_code == 200
 
         # Clear cookies, then check status
         auth_client.cookies.clear()
@@ -251,8 +337,25 @@ class TestSetupProgress:
         data = resp.json()
         assert data["acme_email_set"] is True
 
+    def test_cloudflare_requires_zone_and_token(self, auth_client, tmp_data_dir):
+        from app.secrets import CLOUDFLARE_TOKEN, write_secret
+
+        setup_resp = _setup_user(auth_client)
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
+
+        auth_client.put("/api/settings/cloudflare", json={"zone_id": "zone123"})
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.json()["cloudflare_token_set"] is False
+        assert resp.json()["cloudflare_configured"] is False
+
+        write_secret(CLOUDFLARE_TOKEN, "cf-token")
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.json()["cloudflare_token_set"] is True
+        assert resp.json()["cloudflare_configured"] is True
+
+
     def test_tailscale_requires_auth_and_api_key(self, auth_client, tmp_data_dir):
-        from app.secrets import write_secret, TAILSCALE_AUTH_KEY, TAILSCALE_API_KEY
+        from app.secrets import TAILSCALE_API_KEY, TAILSCALE_AUTH_KEY, write_secret
 
         setup_resp = _setup_user(auth_client)
         _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
@@ -272,12 +375,34 @@ class TestSetupProgress:
         assert resp.status_code == 200
 
 
+    def test_requires_auth_after_setup_complete(self, auth_client):
+        setup_resp = _setup_user(auth_client)
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
+        _configure_setup_prerequisites(auth_client)
+        complete_resp = auth_client.put("/api/settings/setup-complete", json={})
+        assert complete_resp.status_code == 200
+
+        auth_client.cookies.clear()
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.status_code == 401
+
+    def test_authenticated_after_setup_complete(self, auth_client):
+        setup_resp = _setup_user(auth_client)
+        _set_auth_cookie(auth_client, setup_resp.cookies["access_token"])
+        _configure_setup_prerequisites(auth_client)
+        complete_resp = auth_client.put("/api/settings/setup-complete", json={})
+        assert complete_resp.status_code == 200
+
+        resp = auth_client.get("/api/auth/setup-progress")
+        assert resp.status_code == 200
+        assert resp.json()["user_exists"] is True
+
 class TestChangePassword:
     """Tests for the POST /api/auth/change-password endpoint."""
 
     def _login(self, client, password="securepassword123"):
         """Helper: create user, clear cookies, login, set cookie."""
-        setup_resp = _setup_user(client, password=password)
+        _setup_user(client, password=password)
         client.cookies.clear()
         login_resp = client.post(
             "/api/auth/login",
@@ -407,6 +532,57 @@ class TestPasswordSalt:
         assert resp.status_code == 401
 
 
+
+class TestCorsOptions:
+    def _preflight(self, options, origin="https://evil.example"):
+        from fastapi import FastAPI
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app = FastAPI()
+        app.add_middleware(CORSMiddleware, **options)
+
+        @app.get("/api/probe")
+        async def probe():
+            return {"ok": True}
+
+        with TestClient(app) as client:
+            return client.options(
+                "/api/probe",
+                headers={
+                    "Origin": origin,
+                    "Access-Control-Request-Method": "GET",
+                },
+            )
+
+    def test_empty_cors_origins_disables_middleware(self):
+        from app.main import _cors_middleware_options
+
+        assert _cors_middleware_options("") is None
+
+    def test_explicit_cors_origins_allow_credentials(self):
+        from app.main import _cors_middleware_options
+
+        options = _cors_middleware_options(" https://ui.example , https://admin.example ")
+        assert options is not None
+        assert options["allow_origins"] == ["https://ui.example", "https://admin.example"]
+        assert options["allow_credentials"] is True
+
+        resp = self._preflight(options, origin="https://ui.example")
+        assert resp.headers["access-control-allow-origin"] == "https://ui.example"
+        assert resp.headers["access-control-allow-credentials"] == "true"
+
+    def test_wildcard_cors_origin_disables_credentials_even_when_mixed(self):
+        from app.main import _cors_middleware_options
+
+        options = _cors_middleware_options("*, https://ui.example")
+        assert options is not None
+        assert options["allow_origins"] == ["*"]
+        assert options["allow_credentials"] is False
+
+        resp = self._preflight(options)
+        assert resp.headers["access-control-allow-origin"] == "*"
+        assert "access-control-allow-credentials" not in resp.headers
+
 # ---------------------------------------------------------------------------
 # Deprecation warning regression check
 # ---------------------------------------------------------------------------
@@ -426,7 +602,4 @@ class TestNoDeprecationWarnings:
             if isinstance(node, ast.Call):
                 for kw in node.keywords:
                     if kw.arg == "cookies":
-                        assert False, (
-                            f"Found cookies= keyword arg at line {kw.lineno}. "
-                            "Use client.cookies.set() instead."
-                        )
+                        raise AssertionError(f"Found cookies= keyword arg at line {kw.lineno}. " "Use client.cookies.set() instead.")

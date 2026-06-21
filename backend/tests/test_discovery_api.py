@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import docker
+
 
 def _make_mock_container(
     id="abc123",
@@ -12,6 +14,7 @@ def _make_mock_container(
     ports=None,
     networks=None,
     labels=None,
+    config_image=None,
 ):
     """Create a mock Docker container."""
     container = MagicMock()
@@ -29,10 +32,10 @@ def _make_mock_container(
     container.attrs = {
         "State": {"Status": state},
         "NetworkSettings": {
-            "Ports": ports or {"80/tcp": [{"HostPort": "8080"}]},
+            "Ports": ports if ports is not None else {"80/tcp": [{"HostPort": "8080"}]},
             "Networks": networks or {"bridge": {}},
         },
-        "Config": {"Image": "myapp:latest"},
+        "Config": {"Image": config_image or (image.tags[0] if image.tags else "myapp:latest")},
     }
 
     return container
@@ -56,6 +59,29 @@ class TestListContainers:
         names = [c["name"] for c in data["containers"]]
         assert "nginx" in names
         assert "postgres" in names
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_closes_docker_client(self, mock_docker_cls, client):
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.return_value = []
+
+        resp = client.get("/api/discovery/containers")
+
+        assert resp.status_code == 200
+        mock_client.close.assert_called_once()
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_closes_docker_client_when_list_fails(self, mock_docker_cls, client):
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.side_effect = docker.errors.DockerException("boom")
+
+        resp = client.get("/api/discovery/containers")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"containers": [], "total": 0}
+        mock_client.close.assert_called_once()
 
     @patch("app.routers.discovery.docker.DockerClient")
     def test_container_fields(self, mock_docker_cls, client):
@@ -157,6 +183,20 @@ class TestListContainers:
         assert data["total"] == 1
 
     @patch("app.routers.discovery.docker.DockerClient")
+    def test_search_trims_whitespace(self, mock_docker_cls, client):
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.return_value = [
+            _make_mock_container(id="c1", name="nextcloud"),
+        ]
+
+        resp = client.get("/api/discovery/containers?search=%20next%20")
+        data = resp.json()
+
+        assert data["total"] == 1
+        assert data["containers"][0]["name"] == "nextcloud"
+
+    @patch("app.routers.discovery.docker.DockerClient")
     def test_running_only_default(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -176,7 +216,7 @@ class TestListContainers:
 
     @patch("app.routers.discovery.docker.DockerClient")
     def test_docker_unavailable_returns_empty(self, mock_docker_cls, client):
-        mock_docker_cls.side_effect = Exception("Docker not available")
+        mock_docker_cls.side_effect = docker.errors.DockerException("Docker not available")
 
         resp = client.get("/api/discovery/containers")
         assert resp.status_code == 200
@@ -198,6 +238,24 @@ class TestListContainers:
         assert data["containers"][0]["image"] == "myapp:latest"  # Falls back to Config.Image
 
     @patch("app.routers.discovery.docker.DockerClient")
+    def test_uses_config_image_instead_of_lazy_image_tags(self, mock_docker_cls, client):
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.return_value = [
+            _make_mock_container(
+                id="c1",
+                name="nextcloud",
+                image_tags=["nginx:latest"],
+                config_image="linuxserver/nextcloud:28",
+            )
+        ]
+
+        resp = client.get("/api/discovery/containers")
+        data = resp.json()
+
+        assert data["containers"][0]["image"] == "linuxserver/nextcloud:28"
+
+    @patch("app.routers.discovery.docker.DockerClient")
     def test_container_no_ports(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -209,3 +267,39 @@ class TestListContainers:
         resp = client.get("/api/discovery/containers")
         data = resp.json()
         assert data["containers"][0]["ports"] == []
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_container_ports_fall_back_to_exposed_ports(self, mock_docker_cls, client):
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+
+        container = _make_mock_container(id="c1", name="worker", ports={})
+        container.attrs["Config"]["ExposedPorts"] = {"8080/tcp": {}, "8443/tcp": {}}
+        mock_client.containers.list.return_value = [container]
+
+        resp = client.get("/api/discovery/containers")
+        data = resp.json()
+
+        assert data["containers"][0]["ports"] == [
+            {"container_port": "8080", "host_port": None, "protocol": "tcp"},
+            {"container_port": "8443", "host_port": None, "protocol": "tcp"},
+        ]
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_container_ports_use_first_available_host_port(self, mock_docker_cls, client):
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+
+        container = _make_mock_container(
+            id="c1",
+            name="web",
+            ports={"80/tcp": [{"HostIp": "127.0.0.1"}, {"HostPort": "8080"}]},
+        )
+        mock_client.containers.list.return_value = [container]
+
+        resp = client.get("/api/discovery/containers")
+        data = resp.json()
+
+        assert data["containers"][0]["ports"] == [
+            {"container_port": "80", "host_port": "8080", "protocol": "tcp"}
+        ]

@@ -99,6 +99,14 @@ class TestCertLogsEndpoint:
         assert resp.status_code == 200
         assert len(resp.json()["events"]) == 3
 
+    def test_cert_logs_rejects_invalid_limit(self, client):
+        resp = client.get("/api/services/svc_nonexistent/logs/cert?limit=0")
+        assert resp.status_code == 422
+
+        resp = client.get("/api/services/svc_nonexistent/logs/cert?limit=501")
+        assert resp.status_code == 422
+
+
     def test_cert_logs_include_details(self, client, db_session):
         svc_id = _create_service(client).json()["id"]
 

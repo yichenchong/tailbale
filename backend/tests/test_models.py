@@ -35,8 +35,8 @@ class TestSettingModel:
         db_session.add(Setting(key="k1", value="v1"))
         db_session.commit()
         # Adding same key should raise
-        from sqlalchemy.exc import IntegrityError
         import pytest
+        from sqlalchemy.exc import IntegrityError
 
         db_session.add(Setting(key="k1", value="v2"))
         with pytest.raises(IntegrityError):
@@ -86,8 +86,8 @@ class TestServiceModel:
         assert generated != another
 
     def test_unique_hostname(self, db_session):
-        from sqlalchemy.exc import IntegrityError
         import pytest
+        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1"))
         db_session.commit()
@@ -97,8 +97,8 @@ class TestServiceModel:
             db_session.commit()
 
     def test_unique_edge_container_name(self, db_session):
-        from sqlalchemy.exc import IntegrityError
         import pytest
+        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1", hostname="a.example.com"))
         db_session.commit()
@@ -111,8 +111,8 @@ class TestServiceModel:
             db_session.commit()
 
     def test_unique_network_name(self, db_session):
-        from sqlalchemy.exc import IntegrityError
         import pytest
+        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1", hostname="a.example.com"))
         db_session.commit()
@@ -127,8 +127,8 @@ class TestServiceModel:
             db_session.commit()
 
     def test_unique_ts_hostname(self, db_session):
-        from sqlalchemy.exc import IntegrityError
         import pytest
+        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1", hostname="a.example.com"))
         db_session.commit()
@@ -416,7 +416,8 @@ class TestSqliteForeignKeyCascade:
 
     def test_production_engine_has_pragma_listener(self):
         from sqlalchemy import event as sa_event
+
         from app.database import engine
-        has_fk_listener = sa_event.contains(engine, "connect", None)
+        sa_event.contains(engine, "connect", None)
         from app.database import _set_sqlite_pragma
         assert callable(_set_sqlite_pragma)

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react"
+import { useState, useEffect, type FormEvent } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { api, type ServiceItem, type AllSettings, type ContainerPort } from "@/lib/api"
 import { Loader2, ArrowLeft, CheckCircle, Info } from "lucide-react"
@@ -12,12 +12,26 @@ interface AppProfile {
   image_patterns: string[]
 }
 
+function parsePortsParam(portsJson: string): ContainerPort[] {
+  try {
+    const parsed = JSON.parse(portsJson)
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function defaultHostnamePrefix(containerName: string): string {
+  return containerName.replace(/[^a-z0-9-]/gi, "-").toLowerCase()
+}
+
 export default function ExposeService() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<AllSettings | null>(null)
+  const [settingsError, setSettingsError] = useState<string | null>(null)
 
   // App profile state
   const [detectedProfile, setDetectedProfile] = useState<string | null>(null)
@@ -28,17 +42,12 @@ export default function ExposeService() {
   const containerName = searchParams.get("container_name") || ""
   const containerImage = searchParams.get("image") || ""
   const portsJson = searchParams.get("ports") || "[]"
-  let availablePorts: ContainerPort[] = []
-  try {
-    availablePorts = JSON.parse(portsJson)
-  } catch {
-    // Malformed URL param — fall back to empty
-  }
+  const availablePorts = parsePortsParam(portsJson)
 
   // Form state
   const [name, setName] = useState(containerName)
   const [hostnamePrefix, setHostnamePrefix] = useState(
-    containerName.replace(/[^a-z0-9-]/gi, "-").toLowerCase()
+    defaultHostnamePrefix(containerName)
   )
   const [port, setPort] = useState(
     availablePorts.length > 0 ? availablePorts[0].container_port : "80"
@@ -51,7 +60,40 @@ export default function ExposeService() {
   const [appProfile, setAppProfile] = useState<string | null>(null)
 
   useEffect(() => {
-    api.get<AllSettings>("/settings").then(setSettings)
+    let cancelled = false
+    api
+      .get<AllSettings>("/settings")
+      .then((data) => {
+        if (cancelled) return
+        setSettings(data)
+        setSettingsError(null)
+      })
+      .catch((e) => {
+        if (cancelled) return
+        setSettingsError(e instanceof Error ? e.message : String(e))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    setName(containerName)
+    setHostnamePrefix(defaultHostnamePrefix(containerName))
+    const nextPorts = parsePortsParam(portsJson)
+    setPort(nextPorts.length > 0 ? nextPorts[0].container_port : "80")
+    setScheme("http")
+    setHealthcheckPath("")
+    setPreserveHost(true)
+    setCustomSnippet("")
+    setEnabled(true)
+  }, [containerId, containerName, containerImage, portsJson])
+
+  useEffect(() => {
+    let cancelled = false
+    setDetectedProfile(null)
+    setProfileData(null)
+    setAppProfile(null)
 
     // Auto-detect app profile from image name
     if (containerImage) {
@@ -60,36 +102,74 @@ export default function ExposeService() {
           `/profiles/detect?image=${encodeURIComponent(containerImage)}`
         )
         .then((res) => {
+          if (cancelled) return
           if (res.detected_profile && res.profile) {
             setDetectedProfile(res.detected_profile)
             setProfileData(res.profile)
             setAppProfile(res.detected_profile)
-            // Apply profile defaults
-            setPort(String(res.profile.recommended_port))
+            // Apply profile defaults. Only override the port when the
+            // recommended port is actually exposed by the container; otherwise
+            // the <select> can't represent it and submission would 422.
+            const rec = res.profile.recommended_port
+            const exposed = parsePortsParam(portsJson)
+            const recExposed =
+              exposed.length === 0 ||
+              exposed.some((p) => String(p.container_port) === String(rec))
+            if (recExposed) setPort(String(rec))
             if (res.profile.healthcheck_path) setHealthcheckPath(res.profile.healthcheck_path)
             setPreserveHost(res.profile.preserve_host_header)
           }
         })
         .catch(() => {})
     }
-  }, [])
+    return () => {
+      cancelled = true
+    }
+  }, [containerId, containerImage, portsJson])
 
   const baseDomain = settings?.general.base_domain || "example.com"
-  const fullHostname = `${hostnamePrefix}.${baseDomain}`
+  const normalizedName = name.trim()
+  const normalizedHostnamePrefix = hostnamePrefix.trim()
+  const parsedPort = Number(port)
+  const fullHostname = `${normalizedHostnamePrefix}.${baseDomain}`
+  const hostnamePrefixValid = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(normalizedHostnamePrefix)
+  const portValid = Number.isInteger(parsedPort) && parsedPort >= 1 && parsedPort <= 65535
+  const hasSelectedContainer = Boolean(containerId && containerName)
+  const canSubmit = Boolean(settings) && hasSelectedContainer && Boolean(normalizedName) && hostnamePrefixValid && portValid && !saving
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (e?: FormEvent<HTMLFormElement>) => {
+    e?.preventDefault()
+    if (!settings) {
+      setError(settingsError || "Settings are still loading")
+      return
+    }
+    if (!hasSelectedContainer) {
+      setError("Choose a discovered container before creating a service")
+      return
+    }
+    if (!normalizedName) {
+      setError("Service name is required")
+      return
+    }
+    if (!hostnamePrefixValid) {
+      setError("Hostname prefix must start and end with a lowercase letter or number, and may contain hyphens")
+      return
+    }
+    if (!portValid) {
+      setError("Upstream port must be a whole number from 1 to 65535")
+      return
+    }
     setSaving(true)
     setError(null)
     try {
       const svc = await api.post<ServiceItem>("/services", {
-        name,
+        name: normalizedName,
         upstream_container_id: containerId,
         upstream_container_name: containerName,
         upstream_scheme: scheme,
-        upstream_port: Number(port),
-        healthcheck_path: healthcheckPath || null,
+        upstream_port: parsedPort,
+        healthcheck_path: healthcheckPath.trim() || null,
         hostname: fullHostname,
-        base_domain: baseDomain,
         enabled,
         preserve_host_header: preserveHost,
         custom_caddy_snippet: customSnippet || null,
@@ -118,7 +198,11 @@ export default function ExposeService() {
         Create an edge container for <strong>{containerName || "a Docker container"}</strong>.
       </p>
 
-      <div className="mt-6 max-w-lg space-y-5">
+      {settingsError && (
+        <div className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{settingsError}</div>
+      )}
+
+      <form className="mt-6 max-w-lg space-y-5" onSubmit={handleSubmit}>
         {/* Profile detected banner */}
         {detectedProfile && profileData && (
           <div className="flex items-start gap-2 rounded-md bg-blue-50 px-4 py-3 text-sm text-blue-800">
@@ -273,8 +357,8 @@ export default function ExposeService() {
 
         {/* Submit */}
         <button
-          onClick={handleSubmit}
-          disabled={saving || !name || !hostnamePrefix || !port}
+          type="submit"
+          disabled={!canSubmit}
           className="inline-flex items-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
         >
           {saving ? (
@@ -283,7 +367,7 @@ export default function ExposeService() {
             <><CheckCircle className="h-4 w-4" /> Create Service</>
           )}
         </button>
-      </div>
+      </form>
     </div>
   )
 }

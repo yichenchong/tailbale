@@ -15,30 +15,45 @@ def _get_client(socket_path: str | None = None) -> docker.DockerClient:
     return docker.DockerClient.from_env()
 
 
+def _close_client(client: docker.DockerClient) -> None:
+    close = getattr(client, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:
+            logger.debug("Failed to close Docker client", exc_info=True)
+
+
 def create_network(network_name: str, socket_path: str | None = None) -> str:
     """Create a bridge network for an edge container. Returns the network ID."""
     client = _get_client(socket_path)
     try:
-        existing = client.networks.get(network_name)
-        logger.info("Network %s already exists (id=%s)", network_name, existing.id)
-        return existing.id
-    except docker.errors.NotFound:
-        pass
+        try:
+            existing = client.networks.get(network_name)
+            logger.info("Network %s already exists (id=%s)", network_name, existing.id)
+            return existing.id
+        except docker.errors.NotFound:
+            pass
 
-    network = client.networks.create(network_name, driver="bridge")
-    logger.info("Created network %s (id=%s)", network_name, network.id)
-    return network.id
+        network = client.networks.create(network_name, driver="bridge")
+        logger.info("Created network %s (id=%s)", network_name, network.id)
+        return network.id
+    finally:
+        _close_client(client)
 
 
 def remove_network(network_name: str, socket_path: str | None = None) -> None:
     """Remove a network if it exists."""
     client = _get_client(socket_path)
     try:
-        network = client.networks.get(network_name)
-        network.remove()
-        logger.info("Removed network %s", network_name)
-    except docker.errors.NotFound:
-        logger.info("Network %s not found, nothing to remove", network_name)
+        try:
+            network = client.networks.get(network_name)
+            network.remove()
+            logger.info("Removed network %s", network_name)
+        except docker.errors.NotFound:
+            logger.info("Network %s not found, nothing to remove", network_name)
+    finally:
+        _close_client(client)
 
 
 
@@ -71,19 +86,22 @@ def connect_container(
 ) -> str:
     """Connect a container to a network (idempotent). Returns the resolved container ID."""
     client = _get_client(socket_path)
-    network = client.networks.get(network_name)
-    container = _resolve_container(client, container_id, container_name)
+    try:
+        network = client.networks.get(network_name)
+        container = _resolve_container(client, container_id, container_name)
 
-    # Check if already connected
-    container.reload()
-    connected_networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-    if network_name in connected_networks:
-        logger.info("Container %s already on network %s", container.id, network_name)
+        # Check if already connected
+        container.reload()
+        connected_networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+        if network_name in connected_networks:
+            logger.info("Container %s already on network %s", container.id, network_name)
+            return container.id
+
+        network.connect(container)
+        logger.info("Connected container %s to network %s", container.id, network_name)
         return container.id
-
-    network.connect(container)
-    logger.info("Connected container %s to network %s", container.id, network_name)
-    return container.id
+    finally:
+        _close_client(client)
 
 
 def ensure_network(

@@ -2,7 +2,7 @@
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -17,6 +17,15 @@ router = APIRouter(
 )
 
 
+def _parse_event_details(details: str | None) -> dict | list | str | int | float | bool | None:
+    if not details:
+        return None
+    try:
+        return json.loads(details)
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def _event_to_dict(evt: Event) -> dict:
     return {
         "id": evt.id,
@@ -24,9 +33,13 @@ def _event_to_dict(evt: Event) -> dict:
         "kind": evt.kind,
         "level": evt.level,
         "message": evt.message,
-        "details": json.loads(evt.details) if evt.details else None,
+        "details": _parse_event_details(evt.details),
         "created_at": evt.created_at.isoformat() if evt.created_at else None,
     }
+
+
+def _escape_like(value: str) -> str:
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
 @router.get("")
@@ -35,8 +48,8 @@ async def list_events(
     kind: str | None = None,
     level: str | None = None,
     search: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """List events with optional filters."""
@@ -49,11 +62,11 @@ async def list_events(
     if level:
         query = query.filter(Event.level == level)
     if search:
-        query = query.filter(Event.message.ilike(f"%{search}%"))
+        query = query.filter(Event.message.ilike(f"%{_escape_like(search)}%", escape="\\"))
 
     total = query.count()
     events = (
-        query.order_by(Event.created_at.desc())
+        query.order_by(Event.created_at.desc(), Event.id.desc())
         .offset(offset)
         .limit(limit)
         .all()
@@ -70,8 +83,8 @@ async def service_events(
     service_id: str,
     kind: str | None = None,
     level: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """Get events for a specific service."""
@@ -87,7 +100,7 @@ async def service_events(
 
     total = query.count()
     events = (
-        query.order_by(Event.created_at.desc())
+        query.order_by(Event.created_at.desc(), Event.id.desc())
         .offset(offset)
         .limit(limit)
         .all()

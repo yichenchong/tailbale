@@ -39,15 +39,17 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 ## Quick Start
 
 ```bash
-# Clone and configure
+# Clone
 git clone https://github.com/yichenchong/tailbale.git /mnt/user/appdata/tailbale
 cd /mnt/user/appdata/tailbale
-cp backend/.env.example .env
 
-# Build and run
-docker compose -f docker-compose.prod.yml up -d --build
+# Build and run (safe for first-time deploys, upgrades, and non-executable checkouts)
+bash ./deploy.sh
 
-# Open http://<unraid-ip>:8080 and complete the setup wizard
+# Optional host port, host data path, or runtime override:
+# HOST_PORT=6790 HOST_DATA_DIR=/mnt/user/appdata/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
+
+# Open http://<unraid-ip>:6780 (or your HOST_PORT override) and complete the setup wizard
 ```
 
 See [DEPLOY.md](DEPLOY.md) for detailed deployment instructions, environment variables, and troubleshooting.
@@ -98,7 +100,7 @@ npm run dev
 
 ```bash
 # Backend (from repo root or backend/)
-py -3.12 -m pytest
+python3 -m pytest
 
 # Frontend (from frontend/)
 npx vitest run

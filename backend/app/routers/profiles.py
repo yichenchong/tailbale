@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends
 
 from app.auth import get_current_user
+from app.schemas.services import ProfileDetectionResponse, ProfilesResponse
 
 router = APIRouter(
     prefix="/api/profiles",
@@ -89,32 +90,46 @@ APP_PROFILES: dict[str, dict] = {
 }
 
 
+def _repository_path(image_name: str) -> str:
+    """Return the repository path without registry, tag, or digest."""
+    image = image_name.strip().lower().split("@", 1)[0]
+    if "/" in image:
+        first, rest = image.split("/", 1)
+        if "." in first or ":" in first or first == "localhost":
+            image = rest
+    last_slash = image.rfind("/")
+    last_colon = image.rfind(":")
+    if last_colon > last_slash:
+        image = image[:last_colon]
+    return image
+
+
 def detect_profile(image_name: str) -> str | None:
     """Auto-detect an app profile from a Docker image name.
 
     Returns the profile key or None if no match.
     """
-    lower = image_name.lower()
+    repository = _repository_path(image_name)
     for key, profile in APP_PROFILES.items():
         if key == "generic":
             continue
         for pattern in profile["image_patterns"]:
-            if pattern in lower:
+            if pattern in repository:
                 return key
     return None
 
 
-@router.get("")
-async def list_profiles():
+@router.get("", response_model=ProfilesResponse)
+async def list_profiles() -> ProfilesResponse:
     """List all available app profiles."""
-    return {"profiles": APP_PROFILES}
+    return ProfilesResponse(profiles=APP_PROFILES)
 
 
-@router.get("/detect")
-async def detect_profile_endpoint(image: str):
+@router.get("/detect", response_model=ProfileDetectionResponse)
+async def detect_profile_endpoint(image: str) -> ProfileDetectionResponse:
     """Auto-detect a profile from a Docker image name."""
     profile_key = detect_profile(image)
-    return {
-        "detected_profile": profile_key,
-        "profile": APP_PROFILES.get(profile_key) if profile_key else None,
-    }
+    return ProfileDetectionResponse(
+        detected_profile=profile_key,
+        profile=APP_PROFILES.get(profile_key) if profile_key else None,
+    )

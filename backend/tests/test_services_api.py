@@ -1,11 +1,11 @@
 """Tests for the Service CRUD API endpoints."""
 
 import json
-import shutil
+import threading
+from datetime import UTC
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import docker.errors
 import pytest
 
 from app.models.certificate import Certificate
@@ -331,6 +331,22 @@ class TestUpdateService:
         assert data["upstream_port"] == 80
         assert data["hostname"] == "nextcloud.example.com"
 
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "name",
+            "upstream_scheme",
+            "upstream_port",
+            "hostname",
+            "enabled",
+            "preserve_host_header",
+        ],
+    )
+    def test_update_rejects_null_for_non_nullable_fields(self, client, field):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={field: None})
+        assert resp.status_code == 422
+
 
 class TestDisableService:
     def test_disable(self, client):
@@ -382,6 +398,48 @@ class TestDeleteService:
         resp = _create_service(client, hostname="reuse.example.com")
         assert resp.status_code == 201
 
+    def test_delete_serializes_with_reconcile_mutex(self, db_session):
+        from sqlalchemy.orm import sessionmaker
+
+        from app.reconciler.reconciler import _RECONCILE_MUTEX
+        from app.routers.services import _delete_service_record
+
+        svc = _create_service_in_db(db_session)
+        service_id = svc.id
+        TestSession = sessionmaker(bind=db_session.get_bind())
+        started = threading.Event()
+        deleted = threading.Event()
+        errors: list[Exception] = []
+
+        def run_delete():
+            thread_db = TestSession()
+            try:
+                thread_svc = thread_db.get(Service, service_id)
+                started.set()
+                _delete_service_record(thread_db, thread_svc, cleanup_dns=False)
+                deleted.set()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                thread_db.close()
+
+        with (
+            patch("app.edge.container_manager.remove_edge"),
+            patch("app.edge.network_manager.remove_network"),
+            _RECONCILE_MUTEX,
+        ):
+            worker = threading.Thread(target=run_delete)
+            worker.start()
+            assert started.wait(1)
+            assert not deleted.wait(0.05)
+            assert db_session.get(Service, service_id) is not None
+
+        worker.join(1)
+        assert not worker.is_alive()
+        assert errors == []
+        db_session.expire_all()
+        assert db_session.get(Service, service_id) is None
+
 
 class TestStubActionEndpoints:
     def test_stub_404_for_nonexistent_service(self, client):
@@ -393,6 +451,55 @@ class TestStubActionEndpoints:
         assert resp.status_code == 404
         resp = client.get("/api/services/svc_nonexistent/logs/edge")
         assert resp.status_code == 404
+
+
+class TestDisabledServiceActionEndpoints:
+    @patch("app.edge.container_manager.reload_caddy")
+    def test_reload_rejects_disabled_service(self, mock_reload, client):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+
+        resp = client.post(f"/api/services/{svc_id}/reload")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Service is disabled"
+        mock_reload.assert_not_called()
+
+    @patch("app.edge.container_manager.restart_edge")
+    def test_restart_rejects_disabled_service(self, mock_restart, client):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+
+        resp = client.post(f"/api/services/{svc_id}/restart-edge")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Service is disabled"
+        mock_restart.assert_not_called()
+
+    @patch("app.secrets.read_secret", return_value="ts-key")
+    @patch("app.edge.container_manager.recreate_edge")
+    def test_recreate_rejects_disabled_service(self, mock_recreate, mock_secret, client):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+
+        resp = client.post(f"/api/services/{svc_id}/recreate-edge")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Service is disabled"
+        mock_recreate.assert_not_called()
+
+    @patch("app.edge.image_builder.ensure_edge_image")
+    @patch("app.edge.container_manager.recreate_edge")
+    @patch("app.edge.container_manager.get_edge_version", return_value="old")
+    def test_update_edge_rejects_disabled_service(
+        self, mock_version, mock_recreate, mock_build, client,
+    ):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+
+        resp = client.post(f"/api/services/{svc_id}/update-edge")
+
+        assert resp.status_code == 409
+        assert resp.json()["detail"] == "Service is disabled"
+        mock_version.assert_not_called()
+        mock_build.assert_not_called()
+        mock_recreate.assert_not_called()
 
 
 class TestStatusResponseFields:
@@ -424,8 +531,9 @@ class TestStatusResponseFields:
         assert data["status"]["cert_expires_at"] is None
 
     def test_list_includes_cert_expiry(self, client, db_session):
-        from app.models.certificate import Certificate
         from datetime import datetime
+
+        from app.models.certificate import Certificate
 
         svc_id = _create_service(client).json()["id"]
         cert = Certificate(service_id=svc_id, hostname="nextcloud.example.com")
@@ -517,10 +625,10 @@ class TestHostnameValidation:
         assert resp.status_code == 201
 
 
-class TestBaseDomainConsistency:
-    """base_domain must match the hostname suffix."""
+class TestBaseDomainAlwaysConfigured:
+    """base_domain is always the configured domain, derived server-side."""
 
-    def _create(self, client, hostname="app.example.com", base_domain="example.com"):
+    def _create(self, client, hostname="app.example.com", base_domain=None):
         body = {
             "name": "App",
             "upstream_container_id": "abc123",
@@ -528,35 +636,34 @@ class TestBaseDomainConsistency:
             "upstream_scheme": "http",
             "upstream_port": 80,
             "hostname": hostname,
-            "base_domain": base_domain,
         }
+        if base_domain is not None:
+            body["base_domain"] = base_domain
         return client.post("/api/services", json=body)
 
-    def test_consistent_base_domain_accepted(self, client):
-        resp = self._create(client, hostname="app.example.com", base_domain="example.com")
+    def test_base_domain_derived_from_configured_domain(self, client):
+        resp = self._create(client, hostname="app.example.com")
         assert resp.status_code == 201
+        assert resp.json()["base_domain"] == "example.com"
 
-    def test_inconsistent_base_domain_rejected(self, client):
-        resp = self._create(client, hostname="app.example.com", base_domain="wrong.com")
-        assert resp.status_code == 422
-        assert "inconsistent" in resp.json()["detail"].lower()
-
-    def test_base_domain_not_suffix_of_hostname_rejected(self, client):
-        resp = self._create(client, hostname="app.example.com", base_domain="ple.com")
-        assert resp.status_code == 422
-
-    def test_deep_hostname_with_matching_subdomain(self, client):
+    def test_client_supplied_base_domain_is_ignored(self, client):
+        # Even a divergent client base_domain cannot override the configured one.
         resp = self._create(client, hostname="a.b.example.com", base_domain="b.example.com")
         assert resp.status_code == 201
+        assert resp.json()["base_domain"] == "example.com"
 
-    def test_deep_hostname_with_root_domain(self, client):
-        """base_domain=example.com is valid for any hostname under it."""
-        resp = self._create(client, hostname="a.b.example.com", base_domain="example.com")
+    def test_hostname_outside_configured_domain_rejected(self, client):
+        resp = self._create(client, hostname="app.wrong.com")
+        assert resp.status_code == 422
+        assert "must end with" in resp.json()["detail"]
+
+    def test_deep_hostname_under_configured_domain_accepted(self, client):
+        resp = self._create(client, hostname="a.b.example.com")
         assert resp.status_code == 201
+        assert resp.json()["base_domain"] == "example.com"
 
-    def test_base_domain_equals_hostname_rejected(self, client):
-        """hostname must be a subdomain of base_domain, not equal to it."""
-        resp = self._create(client, hostname="example.com", base_domain="example.com")
+    def test_hostname_equal_to_configured_domain_rejected(self, client):
+        resp = self._create(client, hostname="example.com")
         assert resp.status_code == 422
 
 
@@ -999,15 +1106,15 @@ class TestHostnameChangeCleanup:
 
     def test_hostname_change_clears_stale_cert_metadata(self, client, db_session):
         """Hostname change should clear expires_at, last_renewed_at, last_failure, next_retry_at."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         cert = Certificate(
             service_id=svc_id,
             hostname="app.example.com",
-            expires_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-            last_renewed_at=datetime(2026, 5, 1, tzinfo=timezone.utc),
+            expires_at=datetime(2026, 8, 1, tzinfo=UTC),
+            last_renewed_at=datetime(2026, 5, 1, tzinfo=UTC),
             last_failure="old error",
-            next_retry_at=datetime(2026, 5, 2, tzinfo=timezone.utc),
+            next_retry_at=datetime(2026, 5, 2, tzinfo=UTC),
         )
         db_session.add(cert)
         db_session.commit()
@@ -1085,12 +1192,11 @@ class TestUnusedImportCleanup:
         for node in ast.walk(tree):
             if isinstance(node, ast.AsyncFunctionDef) and node.name == "update_edge_endpoint":
                 for child in ast.walk(node):
-                    if isinstance(child, ast.ImportFrom):
-                        if child.module and "config" in child.module:
-                            names = [alias.name for alias in child.names]
-                            assert "settings" not in names, \
-                                "app_settings is imported but unused in update_edge_endpoint"
-
+                    if isinstance(child, ast.ImportFrom) and child.module and "config" in child.module:
+                        names = [alias.name for alias in child.names]
+                        assert "settings" not in names, (
+                            "app_settings is imported but unused in update_edge_endpoint"
+                        )
 
 # ---------------------------------------------------------------------------
 # Upstream port revalidation on update
@@ -1512,3 +1618,39 @@ class TestHostnameChangeNoCreds:
         resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
         assert resp.status_code == 200
         assert resp.json()["hostname"] == "new.example.com"
+
+class TestUpdateNameValidation:
+    """update_service should enforce the same name constraints as create."""
+
+    def test_update_empty_name_rejected(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": ""})
+        assert resp.status_code == 422
+
+    def test_update_overlong_name_rejected(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "x" * 129})
+        assert resp.status_code == 422
+
+    def test_update_valid_name_accepted(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "x" * 128})
+        assert resp.status_code == 200
+        assert resp.json()["name"] == "x" * 128
+
+
+class TestUpdateHostnameBaseDomain:
+    """Changing the hostname must keep base_domain a suffix of the hostname."""
+
+    def test_hostname_change_recomputes_base_domain(self, client):
+        svc_id = _create_service(
+            client, name="App", hostname="x.a.example.com", base_domain="a.example.com"
+        ).json()["id"]
+
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "b.example.com"})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["hostname"] == "b.example.com"
+        # base_domain must remain a suffix of the new hostname (create invariant).
+        assert data["hostname"].endswith(f".{data['base_domain']}")
+        assert data["base_domain"] == "example.com"

@@ -173,3 +173,10 @@ class TestEdgeLogsEndpoint:
         mock_logs.assert_called_once()
         call_args = mock_logs.call_args
         assert call_args.kwargs.get("tail") == 50 or (len(call_args) > 1 and call_args[1].get("tail") == 50)
+
+    def test_logs_rejects_invalid_tail(self, client):
+        resp = client.get("/api/services/svc_nonexistent/logs/edge?tail=0")
+        assert resp.status_code == 422
+
+        resp = client.get("/api/services/svc_nonexistent/logs/edge?tail=1001")
+        assert resp.status_code == 422

@@ -2,7 +2,7 @@
 
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import bcrypt
 import jwt
@@ -10,7 +10,7 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.database import get_db
+from app.database import commit_with_lock, db_write_section, get_db
 from app.models.user import User
 
 COOKIE_NAME = "access_token"
@@ -22,9 +22,15 @@ def _get_or_create_salt(db: Session) -> str:
     from app.settings_store import get_setting, set_setting
 
     salt = get_setting(db, SALT_SETTING_KEY)
-    if not salt:
-        salt = secrets.token_urlsafe(32)
-        set_setting(db, SALT_SETTING_KEY, salt)
+    if salt:
+        return salt
+
+    with db_write_section(db):
+        salt = get_setting(db, SALT_SETTING_KEY)
+        if not salt:
+            salt = secrets.token_urlsafe(32)
+            set_setting(db, SALT_SETTING_KEY, salt)
+            commit_with_lock(db)
     return salt
 
 
@@ -39,6 +45,23 @@ def hash_password(plain: str, db: Session) -> str:
     return bcrypt.hashpw(_prehash(salt, plain), bcrypt.gensalt()).decode()
 
 
+_DUMMY_BCRYPT_HASH: str | None = None
+
+
+def dummy_verify_password(plain: str, db: Session) -> None:
+    """Run a bcrypt verification against a throwaway hash, discarding the result.
+
+    Called on the login path when the target user is missing/inactive so the
+    response takes a comparable amount of time to a real password check,
+    preventing username enumeration via the bcrypt timing gap.
+    """
+    global _DUMMY_BCRYPT_HASH
+    if _DUMMY_BCRYPT_HASH is None:
+        _DUMMY_BCRYPT_HASH = bcrypt.hashpw(b"timing-equalizer", bcrypt.gensalt()).decode()
+    salt = _get_or_create_salt(db)
+    bcrypt.checkpw(_prehash(salt, plain), _DUMMY_BCRYPT_HASH.encode())
+
+
 def verify_password(plain: str, hashed: str, db: Session) -> bool:
     """Verify a password against a bcrypt hash."""
     salt = _get_or_create_salt(db)
@@ -47,7 +70,7 @@ def verify_password(plain: str, hashed: str, db: Session) -> bool:
 
 def create_access_token(user_id: str) -> str:
     """Create a JWT token with the user ID as subject."""
-    expire = datetime.now(timezone.utc) + timedelta(hours=settings.jwt_expiry_hours)
+    expire = datetime.now(UTC) + timedelta(hours=settings.jwt_expiry_hours)
     payload = {"sub": user_id, "exp": expire}
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 

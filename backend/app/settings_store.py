@@ -1,4 +1,5 @@
 """Helpers to read/write settings from the settings table."""
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
@@ -29,6 +30,15 @@ def get_setting(db: Session, key: str) -> str:
     if row is not None:
         return row.value
     return DEFAULTS.get(key, "")
+
+def get_positive_int_setting(db: Session, key: str) -> int:
+    """Get a positive integer setting, falling back to the key's default."""
+    fallback = int(DEFAULTS[key])
+    try:
+        value = int(get_setting(db, key))
+    except (TypeError, ValueError):
+        return fallback
+    return value if value > 0 else fallback
 
 
 def set_setting(db: Session, key: str, value: str) -> None:
@@ -67,17 +77,24 @@ def get_runtime_paths(db: Session) -> dict[str, str]:
         "docker_socket": docker or app_settings.docker_socket,
     }
 
-    # Host-side equivalents for Docker bind mounts.
+    # Host-side equivalents for Docker bind mounts. Only paths under DATA_DIR can
+    # be translated into HOST_DATA_DIR; custom absolute paths outside DATA_DIR are
+    # already host-visible only if the operator deliberately mounted them there.
     host_data = app_settings.host_data_dir
-    if host_data is not None:
-        data_dir_str = str(app_settings.data_dir)
-        result["host_generated_dir"] = internal_generated.replace(data_dir_str, str(host_data), 1)
-        result["host_certs_dir"] = internal_certs.replace(data_dir_str, str(host_data), 1)
-        result["host_tailscale_state_dir"] = internal_ts_state.replace(data_dir_str, str(host_data), 1)
-    else:
-        result["host_generated_dir"] = internal_generated
-        result["host_certs_dir"] = internal_certs
-        result["host_tailscale_state_dir"] = internal_ts_state
+
+    def _host_path(path_str: str) -> str:
+        internal_path = Path(path_str).resolve()
+        if host_data is None:
+            return str(internal_path)
+        try:
+            relative = internal_path.relative_to(app_settings.data_dir.resolve())
+        except ValueError:
+            return str(internal_path)
+        return str(Path(host_data) / relative)
+
+    result["host_generated_dir"] = _host_path(internal_generated)
+    result["host_certs_dir"] = _host_path(internal_certs)
+    result["host_tailscale_state_dir"] = _host_path(internal_ts_state)
 
     return result
 

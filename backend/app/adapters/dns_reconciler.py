@@ -18,7 +18,7 @@ from app.adapters.cloudflare_adapter import (
     find_record,
     update_a_record,
 )
-from app.database import flush_with_lock
+from app.database import commit_with_lock, db_write_section, flush_with_lock
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
 
@@ -65,53 +65,58 @@ def reconcile_dns(
     """
     hostname = service.hostname
 
-    # Get or create dns_record entry
-    dns_record = db.get(DnsRecord, service.id)
-    if not dns_record:
-        dns_record = DnsRecord(
-            service_id=service.id,
-            hostname=hostname,
-            record_type="A",
-        )
-        db.add(dns_record)
-        flush_with_lock(db)
-
-    # Check Cloudflare for existing record
+    # Cloudflare I/O is deliberately outside the SQLite write lock.  Only the
+    # local row/event mutations below are serialized.
     existing = find_record(cf_token, zone_id, hostname, "A")
+    action = "noop"
+    record_id = None
+    old_ip = None
 
     if existing is None:
-        # Create new record
         result = create_a_record(cf_token, zone_id, hostname, tailscale_ip)
-        dns_record.record_id = result.get("id")
-        dns_record.value = tailscale_ip
-        _emit_event(
-            db, service.id, "dns_created", "info",
-            f"Created DNS A record {hostname} -> {tailscale_ip}",
-            details={"hostname": hostname, "ip": tailscale_ip, "record_id": dns_record.record_id},
-        )
-        logger.info("Created DNS record for %s -> %s", hostname, tailscale_ip)
-
+        record_id = result.get("id")
+        action = "created"
     elif existing.get("content") != tailscale_ip:
-        # Update existing record with new IP
         record_id = existing["id"]
         old_ip = existing.get("content")
         update_a_record(cf_token, zone_id, record_id, tailscale_ip)
+        action = "updated"
+    else:
+        record_id = existing["id"]
+
+    with db_write_section(db):
+        dns_record = db.get(DnsRecord, service.id)
+        if not dns_record:
+            dns_record = DnsRecord(
+                service_id=service.id,
+                hostname=hostname,
+                record_type="A",
+            )
+            db.add(dns_record)
+            flush_with_lock(db)
+
         dns_record.record_id = record_id
         dns_record.value = tailscale_ip
-        _emit_event(
-            db, service.id, "dns_updated", "info",
-            f"Updated DNS A record {hostname}: {old_ip} -> {tailscale_ip}",
-            details={"hostname": hostname, "old_ip": old_ip, "new_ip": tailscale_ip, "record_id": record_id},
-        )
-        logger.info("Updated DNS record for %s: %s -> %s", hostname, old_ip, tailscale_ip)
 
-    else:
-        # Record exists and matches — no-op
-        dns_record.record_id = existing["id"]
-        dns_record.value = tailscale_ip
-        logger.debug("DNS record for %s already correct (%s)", hostname, tailscale_ip)
+        if action == "created":
+            _emit_event(
+                db, service.id, "dns_created", "info",
+                f"Created DNS A record {hostname} -> {tailscale_ip}",
+                details={"hostname": hostname, "ip": tailscale_ip, "record_id": record_id},
+            )
+            logger.info("Created DNS record for %s -> %s", hostname, tailscale_ip)
+        elif action == "updated":
+            _emit_event(
+                db, service.id, "dns_updated", "info",
+                f"Updated DNS A record {hostname}: {old_ip} -> {tailscale_ip}",
+                details={"hostname": hostname, "old_ip": old_ip, "new_ip": tailscale_ip, "record_id": record_id},
+            )
+            logger.info("Updated DNS record for %s: %s -> %s", hostname, old_ip, tailscale_ip)
+        else:
+            logger.debug("DNS record for %s already correct (%s)", hostname, tailscale_ip)
+        commit_with_lock(db)
 
-    return dns_record
+        return dns_record
 
 
 def detect_dns_drift(
@@ -166,25 +171,34 @@ def cleanup_dns_record(
     if not dns_record or not dns_record.record_id:
         return {"deleted_remote": False, "deleted_local": False, "error": None}
 
+    record_id = dns_record.record_id
     try:
-        delete_a_record(cf_token, zone_id, dns_record.record_id)
-        _emit_event(
-            db, service.id, "dns_removed", "info",
-            f"Removed DNS record for {service.hostname}",
-            details={"hostname": service.hostname, "record_id": dns_record.record_id},
-        )
+        delete_a_record(cf_token, zone_id, record_id)
+        deleted_local = False
+        with db_write_section(db):
+            current = db.get(DnsRecord, service.id)
+            _emit_event(
+                db, service.id, "dns_removed", "info",
+                f"Removed DNS record for {service.hostname}",
+                details={"hostname": service.hostname, "record_id": record_id},
+            )
+            if current and current.record_id == record_id:
+                db.delete(current)
+                deleted_local = True
+            commit_with_lock(db)
         logger.info("Deleted DNS record for %s", service.hostname)
-        db.delete(dns_record)
-        return {"deleted_remote": True, "deleted_local": True, "error": None}
+        return {"deleted_remote": True, "deleted_local": deleted_local, "error": None}
     except Exception as exc:
         error_msg = str(exc)
         logger.warning(
             "Failed to delete DNS record %s from Cloudflare: %s",
-            dns_record.record_id, error_msg, exc_info=True,
+            record_id, error_msg, exc_info=True,
         )
-        _emit_event(
-            db, service.id, "dns_cleanup_failed", "warning",
-            f"Failed to remove DNS record for {service.hostname} from Cloudflare: {error_msg}",
-            details={"hostname": service.hostname, "record_id": dns_record.record_id, "error": error_msg},
-        )
+        with db_write_section(db):
+            _emit_event(
+                db, service.id, "dns_cleanup_failed", "warning",
+                f"Failed to remove DNS record for {service.hostname} from Cloudflare: {error_msg}",
+                details={"hostname": service.hostname, "record_id": record_id, "error": error_msg},
+            )
+            commit_with_lock(db)
         return {"deleted_remote": False, "deleted_local": False, "error": error_msg}

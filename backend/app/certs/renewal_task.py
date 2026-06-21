@@ -9,18 +9,24 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.orm import Session
 
 from app.certs.cert_manager import get_cert_expiry, issue_cert, renew_cert
-from app.database import SessionLocal, commit_with_lock, flush_with_lock
+from app.database import (
+    SessionLocal,
+    commit_with_lock,
+    db_write_section,
+    flush_with_lock,
+    rollback_with_lock,
+)
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
 from app.secrets import CLOUDFLARE_TOKEN, read_secret
-from app.settings_store import get_setting
+from app.settings_store import get_positive_int_setting, get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -54,13 +60,34 @@ def _get_certs_root(db: Session) -> Path:
 
 def process_service_cert(db: Session, svc: Service) -> None:
     """Check and issue/renew cert for a single service."""
+    from app.reconciler.reconciler import _RECONCILE_MUTEX
+
+    # Certificate issuance/renewal reads service identity, performs filesystem
+    # and lego/Cloudflare I/O, then persists Certificate/Event rows tied to the
+    # service.  Serialize it with reconcile/delete so a concurrent delete cannot
+    # cascade the service-owned rows while this function continues with stale
+    # ORM objects after network I/O.
+    with _RECONCILE_MUTEX:
+        _process_service_cert_locked(db, svc)
+
+
+def _process_service_cert_locked(db: Session, svc: Service) -> None:
+    fresh = db.get(Service, svc.id, populate_existing=True)
+    if fresh is None:
+        logger.info("Skipping cert processing for deleted service %s", svc.id)
+        return
+    if not fresh.enabled:
+        logger.info("Skipping cert processing for disabled service %s", svc.id)
+        return
+    svc = fresh
+
     cf_token = read_secret(CLOUDFLARE_TOKEN)
     if not cf_token:
         logger.warning("Cloudflare token not configured, skipping cert for %s", svc.hostname)
         return
 
     acme_email = get_setting(db, "acme_email")
-    renewal_window = int(get_setting(db, "cert_renewal_window_days") or "30")
+    renewal_window = get_positive_int_setting(db, "cert_renewal_window_days")
 
     certs_root = _get_certs_root(db)
     cert_dir = certs_root / svc.hostname
@@ -69,16 +96,19 @@ def process_service_cert(db: Session, svc: Service) -> None:
 
     cert_record = db.get(Certificate, svc.id)
     if not cert_record:
-        cert_record = Certificate(service_id=svc.id, hostname=svc.hostname)
-        db.add(cert_record)
-        flush_with_lock(db)
-        commit_with_lock(db)
+        with db_write_section(db):
+            cert_record = db.get(Certificate, svc.id)
+            if not cert_record:
+                cert_record = Certificate(service_id=svc.id, hostname=svc.hostname)
+                db.add(cert_record)
+                flush_with_lock(db)
+                commit_with_lock(db)
     # Check if we should skip due to recent failure
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if cert_record.next_retry_at:
         retry_at = cert_record.next_retry_at
         if retry_at.tzinfo is None:
-            retry_at = retry_at.replace(tzinfo=timezone.utc)
+            retry_at = retry_at.replace(tzinfo=UTC)
         if now < retry_at:
             logger.info(
                 "Skipping %s: next cert retry at %s", svc.hostname, cert_record.next_retry_at
@@ -91,54 +121,61 @@ def process_service_cert(db: Session, svc: Service) -> None:
     needs_renew = False
 
     if current_expiry is not None:
-        expiry_utc = current_expiry if current_expiry.tzinfo else current_expiry.replace(tzinfo=timezone.utc)
+        expiry_utc = current_expiry if current_expiry.tzinfo else current_expiry.replace(tzinfo=UTC)
         if expiry_utc - now <= timedelta(days=renewal_window):
             needs_renew = True
 
     if not needs_issue and not needs_renew:
-        cert_record.expires_at = current_expiry
-        cert_record.last_failure = None
-        commit_with_lock(db)
+        with db_write_section(db):
+            cert_record.expires_at = current_expiry
+            cert_record.last_failure = None
+            commit_with_lock(db)
         return
 
     try:
         if needs_issue:
             logger.info("Issuing cert for %s", svc.hostname)
             issue_cert(svc.hostname, acme_email, cf_token, cert_dir, lego_dir)
-            _emit_event(
-                db, svc.id, "cert_issued", "info",
-                f"Certificate issued for {svc.hostname}",
-            )
+            event_kind = "cert_issued"
+            event_message = f"Certificate issued for {svc.hostname}"
         else:
             logger.info("Renewing cert for %s", svc.hostname)
             renew_cert(
                 svc.hostname, acme_email, cf_token, cert_dir, lego_dir,
                 days=renewal_window,
             )
-            _emit_event(
-                db, svc.id, "cert_renewed", "info",
-                f"Certificate renewed for {svc.hostname}",
-            )
+            event_kind = "cert_renewed"
+            event_message = f"Certificate renewed for {svc.hostname}"
 
         new_expiry = get_cert_expiry(cert_dir / "fullchain.pem")
-        cert_record.expires_at = new_expiry
-        cert_record.last_renewed_at = now
-        cert_record.last_failure = None
-        cert_record.next_retry_at = None
-        commit_with_lock(db)
+        if new_expiry is None:
+            raise RuntimeError(
+                f"Certificate operation for {svc.hostname} completed but produced an unreadable certificate"
+            )
+        with db_write_section(db):
+            cert_record.expires_at = new_expiry
+            cert_record.last_renewed_at = now
+            cert_record.last_failure = None
+            cert_record.next_retry_at = None
+            _emit_event(
+                db, svc.id, event_kind, "info",
+                event_message,
+            )
+            commit_with_lock(db)
 
     except Exception as e:
         error_msg = str(e)[:500]
         logger.error("Cert operation failed for %s: %s", svc.hostname, error_msg)
 
-        cert_record.last_failure = error_msg
-        cert_record.next_retry_at = now + timedelta(hours=RETRY_INTERVAL_HOURS)
+        with db_write_section(db):
+            cert_record.last_failure = error_msg
+            cert_record.next_retry_at = now + timedelta(hours=RETRY_INTERVAL_HOURS)
 
-        _emit_event(
-            db, svc.id, "cert_failed", "error",
-            f"Certificate operation failed for {svc.hostname}: {error_msg}",
-        )
-        commit_with_lock(db)
+            _emit_event(
+                db, svc.id, "cert_failed", "error",
+                f"Certificate operation failed for {svc.hostname}: {error_msg}",
+            )
+            commit_with_lock(db)
 
 
 def run_renewal_scan() -> int:
@@ -155,7 +192,7 @@ def run_renewal_scan() -> int:
                 process_service_cert(db, svc)
                 processed += 1
             except Exception:
-                db.rollback()
+                rollback_with_lock(db)
                 logger.exception("Unexpected error processing cert for %s", svc.hostname)
         return processed
     finally:

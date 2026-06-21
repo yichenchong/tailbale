@@ -94,6 +94,7 @@ describe("Discover page", () => {
       }],
       [
         { upstream_container_id: "c1", name: "Nextcloud Web", hostname: "nc.example.com", status: { phase: "healthy" } },
+        { upstream_container_id: "c1", name: "Nextcloud Setup", hostname: "setup.example.com", status: { phase: "pending" } },
       ],
     ))
     const { default: Discover } = await import("@/pages/Discover")
@@ -103,7 +104,7 @@ describe("Discover page", () => {
       </MemoryRouter>
     )
     await waitFor(() => {
-      expect(screen.getByText("1 svc")).toBeInTheDocument()
+      expect(screen.getByText("2 svc")).toBeInTheDocument()
     })
   })
 
@@ -174,6 +175,41 @@ describe("Discover page", () => {
 
     await waitFor(() => {
       expect(fetchMock.mock.calls.length).toBeGreaterThan(initialCallCount)
+    })
+  })
+
+  it("does not apply typed search to refresh until Search is submitted", async () => {
+    const fetchMock = mockFetchResponses([], [])
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Discover } = await import("@/pages/Discover")
+    render(
+      <MemoryRouter>
+        <Discover />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText("Search by name or image..."), { target: { value: "nextcloud" } })
+    fireEvent.click(screen.getByText("Refresh"))
+
+    await waitFor(() => {
+      expect(fetchMock.mock.calls.length).toBeGreaterThanOrEqual(4)
+    })
+    const discoveryUrls = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes("/api/discovery/containers"))
+    expect(discoveryUrls[discoveryUrls.length - 1]).not.toContain("search=nextcloud")
+
+    fireEvent.click(screen.getByText("Search"))
+
+    await waitFor(() => {
+      const discoveryUrlsAfterSearch = fetchMock.mock.calls
+        .map((call) => String(call[0]))
+        .filter((url) => url.includes("/api/discovery/containers"))
+      const latestDiscoveryUrl = discoveryUrlsAfterSearch[discoveryUrlsAfterSearch.length - 1]
+      expect(latestDiscoveryUrl).toContain("search=nextcloud")
     })
   })
 })

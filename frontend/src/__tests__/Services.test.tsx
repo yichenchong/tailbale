@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor } from "@testing-library/react"
+import { fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 const mockServiceData = {
@@ -66,6 +66,24 @@ describe("Services page", () => {
     })
   })
 
+  it("shows a load error instead of an empty state when services fail", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: () => Promise.resolve({ detail: "database unavailable" }),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    render(
+      <MemoryRouter>
+        <Services />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Unable to load services: database unavailable")).toBeInTheDocument()
+    })
+    expect(screen.queryByText("No services exposed yet.")).not.toBeInTheDocument()
+  })
+
   it("renders service list with data", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
       ok: true,
@@ -130,6 +148,67 @@ describe("Services page", () => {
     )
     await waitFor(() => {
       expect(screen.getByLabelText("Actions")).toBeInTheDocument()
+    })
+  })
+
+  it("hides edge actions for disabled services", async () => {
+    const disabledData = {
+      ...mockServiceData,
+      services: [
+        {
+          ...mockServiceData.services[0],
+          enabled: false,
+          status: { ...mockServiceData.services[0].status, phase: "disabled" },
+        },
+      ],
+    }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(disabledData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    render(
+      <MemoryRouter>
+        <Services />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByLabelText("Actions")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByLabelText("Actions"))
+
+    expect(screen.queryByText("Reload Caddy")).not.toBeInTheDocument()
+    expect(screen.queryByText("Restart Edge")).not.toBeInTheDocument()
+    expect(screen.queryByText("Recreate Edge")).not.toBeInTheDocument()
+    expect(screen.getByText("Enable")).toBeInTheDocument()
+  })
+
+  it("encodes service ids when running row actions", async () => {
+    const data = {
+      ...mockServiceData,
+      services: [{ ...mockServiceData.services[0], id: "svc abc" }],
+    }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(init?.method === "POST" ? { success: true } : data),
+    }))
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Services } = await import("@/pages/Services")
+    render(
+      <MemoryRouter>
+        <Services />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByLabelText("Actions")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByLabelText("Actions"))
+    fireEvent.click(screen.getByText("Reload Caddy"))
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith("/api/services/svc%20abc/reload", expect.objectContaining({ method: "POST" }))
     })
   })
 

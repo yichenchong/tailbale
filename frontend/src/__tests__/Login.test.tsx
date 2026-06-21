@@ -25,6 +25,20 @@ describe("Login page", () => {
     expect(screen.getByText("Sign In")).toBeInTheDocument()
   })
 
+  it("sets the login favicon to an existing bundled asset", async () => {
+    const { default: Login } = await import("@/pages/Login")
+    render(
+      <MemoryRouter>
+        <Login />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      const icon = document.querySelector<HTMLLinkElement>("link[rel='icon']")
+      expect(icon?.href).toMatch(/\/favicon-healthy\.svg$/)
+    })
+  })
+
   it("disables button when fields empty", async () => {
     const { default: Login } = await import("@/pages/Login")
     render(

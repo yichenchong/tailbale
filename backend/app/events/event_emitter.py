@@ -26,7 +26,7 @@ def emit_event(
         kind=kind,
         level=level,
         message=message,
-        details=json.dumps(details) if details else None,
+        details=json.dumps(details) if details is not None else None,
     )
     db.add(event)
     return event

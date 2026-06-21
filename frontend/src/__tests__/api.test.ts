@@ -57,6 +57,33 @@ describe("api client", () => {
     await expect(api.get("/bad")).rejects.toThrow("Validation error")
   })
 
+  it("formats FastAPI validation detail arrays", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: () => Promise.resolve({
+        detail: [
+          { loc: ["query", "limit"], msg: "Input should be greater than or equal to 1" },
+          { loc: ["query", "offset"], msg: "Input should be greater than or equal to 0" },
+        ],
+      }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow(
+      "Input should be greater than or equal to 1; Input should be greater than or equal to 0"
+    )
+  })
+
+  it("formats object error details", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: { message: "Could not read logs" } }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("Could not read logs")
+  })
+
   it("throws generic message when response has no detail", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,

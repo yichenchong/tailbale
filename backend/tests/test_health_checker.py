@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import docker.errors
+import pytest
 
 from app.health.health_checker import aggregate_status, run_health_checks
 from app.models.dns_record import DnsRecord
@@ -51,7 +52,7 @@ class TestAggregateStatus:
             "tailscale_ready": True, "tailscale_ip_present": True,
             "cert_present": True, "cert_not_expiring": True,
             "dns_record_present": True, "dns_matches_ip": True,
-            "caddy_config_present": True,
+            "caddy_config_present": True, "https_probe_ok": True,
         }
         assert aggregate_status(checks) == "healthy"
 
@@ -61,8 +62,10 @@ class TestAggregateStatus:
 
     def test_warning_check_fails(self):
         checks = {
+            "upstream_container_present": True, "upstream_network_connected": True,
             "edge_container_present": True, "edge_container_running": True,
-            "tailscale_ip_present": True, "cert_present": True,
+            "tailscale_ready": True, "tailscale_ip_present": True,
+            "cert_present": True, "caddy_config_present": True,
             "cert_not_expiring": False,
         }
         assert aggregate_status(checks) == "warning"
@@ -74,6 +77,50 @@ class TestAggregateStatus:
             "cert_present": True, "cert_not_expiring": False,
         }
         assert aggregate_status(checks) == "error"
+
+    @pytest.mark.parametrize(
+        "failed_check",
+        [
+            "upstream_container_present",
+            "upstream_network_connected",
+            "tailscale_ready",
+            "caddy_config_present",
+        ],
+    )
+    def test_operational_failures_are_errors(self, failed_check):
+        checks = {
+            "upstream_container_present": True,
+            "upstream_network_connected": True,
+            "edge_container_present": True,
+            "edge_container_running": True,
+            "tailscale_ready": True,
+            "tailscale_ip_present": True,
+            "cert_present": True,
+            "caddy_config_present": True,
+            "cert_not_expiring": True,
+            "dns_record_present": True,
+            "dns_matches_ip": True,
+            "https_probe_ok": True,
+        }
+        checks[failed_check] = False
+        assert aggregate_status(checks) == "error"
+
+    def test_dns_record_absent_is_warning(self):
+        checks = {
+            "upstream_container_present": True,
+            "upstream_network_connected": True,
+            "edge_container_present": True,
+            "edge_container_running": True,
+            "tailscale_ready": True,
+            "tailscale_ip_present": True,
+            "cert_present": True,
+            "caddy_config_present": True,
+            "cert_not_expiring": True,
+            "dns_record_present": False,
+            "dns_matches_ip": True,
+            "https_probe_ok": True,
+        }
+        assert aggregate_status(checks) == "warning"
 
     def test_empty_checks_healthy(self):
         assert aggregate_status({}) == "healthy"
@@ -179,6 +226,39 @@ class TestRunHealthChecks:
         assert checks["tailscale_ready"] is False
         assert checks["tailscale_ip_present"] is False
 
+    @patch("app.health.health_checker._get_docker_client")
+    def test_edge_name_conflict_with_other_service_is_not_healthy(
+        self, mock_docker, db_session, tmp_data_dir
+    ):
+        svc = _create_service(db_session)
+        client = mock_docker.return_value
+
+        upstream = MagicMock()
+        upstream.attrs = {"NetworkSettings": {"Networks": {}}}
+        wrong_edge = MagicMock()
+        wrong_edge.status = "running"
+        wrong_edge.labels = {"tailbale.service_id": "other"}
+
+        def get_container(name):
+            if name == svc.upstream_container_id:
+                return upstream
+            if name == svc.edge_container_name:
+                return wrong_edge
+            raise Exception("not found")
+
+        client.containers.get.side_effect = get_container
+        client.containers.list.return_value = []
+
+        checks = run_health_checks(
+            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
+        )
+
+        assert checks["edge_container_present"] is False
+        assert checks["edge_container_running"] is False
+        assert checks["tailscale_ready"] is False
+        assert wrong_edge.exec_run.call_count == 0
+
+
     def test_docker_unavailable(self, db_session, tmp_data_dir):
         svc = _create_service(db_session)
 
@@ -211,6 +291,171 @@ class TestRunHealthChecks:
             db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
         )
         assert checks["caddy_config_present"] is False
+
+    @patch("app.health.health_checker._check_https_probe", return_value=True)
+    @patch("app.health.health_checker._check_caddy_config", return_value=True)
+    @patch("app.health.health_checker._check_cert_not_expiring", return_value=True)
+    @patch("app.health.health_checker._check_cert_present", return_value=True)
+    @patch("app.health.health_checker._check_tailscale", return_value=(True, True, "100.64.0.1"))
+    @patch("app.health.health_checker._check_edge", return_value=(True, True))
+    @patch("app.health.health_checker._check_upstream_network", return_value=True)
+    @patch("app.health.health_checker._check_upstream_present", return_value=True)
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.health.health_checker._get_docker_client")
+    def test_live_cloudflare_drift_overrides_db_dns_match(
+        self,
+        mock_docker,
+        mock_find_record,
+        _mock_upstream_present,
+        _mock_upstream_network,
+        _mock_edge,
+        _mock_tailscale,
+        _mock_cert_present,
+        _mock_cert_not_expiring,
+        _mock_caddy,
+        _mock_https_probe,
+        db_session,
+        tmp_data_dir,
+    ):
+        from app.secrets import CLOUDFLARE_TOKEN, write_secret
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.tailscale_ip = "100.64.0.1"
+        db_session.add(DnsRecord(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            record_id="r1",
+            value="100.64.0.1",
+        ))
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+        write_secret(CLOUDFLARE_TOKEN, "cf-token")
+        mock_find_record.return_value = {"content": "100.64.0.99"}
+
+        checks = run_health_checks(
+            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs", live_dns=True
+        )
+
+        assert checks["dns_record_present"] is True
+        assert checks["dns_matches_ip"] is False
+        mock_find_record.assert_called_once_with("cf-token", "zone123", svc.hostname, "A")
+
+    @patch("app.health.health_checker._check_https_probe", return_value=True)
+    @patch("app.health.health_checker._check_caddy_config", return_value=True)
+    @patch("app.health.health_checker._check_cert_not_expiring", return_value=True)
+    @patch("app.health.health_checker._check_cert_present", return_value=True)
+    @patch("app.health.health_checker._check_tailscale", return_value=(True, True, "100.64.0.1"))
+    @patch("app.health.health_checker._check_edge", return_value=(True, True))
+    @patch("app.health.health_checker._check_upstream_network", return_value=True)
+    @patch("app.health.health_checker._check_upstream_present", return_value=True)
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.health.health_checker._get_docker_client")
+    def test_automatic_health_does_not_call_cloudflare(
+        self,
+        mock_docker,
+        mock_find_record,
+        _mock_upstream_present,
+        _mock_upstream_network,
+        _mock_edge,
+        _mock_tailscale,
+        _mock_cert_present,
+        _mock_cert_not_expiring,
+        _mock_caddy,
+        _mock_https_probe,
+        db_session,
+        tmp_data_dir,
+    ):
+        from app.secrets import CLOUDFLARE_TOKEN, write_secret
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.tailscale_ip = "100.64.0.1"
+        db_session.add(DnsRecord(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            record_id="r1",
+            value="100.64.0.1",
+        ))
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+        write_secret(CLOUDFLARE_TOKEN, "cf-token")
+
+        checks = run_health_checks(
+            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
+        )
+
+        assert checks["dns_matches_ip"] is True
+        mock_find_record.assert_not_called()
+
+    def test_live_tailscale_ip_overrides_stored_status_for_dns_and_probe(
+        self, db_session, tmp_data_dir
+    ):
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.tailscale_ip = "100.64.0.1"
+        db_session.add(DnsRecord(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            record_id="r1",
+            value="100.64.0.99",
+        ))
+        db_session.commit()
+
+        with (
+            patch("app.health.health_checker._get_docker_client", return_value=MagicMock()),
+            patch("app.health.health_checker._check_upstream_present", return_value=True),
+            patch("app.health.health_checker._check_upstream_network", return_value=True),
+            patch("app.health.health_checker._check_edge", return_value=(True, True)),
+            patch("app.health.health_checker._check_tailscale", return_value=(True, True, "100.64.0.99")),
+            patch("app.health.health_checker._check_cert_present", return_value=True),
+            patch("app.health.health_checker._check_cert_not_expiring", return_value=True),
+            patch("app.health.health_checker._check_caddy_config", return_value=True),
+            patch("app.health.health_checker._check_https_probe", return_value=True) as mock_probe,
+        ):
+            checks = run_health_checks(
+                db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
+            )
+
+        assert checks["dns_matches_ip"] is True
+        mock_probe.assert_called_once()
+        assert mock_probe.call_args.args[1] == "100.64.0.99"
+
+    def test_missing_live_tailscale_ip_ignores_stale_status_ip(
+        self, db_session, tmp_data_dir
+    ):
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.tailscale_ip = "100.64.0.1"
+        db_session.add(DnsRecord(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            record_id="r1",
+            value="100.64.0.1",
+        ))
+        db_session.commit()
+
+        with (
+            patch("app.health.health_checker._get_docker_client", return_value=MagicMock()),
+            patch("app.health.health_checker._check_upstream_present", return_value=True),
+            patch("app.health.health_checker._check_upstream_network", return_value=True),
+            patch("app.health.health_checker._check_edge", return_value=(True, True)),
+            patch("app.health.health_checker._check_tailscale", return_value=(False, False, None)),
+            patch("app.health.health_checker._check_cert_present", return_value=True),
+            patch("app.health.health_checker._check_cert_not_expiring", return_value=True),
+            patch("app.health.health_checker._check_caddy_config", return_value=True),
+            patch("app.health.health_checker._check_https_probe", return_value=False) as mock_probe,
+        ):
+            checks = run_health_checks(
+                db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
+            )
+
+        assert checks["tailscale_ip_present"] is False
+        assert checks["dns_matches_ip"] is False
+        mock_probe.assert_called_once()
+        assert mock_probe.call_args.args[1] is None
 
 
 # ---------------------------------------------------------------------------
@@ -350,6 +595,30 @@ class TestHttpsProbeHealthCheck:
         assert "curl" in cmd
         assert "https://localhost:443/" in cmd
         assert "tls.example.com" in " ".join(cmd)
+
+    def test_https_probe_uses_configured_healthcheck_path(self):
+        """Probe targets the service healthcheck path when one is configured."""
+        from app.health.health_checker import _check_https_probe
+
+        svc = Service(
+            name="Test", upstream_container_id="c1",
+            upstream_container_name="t", upstream_scheme="http",
+            upstream_port=80, hostname="tls.example.com",
+            base_domain="example.com", edge_container_name="edge_tls",
+            network_name="n", ts_hostname="ts",
+            healthcheck_path="readyz",
+        )
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = (0, b"200")
+        mock_client.containers.get.return_value = mock_container
+
+        _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
+
+        cmd = mock_container.exec_run.call_args[0][0]
+        assert "https://localhost:443/readyz" in cmd
 
     def test_https_probe_5xx_is_failure(self, caplog):
         """curl returning a 5xx status code means the upstream is broken."""

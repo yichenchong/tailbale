@@ -9,11 +9,11 @@ from sqlalchemy import create_engine, event
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
+from app.database import Base
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler.reconciler import reconcile_service
-from app.database import Base
 
 
 def _create_service(db, **overrides):
@@ -96,6 +96,70 @@ class TestReconcileService:
         events = db_session.query(Event).filter(Event.kind == "reconcile_completed").all()
         assert len(events) == 1
 
+    def test_probe_retry_not_scheduled_when_critical_health_check_fails(
+        self, db_session, tmp_data_dir
+    ):
+        svc = _create_service(db_session)
+        edge = MagicMock()
+        edge.id = "edge_id"
+        edge.status = "running"
+        checks = {
+            "upstream_container_present": False,
+            "upstream_network_connected": True,
+            "edge_container_present": True,
+            "edge_container_running": True,
+            "tailscale_ready": True,
+            "tailscale_ip_present": True,
+            "cert_present": True,
+            "caddy_config_present": True,
+            "cert_not_expiring": True,
+            "dns_record_present": True,
+            "dns_matches_ip": True,
+            "https_probe_ok": False,
+        }
+
+        with (
+            patch(_P_SECRET, return_value="ts-key"),
+            patch(_P_RENDER, return_value="caddyfile content"),
+            patch(_P_WRITE),
+            patch(_P_CERT),
+            patch(_P_NETWORK),
+            patch(_P_CREATE_EDGE),
+            patch(_P_FIND_EDGE, return_value=edge),
+            patch(_P_START),
+            patch(_P_TS_IP, return_value="100.64.0.1"),
+            patch(_P_RELOAD),
+            patch(_P_AGGREGATE, return_value="error"),
+            patch(_P_HEALTH, return_value=checks),
+            patch("app.reconciler.probe_retry.schedule_probe_retry") as mock_schedule,
+        ):
+            result = reconcile_service(db_session, svc)
+
+        assert result["phase"] == "error"
+        mock_schedule.assert_not_called()
+
+    @patch(_P_NETWORK)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_DNS)
+    @patch(_P_SECRET)
+    def test_disabled_service_is_not_converged(
+        self, mock_secret, mock_dns, mock_create_edge, mock_network,
+        db_session, tmp_data_dir,
+    ):
+        """A disabled service must never be brought back online by reconcile
+        (manual trigger or sweep TOCTOU): no edge/network/DNS work, phase stays
+        disabled."""
+        mock_secret.return_value = "ts-key"
+        svc = _create_service(db_session, enabled=False)
+
+        result = reconcile_service(db_session, svc)
+
+        assert result["phase"] == "disabled"
+        mock_network.assert_not_called()
+        mock_create_edge.assert_not_called()
+        mock_dns.assert_not_called()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.phase == "disabled"
 
     @patch(_P_HEALTH)
     @patch(_P_AGGREGATE)
@@ -264,6 +328,90 @@ class TestReconcileService:
             mock_reload.assert_not_called()
             assert result["caddy_reloaded"] is False
 
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK)
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_naive_expiring_cert_timestamp_triggers_renewal(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        from datetime import datetime, timedelta
+
+        svc = _create_service(db_session)
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "config"
+        edge = MagicMock()
+        edge.id = "edge_id"
+        edge.status = "running"
+        mock_find_edge.return_value = edge
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {}
+        mock_aggregate.return_value = "healthy"
+
+        cert_dir = Path(tmp_data_dir) / "certs" / svc.hostname
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_text("cert")
+
+        with patch(
+            "app.certs.cert_manager.get_cert_expiry",
+            return_value=datetime.now() + timedelta(days=10),
+        ):
+            result = reconcile_service(db_session, svc)
+
+        assert result["phase"] == "healthy"
+        mock_cert.assert_called_once()
+
+
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK)
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_unparseable_existing_cert_triggers_renewal(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        svc = _create_service(db_session)
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "config"
+        edge = MagicMock()
+        edge.id = "edge_id"
+        edge.status = "running"
+        mock_find_edge.return_value = edge
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {}
+        mock_aggregate.return_value = "healthy"
+
+        cert_dir = Path(tmp_data_dir) / "certs" / svc.hostname
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_text("not a cert")
+
+        with patch("app.certs.cert_manager.get_cert_expiry", return_value=None):
+            result = reconcile_service(db_session, svc)
+
+        assert result["phase"] == "healthy"
+        mock_cert.assert_called_once()
+
     @patch(_P_NETWORK)
     @patch(_P_SECRET)
     def test_handles_network_failure(self, mock_secret, mock_network, db_session, tmp_data_dir):
@@ -316,6 +464,43 @@ class TestReconcileService:
 
         # Should still complete despite DNS failure
         assert result["phase"] == "healthy"
+
+
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK)
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_caddy_reload_failure_marks_reconcile_failed(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        svc = _create_service(db_session)
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "changed config"
+        edge = MagicMock()
+        edge.id = "e1"
+        edge.status = "running"
+        mock_find_edge.return_value = edge
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_reload.side_effect = RuntimeError("invalid caddy config")
+
+        result = reconcile_service(db_session, svc)
+
+        assert result["phase"] == "failed"
+        assert "Caddy reload failed" in result["error"]
+        mock_health.assert_not_called()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.phase == "failed"
 
     @patch(_P_SECRET)
     def test_marks_service_failed_after_locked_status_update(self, mock_secret, db_session, tmp_data_dir):
@@ -448,5 +633,122 @@ class TestReconcileService:
 
         assert errors == []
         assert len(results) == 2
-        assert max_active_calls == 2
+        assert max_active_calls == 1
         assert all(result["phase"] == "healthy" for result in results)
+
+
+class TestProbeRetryScheduling:
+    def test_deduplicates_active_retry_thread(self):
+        from app.reconciler import probe_retry
+
+        probe_retry._ACTIVE_RETRIES.clear()
+        try:
+            with patch.object(probe_retry.threading, "Thread") as mock_thread:
+                probe_retry.schedule_probe_retry("svc_123")
+                probe_retry.schedule_probe_retry("svc_123")
+
+            mock_thread.assert_called_once()
+            mock_thread.return_value.start.assert_called_once()
+        finally:
+            probe_retry._ACTIVE_RETRIES.clear()
+
+    def test_probe_retry_does_not_overwrite_status_changed_during_probe(self, db_session):
+        import app.database as database_module
+        from app.reconciler import probe_retry
+
+        svc = _create_service(db_session)
+        TestSession = sessionmaker(bind=db_session.get_bind())
+
+        def change_status_during_probe(*args, **kwargs):
+            other_db = TestSession()
+            try:
+                status = other_db.get(ServiceStatus, svc.id)
+                status.message = "reconcile in progress"
+                other_db.commit()
+            finally:
+                other_db.close()
+            return {"https_probe_ok": True}
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry, "MAX_RETRIES", 1),
+            patch.object(probe_retry, "_compute_delay", return_value=0),
+            patch.object(probe_retry.time, "sleep"),
+            patch("app.settings_store.get_runtime_paths", return_value={
+                "generated_dir": "/tmp/generated",
+                "certs_dir": "/tmp/certs",
+            }),
+            patch("app.health.health_checker.run_health_checks", side_effect=change_status_during_probe),
+            patch("app.health.health_checker.aggregate_status", return_value="healthy"),
+        ):
+            probe_retry._probe_retry_loop(svc.id, None)
+
+        db_session.expire_all()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.phase == "pending"
+        assert status.message == "reconcile in progress"
+
+    def test_probe_retry_stops_before_sleep_for_disabled_service(self, db_session):
+        from datetime import UTC, datetime, timedelta
+
+        import app.database as database_module
+        from app.reconciler import probe_retry
+
+        svc = _create_service(db_session, enabled=False)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.probe_retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        status.probe_retry_attempt = 3
+        db_session.commit()
+        TestSession = sessionmaker(bind=db_session.get_bind())
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry.time, "sleep") as mock_sleep,
+        ):
+            probe_retry._probe_retry_loop(svc.id, None)
+
+        mock_sleep.assert_not_called()
+        db_session.expire_all()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.probe_retry_at is None
+        assert status.probe_retry_attempt is None
+
+    def test_probe_retry_stops_before_sleep_when_already_healthy(self, db_session):
+        from datetime import UTC, datetime, timedelta
+
+        import app.database as database_module
+        from app.reconciler import probe_retry
+
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.phase = "healthy"
+        status.probe_retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        status.probe_retry_attempt = 3
+        db_session.commit()
+        TestSession = sessionmaker(bind=db_session.get_bind())
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry.time, "sleep") as mock_sleep,
+        ):
+            probe_retry._probe_retry_loop(svc.id, None)
+
+        mock_sleep.assert_not_called()
+        db_session.expire_all()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.probe_retry_at is None
+        assert status.probe_retry_attempt is None
+
+    def test_allows_retry_thread_when_socket_path_changes(self):
+        from app.reconciler import probe_retry
+
+        probe_retry._ACTIVE_RETRIES.clear()
+        try:
+            with patch.object(probe_retry.threading, "Thread") as mock_thread:
+                probe_retry.schedule_probe_retry("svc_123", "unix:///old.sock")
+                probe_retry.schedule_probe_retry("svc_123", "unix:///new.sock")
+
+            assert mock_thread.call_count == 2
+            assert mock_thread.return_value.start.call_count == 2
+        finally:
+            probe_retry._ACTIVE_RETRIES.clear()

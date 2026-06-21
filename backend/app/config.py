@@ -1,4 +1,8 @@
+import contextlib
+import os
 import secrets
+import stat
+import tempfile
 from pathlib import Path
 
 from pydantic_settings import BaseSettings
@@ -11,7 +15,24 @@ def _load_or_create_jwt_secret(data_dir: Path) -> str:
         return secret_file.read_text(encoding="utf-8").strip()
     secret_file.parent.mkdir(parents=True, exist_ok=True)
     secret = secrets.token_urlsafe(64)
-    secret_file.write_text(secret, encoding="utf-8")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{secret_file.name}.",
+        suffix=".tmp",
+        dir=secret_file.parent,
+    )
+    tmp_file = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(secret)
+            f.flush()
+            os.fsync(f.fileno())
+        with contextlib.suppress(OSError):
+            os.chmod(tmp_file, stat.S_IRUSR | stat.S_IWUSR)
+        tmp_file.replace(secret_file)
+    except Exception:
+        with contextlib.suppress(OSError):
+            tmp_file.unlink()
+        raise
     return secret
 
 
@@ -40,8 +61,8 @@ class Settings(BaseSettings):
     jwt_expiry_hours: int = 24
     cookie_secure: bool = False  # Set True in production with HTTPS
 
-    # CORS
-    cors_origins: str = "*"  # Comma-separated origins, or "*" for all
+    # CORS. Empty disables CORS; explicit origins allow credentialed cross-origin requests.
+    cors_origins: str = ""
 
     # Server
     host: str = "0.0.0.0"

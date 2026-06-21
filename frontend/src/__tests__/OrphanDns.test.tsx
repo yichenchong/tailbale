@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, fireEvent } from "@testing-library/react"
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 const mockJobs = {
@@ -65,6 +65,16 @@ function mockFetch(data: unknown) {
       json: () => Promise.resolve(data),
     })
   })
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 describe("OrphanDns page", () => {
@@ -384,6 +394,74 @@ describe("OrphanDns page", () => {
     })
   })
 
+
+  it("keeps the newest orphan job reload when an older action reload finishes later", async () => {
+    const firstPost = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const secondPost = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const firstReload = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    let jobGetCalls = 0
+    let postCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+      }
+      if (opts?.method === "POST") {
+        postCalls++
+        return postCalls === 1 ? firstPost.promise : secondPost.promise
+      }
+      jobGetCalls++
+      if (jobGetCalls === 1) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockJobs) })
+      }
+      if (jobGetCalls === 2) {
+        return firstReload.promise
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({ jobs: [], total: 0 }) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { default: OrphanDns } = await import("@/pages/OrphanDns")
+    render(
+      <MemoryRouter>
+        <OrphanDns />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText("nextcloud.example.com")).toBeInTheDocument()
+    })
+
+    const retryButtons = screen.getAllByText("Retry Deletion")
+    fireEvent.click(retryButtons[0])
+    fireEvent.click(retryButtons[1])
+
+    await act(async () => {
+      firstPost.resolve({ ok: true, json: () => Promise.resolve({ success: true, message: "First cleanup retry queued" }) })
+      await firstPost.promise
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(jobGetCalls).toBe(2)
+    })
+
+    await act(async () => {
+      secondPost.resolve({ ok: true, json: () => Promise.resolve({ success: true, message: "Second cleanup retry queued" }) })
+      await secondPost.promise
+      await Promise.resolve()
+    })
+    await waitFor(() => {
+      expect(screen.getByText("No orphaned DNS records. All clean!")).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      firstReload.resolve({ ok: true, json: () => Promise.resolve({ jobs: [mockJobs.jobs[1]], total: 1 }) })
+      await firstReload.promise
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText("No orphaned DNS records. All clean!")).toBeInTheDocument()
+    expect(screen.queryByText("vaultwarden.example.com")).not.toBeInTheDocument()
+  })
   it("fetches with kind=dns_orphan_cleanup filter", async () => {
     const fetchMock = mockFetch({ jobs: [], total: 0 })
     vi.stubGlobal("fetch", fetchMock)

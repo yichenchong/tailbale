@@ -4,7 +4,11 @@ interface DashboardSummary {
   services: { error: number }
 }
 
-function setFavicon(href: string) {
+/**
+ * Sets the document favicon to `href`, creating the <link rel="icon"> if needed.
+ * @internal exported for tests
+ */
+export function setFavicon(href: string) {
   let link = document.querySelector<HTMLLinkElement>("link[rel='icon']")
   if (!link) {
     link = document.createElement("link")
@@ -12,8 +16,11 @@ function setFavicon(href: string) {
     link.type = "image/svg+xml"
     document.head.appendChild(link)
   }
-  if (link.href !== href) {
-    link.href = href
+  // Compare the attribute (relative) rather than `link.href` (which the DOM
+  // resolves to an absolute URL), otherwise the guard never matches and the
+  // favicon is needlessly rewritten — re-fetched — on every poll.
+  if (link.getAttribute("href") !== href) {
+    link.setAttribute("href", href)
   }
 }
 

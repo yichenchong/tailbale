@@ -16,7 +16,7 @@ def _make_service(**overrides):
     svc.upstream_port = overrides.get("upstream_port", 80)
     svc.upstream_scheme = overrides.get("upstream_scheme", "http")
     svc.preserve_host_header = overrides.get("preserve_host_header", True)
-    svc.custom_caddy_snippet = overrides.get("custom_caddy_snippet", None)
+    svc.custom_caddy_snippet = overrides.get("custom_caddy_snippet")
     svc.edge_container_name = overrides.get("edge_container_name", "edge_nextcloud")
     svc.network_name = overrides.get("network_name", "edge_net_nextcloud")
     svc.ts_hostname = overrides.get("ts_hostname", "edge-nextcloud")
@@ -35,6 +35,25 @@ class TestFindEdgeContainer:
 
         result = _find_edge_container("svc_123", "edge_test")
         assert result == mock_container
+
+
+    @patch("app.edge.container_manager.docker.DockerClient")
+    def test_ignores_name_match_for_different_service_label(self, mock_cls):
+        from app.edge.container_manager import _find_edge_container
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        wrong_container = MagicMock()
+        wrong_container.labels = {"tailbale.service_id": "svc_other"}
+        mock_client.containers.get.return_value = wrong_container
+        mock_client.containers.list.return_value = []
+
+        result = _find_edge_container("svc_123", "edge_test")
+
+        assert result is None
+        mock_client.containers.list.assert_called_once_with(
+            all=True, filters={"label": "tailbale.service_id=svc_123"}
+        )
 
     @patch("app.edge.container_manager.docker.DockerClient")
     def test_falls_back_to_label_search(self, mock_cls):
@@ -150,8 +169,9 @@ class TestStartEdge:
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_if_not_found(self, mock_find):
-        from app.edge.container_manager import start_edge
         import pytest
+
+        from app.edge.container_manager import start_edge
 
         mock_find.return_value = None
         with pytest.raises(RuntimeError, match="Edge container not found"):
@@ -191,8 +211,9 @@ class TestRestartEdge:
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_if_not_found(self, mock_find):
-        from app.edge.container_manager import restart_edge
         import pytest
+
+        from app.edge.container_manager import restart_edge
 
         mock_find.return_value = None
         with pytest.raises(RuntimeError, match="Edge container not found"):
@@ -332,8 +353,9 @@ class TestReloadCaddy:
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_on_failure(self, mock_find):
-        from app.edge.container_manager import reload_caddy
         import pytest
+
+        from app.edge.container_manager import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -345,8 +367,9 @@ class TestReloadCaddy:
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_if_not_found(self, mock_find):
-        from app.edge.container_manager import reload_caddy
         import pytest
+
+        from app.edge.container_manager import reload_caddy
 
         mock_find.return_value = None
         with pytest.raises(RuntimeError, match="Edge container not found"):
@@ -377,8 +400,9 @@ class TestReloadCaddy:
     @patch("app.edge.container_manager.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_when_container_never_stabilizes(self, mock_find, mock_sleep):
-        from app.edge.container_manager import reload_caddy
         import pytest
+
+        from app.edge.container_manager import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -390,6 +414,36 @@ class TestReloadCaddy:
 
         with pytest.raises(RuntimeError, match="never reached a stable running container"):
             reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
+
+    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_real_reload_failure_after_transient_conflict_is_not_masked(
+        self, mock_find, mock_sleep
+    ):
+        """A genuine reload failure on a later attempt must surface the real
+        error, not the transient "restarting" conflict from an earlier attempt."""
+        import pytest
+
+        from app.edge.container_manager import reload_caddy
+
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.side_effect = [
+            docker.errors.APIError(
+                '409 Client Error for http+docker://localhost/v1.47/containers/x/exec: '
+                'Conflict ("Container x is restarting, wait until the container is running")'
+            ),
+            (1, b"error: adapting config using caddyfile: invalid directive"),
+        ]
+        mock_find.return_value = mock_container
+
+        with pytest.raises(RuntimeError) as excinfo:
+            reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
+
+        message = str(excinfo.value)
+        assert "Caddy reload failed (exit 1)" in message
+        assert "invalid directive" in message
+        assert "never reached a stable running container" not in message
 
 
 class TestDetectTailscaleIp:
@@ -625,6 +679,27 @@ class TestDockerSocketConsistency:
         call_args = mock_recreate.call_args[0]
         assert call_args[-1] == "unix:///custom/docker.sock"
 
+    @patch("app.edge.container_manager.get_edge_version", return_value="old")
+    @patch("app.secrets.read_secret", return_value="tskey-auth-test")
+    @patch("app.edge.image_builder.ensure_edge_image")
+    @patch("app.edge.container_manager.recreate_edge")
+    def test_update_edge_passes_socket(
+        self, mock_recreate, mock_ensure_image, mock_secret, mock_version, client, db_session,
+    ):
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
+        db_session.commit()
+        mock_recreate.return_value = "new_id"
+
+        svc_id = _create_service_via_api(client).json()["id"]
+        resp = client.post(f"/api/services/{svc_id}/update-edge")
+
+        assert resp.status_code == 200
+        mock_ensure_image.assert_called_once_with("unix:///custom/docker.sock")
+        mock_recreate.assert_called_once()
+        assert mock_recreate.call_args[0][-1] == "unix:///custom/docker.sock"
+
 
 # ---------------------------------------------------------------------------
 # String-vs-Path acceptance
@@ -697,6 +772,7 @@ class TestStringPathAcceptance:
 
     def test_type_hints_accept_str_or_path(self):
         import inspect
+
         from app.edge.container_manager import create_edge_container, recreate_edge
 
         sig_create = inspect.signature(create_edge_container)

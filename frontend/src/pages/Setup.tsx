@@ -17,6 +17,7 @@ interface SetupProgress {
   user_exists: boolean
   base_domain_set: boolean
   cloudflare_configured: boolean
+  cloudflare_token_set?: boolean
   acme_email_set: boolean
   tailscale_configured: boolean
   docker_configured: boolean
@@ -40,7 +41,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
   const [error, setError] = useState("")
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null)
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set())
-
+  const [cfTokenConfigured, setCfTokenConfigured] = useState(false)
   const [adminUsername, setAdminUsername] = useState("")
   const [adminPassword, setAdminPassword] = useState("")
   const [adminPasswordConfirm, setAdminPasswordConfirm] = useState("")
@@ -65,10 +66,11 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         if (progress.tailscale_configured) done.add(4)
         if (progress.docker_configured) done.add(5)
         setCompletedSteps(done)
+        setCfTokenConfigured(Boolean(progress.cloudflare_token_set || progress.cloudflare_configured))
         setStep(firstIncompleteStep(progress))
       })
-      .catch(() => {
-        // If the endpoint isn't available, start from step 0
+      .catch((e) => {
+        setError(e instanceof Error ? e.message : "Failed to load setup progress")
       })
       .finally(() => setInitializing(false))
   }, [])
@@ -88,33 +90,41 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
           })
         }
       } else if (step === 1) {
-        await api.put("/settings/general", { base_domain: baseDomain })
+        if (!alreadyDone || baseDomain) {
+          await api.put("/settings/general", { base_domain: baseDomain })
+        }
       } else if (step === 2) {
-        await api.put("/settings/cloudflare", {
-          zone_id: cfZoneId,
-          ...(cfToken ? { token: cfToken } : {}),
-        })
-        if (cfToken && cfZoneId) {
-          const result = await api.post<ConnectionTestResult>("/settings/test/cloudflare")
-          setTestResult(result)
-          if (!result.success) {
-            setSaving(false)
-            return
+        if (!alreadyDone || cfZoneId || cfToken) {
+          await api.put("/settings/cloudflare", {
+            ...(cfZoneId ? { zone_id: cfZoneId } : {}),
+            ...(cfToken ? { token: cfToken } : {}),
+          })
+          if (cfToken && cfZoneId) {
+            const result = await api.post<ConnectionTestResult>("/settings/test/cloudflare")
+            setTestResult(result)
+            if (!result.success) {
+              setSaving(false)
+              return
+            }
           }
         }
       } else if (step === 3) {
-        await api.put("/settings/general", { acme_email: acmeEmail })
+        if (!alreadyDone || acmeEmail) {
+          await api.put("/settings/general", { acme_email: acmeEmail })
+        }
       } else if (step === 4) {
-        await api.put("/settings/tailscale", {
-          ...(tsAuthKey ? { auth_key: tsAuthKey } : {}),
-          ...(tsApiKey ? { api_key: tsApiKey } : {}),
-        })
-        if (tsAuthKey) {
-          const result = await api.post<ConnectionTestResult>("/settings/test/tailscale")
-          setTestResult(result)
-          if (!result.success) {
-            setSaving(false)
-            return
+        if (!alreadyDone || tsAuthKey || tsApiKey) {
+          await api.put("/settings/tailscale", {
+            ...(tsAuthKey ? { auth_key: tsAuthKey } : {}),
+            ...(tsApiKey ? { api_key: tsApiKey } : {}),
+          })
+          if (tsAuthKey && tsApiKey) {
+            const result = await api.post<ConnectionTestResult>("/settings/test/tailscale")
+            setTestResult(result)
+            if (!result.success) {
+              setSaving(false)
+              return
+            }
           }
         }
       } else if (step === 5) {
@@ -154,7 +164,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
       )
     }
     if (step === 1) return baseDomain.length > 0
-    if (step === 2) return cfZoneId.length > 0
+    if (step === 2) return cfZoneId.length > 0 && (cfToken.length > 0 || cfTokenConfigured)
     if (step === 3) return acmeEmail.includes("@")
     if (step === 4) return tsAuthKey.length > 0 && tsApiKey.length > 0
     return true
@@ -394,7 +404,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
               setTestResult(null)
               setError("")
             }}
-            disabled={step === 0}
+            disabled={step === 0 || saving}
             className="inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700 disabled:opacity-30"
           >
             <ArrowLeft className="h-4 w-4" /> Back

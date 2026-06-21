@@ -6,8 +6,6 @@ from unittest.mock import patch
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
 from app.models.job import Job
-from app.models.service import Service
-from app.models.service_status import ServiceStatus
 
 
 def _create_service(client, **overrides):
@@ -68,6 +66,17 @@ class TestListJobs:
         assert data["jobs"][0]["kind"] == "dns_orphan_cleanup"
         assert data["jobs"][0]["details"]["record_id"] == "cf_abc123"
 
+    def test_lists_job_with_invalid_details_without_crashing(self, client, db_session):
+        job = _create_orphan_job(db_session, details="{not json")
+
+        resp = client.get("/api/jobs")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["jobs"][0]["id"] == job.id
+        assert data["jobs"][0]["details"] is None
+
     def test_filter_by_status(self, client, db_session):
         _create_orphan_job(db_session, status="pending")
         _create_orphan_job(db_session, status="failed")
@@ -98,6 +107,14 @@ class TestListJobs:
         resp = client.get("/api/jobs?limit=2&offset=4")
         assert len(resp.json()["jobs"]) == 1
 
+    def test_rejects_invalid_pagination_bounds(self, client):
+        resp = client.get("/api/jobs?limit=0&offset=-1")
+        assert resp.status_code == 422
+
+        resp = client.get("/api/jobs?limit=501")
+        assert resp.status_code == 422
+
+
 
 # ---------------------------------------------------------------------------
 # Get single job
@@ -110,6 +127,14 @@ class TestGetJob:
         resp = client.get(f"/api/jobs/{job.id}")
         assert resp.status_code == 200
         assert resp.json()["id"] == job.id
+
+    def test_get_job_with_invalid_details_without_crashing(self, client, db_session):
+        job = _create_orphan_job(db_session, details="[1, 2, 3]")
+
+        resp = client.get(f"/api/jobs/{job.id}")
+
+        assert resp.status_code == 200
+        assert resp.json()["details"] is None
 
     def test_get_nonexistent_job(self, client):
         resp = client.get("/api/jobs/job_nonexistent")
@@ -212,6 +237,16 @@ class TestRetryOrphanCleanup:
         assert resp.status_code == 422
         assert "not configured" in resp.json()["detail"]
 
+    @patch("app.secrets.read_secret", return_value="cf-token-123")
+    def test_retry_rejects_running_job(self, mock_secret, client, db_session):
+        job = _create_orphan_job(db_session, status="running")
+
+        resp = client.post(f"/api/jobs/{job.id}/retry")
+
+        assert resp.status_code == 409
+        assert "already running" in resp.json()["detail"]
+
+
     def test_retry_nonexistent_job(self, client):
         resp = client.post("/api/jobs/job_nonexistent/retry")
         assert resp.status_code == 404
@@ -233,6 +268,110 @@ class TestRetryOrphanCleanup:
         resp = client.post(f"/api/jobs/{job.id}/retry")
         assert resp.status_code == 422
         assert "missing" in resp.json()["detail"].lower()
+
+    def test_retry_rejects_invalid_json_details(self, client, db_session):
+        job = _create_orphan_job(db_session, details="{not json")
+
+        resp = client.post(f"/api/jobs/{job.id}/retry")
+
+        assert resp.status_code == 422
+        assert "invalid json" in resp.json()["detail"].lower()
+        db_session.expire_all()
+        assert db_session.get(Job, job.id).status == "pending"
+
+    def test_retry_rejects_non_object_details(self, client, db_session):
+        job = _create_orphan_job(db_session, details='["cf_abc123"]')
+
+        resp = client.post(f"/api/jobs/{job.id}/retry")
+
+        assert resp.status_code == 422
+        assert "json object" in resp.json()["detail"].lower()
+        db_session.expire_all()
+        assert db_session.get(Job, job.id).status == "pending"
+
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.secrets.read_secret", return_value="cf-token-123")
+    def test_retry_uses_current_zone_when_job_details_lack_zone(
+        self, mock_secret, mock_find, client, db_session
+    ):
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "cf_zone_id", "zone-from-settings")
+        db_session.commit()
+        job = _create_orphan_job(db_session, details=json.dumps({
+            "record_id": "cf_abc123",
+            "hostname": "test.example.com",
+            "value": "100.64.0.1",
+            "service_name": "TestApp",
+        }))
+        job_id = job.id
+        mock_find.return_value = None
+
+        resp = client.post(f"/api/jobs/{job_id}/retry")
+
+        assert resp.status_code == 200
+        mock_find.assert_called_once_with(
+            "cf-token-123", "zone-from-settings", "test.example.com", "A"
+        )
+        db_session.expire_all()
+        assert db_session.get(Job, job_id) is None
+
+    @patch("app.adapters.cloudflare_adapter.delete_a_record")
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.secrets.read_secret", return_value="cf-token-123")
+    def test_retry_skips_deletion_when_record_reclaimed_by_active_service(
+        self, mock_secret, mock_find, mock_delete, client, db_session
+    ):
+        """If a live service now owns the same Cloudflare record id, retry must
+        NOT delete it (the hostname was reclaimed; deletion would cause an outage)."""
+        job = _create_orphan_job(db_session)
+        job_id = job.id
+        # find_record returns our orphan's id — but a live DnsRecord now owns it.
+        mock_find.return_value = {"id": "cf_abc123", "content": "100.64.0.9"}
+        svc = _create_service(client, hostname="test.example.com").json()
+        db_session.add(DnsRecord(
+            service_id=svc["id"],
+            hostname="test.example.com",
+            record_id="cf_abc123",
+            value="100.64.0.9",
+        ))
+        db_session.commit()
+
+        resp = client.post(f"/api/jobs/{job_id}/retry")
+        assert resp.status_code == 200
+
+        # The live record must NOT have been deleted.
+        mock_delete.assert_not_called()
+        # The stale orphan job is cleared since it's no longer orphaned.
+        db_session.expire_all()
+        assert db_session.get(Job, job_id) is None
+
+
+class TestResetStaleRunningJobs:
+    def test_reset_flips_running_jobs_to_failed(self, db_session):
+        from app.routers.jobs import reset_stale_running_jobs
+
+        running = _create_orphan_job(db_session, status="running")
+        pending = _create_orphan_job(db_session, status="pending")
+
+        count = reset_stale_running_jobs(db_session)
+        assert count == 1
+
+        db_session.expire_all()
+        assert db_session.get(Job, running.id).status == "failed"
+        # Non-running jobs are untouched.
+        assert db_session.get(Job, pending.id).status == "pending"
+
+    def test_reset_allows_dismiss_after_recovery(self, client, db_session):
+        stuck = _create_orphan_job(db_session, status="running")
+        # Dismiss is rejected while running...
+        assert client.delete(f"/api/jobs/{stuck.id}").status_code == 409
+
+        from app.routers.jobs import reset_stale_running_jobs
+        reset_stale_running_jobs(db_session)
+
+        # ...but works once the stale job is reclaimed.
+        assert client.delete(f"/api/jobs/{stuck.id}").status_code == 204
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +404,25 @@ class TestDismissOrphanJob:
 
         resp = client.delete(f"/api/jobs/{job.id}")
         assert resp.status_code == 422
+
+    def test_dismiss_rejects_running_job(self, client, db_session):
+        job = _create_orphan_job(db_session, status="running")
+
+        resp = client.delete(f"/api/jobs/{job.id}")
+
+        assert resp.status_code == 409
+        db_session.expire_all()
+        assert db_session.get(Job, job.id) is not None
+
+    def test_dismiss_deletes_job_with_invalid_details(self, client, db_session):
+        job = _create_orphan_job(db_session, details="{not json")
+        job_id = job.id
+
+        resp = client.delete(f"/api/jobs/{job_id}")
+
+        assert resp.status_code == 204
+        db_session.expire_all()
+        assert db_session.get(Job, job_id) is None
 
 
 # ---------------------------------------------------------------------------
@@ -315,5 +473,43 @@ class TestDeleteCreatesRetryableOrphan:
         assert resp.json()["success"] is True
 
         # Job should be gone
+        db_session.expire_all()
+        assert db_session.get(Job, job_id) is None
+
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.secrets.read_secret", return_value="cf-token-123")
+    def test_delete_without_zone_creates_job_retryable_after_zone_configured(
+        self, mock_secret, mock_find, client, db_session
+    ):
+        from app.settings_store import set_setting
+
+        svc_id = _create_service(client).json()["id"]
+        dns = DnsRecord(
+            service_id=svc_id, hostname="nextcloud.example.com",
+            record_id="cf_late_zone", value="100.64.0.1",
+        )
+        db_session.add(dns)
+        db_session.commit()
+
+        resp = client.delete(f"/api/services/{svc_id}")
+        assert resp.status_code == 204
+
+        db_session.expire_all()
+        jobs = db_session.query(Job).filter(Job.kind == "dns_orphan_cleanup").all()
+        assert len(jobs) == 1
+        job_id = jobs[0].id
+        details = json.loads(jobs[0].details)
+        assert details["zone_id"] == ""
+
+        set_setting(db_session, "cf_zone_id", "zone-configured-later")
+        db_session.commit()
+        mock_find.return_value = None
+
+        resp = client.post(f"/api/jobs/{job_id}/retry")
+
+        assert resp.status_code == 200
+        mock_find.assert_called_once_with(
+            "cf-token-123", "zone-configured-later", "nextcloud.example.com", "A"
+        )
         db_session.expire_all()
         assert db_session.get(Job, job_id) is None

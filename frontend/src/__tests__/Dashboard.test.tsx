@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, fireEvent } from "@testing-library/react"
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 
 const mockSummary = {
@@ -50,6 +50,16 @@ function mockFetch(data: unknown) {
     ok: true,
     json: () => Promise.resolve(data),
   })
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
 }
 
 describe("Dashboard page", () => {
@@ -271,5 +281,75 @@ describe("Dashboard page", () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.length).toBeGreaterThan(initialCallCount)
     })
+  })
+
+  it("keeps the newest dashboard refresh when an older request finishes later", async () => {
+    const initialSummary = {
+      ...mockSummary,
+      services: { total: 1, healthy: 0, warning: 0, error: 0 },
+      expiring_certs: [],
+      recent_errors: [],
+      recent_events: [],
+    }
+    const staleSummary = {
+      ...initialSummary,
+      services: { total: 7, healthy: 0, warning: 0, error: 0 },
+    }
+    const newestSummary = {
+      ...initialSummary,
+      services: { total: 42, healthy: 0, warning: 0, error: 0 },
+    }
+    const staleRefresh = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const intervalCallbacks: Array<() => void> = []
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") intervalCallbacks.push(handler as () => void)
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    vi.spyOn(globalThis, "clearInterval").mockImplementation(() => undefined)
+
+    let dashboardCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ general: { timezone: "UTC" } }) })
+      }
+      dashboardCalls++
+      if (dashboardCalls === 1) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(initialSummary) })
+      }
+      if (dashboardCalls === 2) {
+        return staleRefresh.promise
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(newestSummary) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    render(
+      <MemoryRouter>
+        <Dashboard />
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Refresh"))
+    await act(async () => {
+      intervalCallbacks[0]()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText("42")).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      staleRefresh.resolve({ ok: true, json: () => Promise.resolve(staleSummary) })
+      await staleRefresh.promise
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText("42")).toBeInTheDocument()
+    expect(screen.queryByText("7")).not.toBeInTheDocument()
   })
 })

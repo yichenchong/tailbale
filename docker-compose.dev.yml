@@ -10,17 +10,19 @@ services:
       - "8080:8080"
     volumes:
       - ./backend/app:/app/app
-      - ./data:/data
+      - ${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}:/data
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - DATA_DIR=/data
-      - HOST_DATA_DIR=${HOST_DATA_DIR:-${PWD}/data}
+      - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
+    labels:
+      - tailbale.main=true
     restart: unless-stopped
 
   frontend:
     image: node:22-alpine
     working_dir: /app
-    command: npm run dev -- --host 0.0.0.0
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
     ports:
       - "5173:5173"
     volumes:

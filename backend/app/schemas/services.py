@@ -15,7 +15,6 @@ class ServiceCreate(BaseModel):
     upstream_port: int = Field(..., ge=1, le=65535)
     healthcheck_path: str | None = None
     hostname: str = Field(..., min_length=1)
-    base_domain: str = Field(..., min_length=1)
     enabled: bool = True
     preserve_host_header: bool = True
     custom_caddy_snippet: str | None = None
@@ -32,7 +31,7 @@ class ServiceCreate(BaseModel):
 class ServiceUpdate(BaseModel):
     """Request body for updating a service exposure."""
 
-    name: str | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=128)
     upstream_scheme: str | None = Field(default=None, pattern=r"^(http|https)$")
     upstream_port: int | None = Field(default=None, ge=1, le=65535)
     healthcheck_path: str | None = None
@@ -41,6 +40,20 @@ class ServiceUpdate(BaseModel):
     preserve_host_header: bool | None = None
     custom_caddy_snippet: str | None = None
     app_profile: str | None = None
+
+    @field_validator(
+        "name",
+        "upstream_scheme",
+        "upstream_port",
+        "hostname",
+        "enabled",
+        "preserve_host_header",
+    )
+    @classmethod
+    def reject_null_for_non_nullable_fields(cls, v):
+        if v is None:
+            raise ValueError("Field cannot be null")
+        return v
 
     @field_validator("hostname")
     @classmethod
@@ -117,6 +130,25 @@ class DiscoveredContainer(BaseModel):
     ports: list[ContainerPortInfo]
     networks: list[str]
     labels: dict[str, str]
+
+
+
+class AppProfileResponse(BaseModel):
+    name: str
+    recommended_port: int = Field(..., ge=1, le=65535)
+    healthcheck_path: str | None
+    preserve_host_header: bool
+    post_setup_reminder: str | None
+    image_patterns: list[str]
+
+
+class ProfilesResponse(BaseModel):
+    profiles: dict[str, AppProfileResponse]
+
+
+class ProfileDetectionResponse(BaseModel):
+    detected_profile: str | None
+    profile: AppProfileResponse | None
 
 
 class DiscoveryResponse(BaseModel):

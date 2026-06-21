@@ -1,6 +1,6 @@
 """Dashboard summary API endpoint."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -41,7 +41,7 @@ async def dashboard_summary(db: Session = Depends(get_db)):
             error += 1
 
     # Upcoming cert expiries (within 30 days)
-    threshold = datetime.now(timezone.utc) + timedelta(days=30)
+    threshold = datetime.now(UTC) + timedelta(days=30)
     certs = db.query(Certificate).filter(
         Certificate.expires_at.isnot(None),
         Certificate.expires_at < threshold,
@@ -60,7 +60,7 @@ async def dashboard_summary(db: Session = Depends(get_db)):
     recent_errors = (
         db.query(Event)
         .filter(Event.level == "error")
-        .order_by(Event.created_at.desc())
+        .order_by(Event.created_at.desc(), Event.id.desc())
         .limit(20)
         .all()
     )
@@ -68,7 +68,7 @@ async def dashboard_summary(db: Session = Depends(get_db)):
     # Recent events (last 20)
     recent_events = (
         db.query(Event)
-        .order_by(Event.created_at.desc())
+        .order_by(Event.created_at.desc(), Event.id.desc())
         .limit(20)
         .all()
     )

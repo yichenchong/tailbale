@@ -6,8 +6,12 @@ set -e
 # subcommands; the TS_SOCKET env var is the supported replacement.
 export TS_SOCKET="/var/run/tailscale/tailscaled.sock"
 
+TAILSCALED_PID=""
+CADDY_PID=""
+
 # Graceful shutdown handler
 cleanup() {
+    exit_code="${1:-0}"
     echo "[edge] Shutting down..."
     if [ -n "$CADDY_PID" ]; then
         kill "$CADDY_PID" 2>/dev/null || true
@@ -18,10 +22,10 @@ cleanup() {
         kill "$TAILSCALED_PID" 2>/dev/null || true
         wait "$TAILSCALED_PID" 2>/dev/null || true
     fi
-    exit 0
+    exit "$exit_code"
 }
 
-trap cleanup TERM INT QUIT
+trap 'cleanup 0' TERM INT QUIT
 
 # 1. Start tailscaled in userspace networking mode
 echo "[edge] Starting tailscaled in userspace mode..."
@@ -43,7 +47,7 @@ fi
 
 # 2. Authenticate with TS_AUTHKEY if state is fresh
 TS_AUTH_FAILED=false
-if [ -n "$TS_AUTHKEY" ]; then
+if [ -n "${TS_AUTHKEY:-}" ]; then
     echo "[edge] Authenticating with Tailscale (hostname: ${TS_HOSTNAME:-edge})..."
     if ! tailscale up \
         --authkey="$TS_AUTHKEY" \
@@ -89,7 +93,11 @@ CADDY_PID=$!
 
 echo "[edge] Edge container running. tailscaled=$TAILSCALED_PID caddy=$CADDY_PID"
 
-# 5. Wait for any child to exit
-wait -n "$TAILSCALED_PID" "$CADDY_PID" 2>/dev/null || wait
+# 5. Wait for either child to exit. Avoid `wait -n ... || wait`: wait returns
+# the child's non-zero status when Caddy/tailscaled fails, and the fallback
+# would then block forever on the surviving process instead of restarting.
+while kill -0 "$TAILSCALED_PID" 2>/dev/null && kill -0 "$CADDY_PID" 2>/dev/null; do
+    sleep 1
+done
 echo "[edge] A process exited unexpectedly, shutting down..."
-cleanup
+cleanup 1

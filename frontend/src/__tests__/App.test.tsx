@@ -45,6 +45,210 @@ describe("Sidebar", () => {
 })
 
 describe("App setup flow", () => {
+  it("sends /login to setup before the admin account exists", async () => {
+    window.history.replaceState({}, "", "/login")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/api/auth/status")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ setup_complete: false, authenticated: false }),
+          })
+        }
+        if (url.includes("/api/auth/setup-progress")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                user_exists: false,
+                base_domain_set: false,
+                cloudflare_configured: false,
+                acme_email_set: false,
+                tailscale_configured: false,
+                docker_configured: false,
+              }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        })
+      })
+    )
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Step 1 of 6: Account")).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe("/setup")
+    expect(screen.queryByText("Sign in to continue.")).not.toBeInTheDocument()
+  })
+
+  it("allows login while setup is incomplete after the admin account exists", async () => {
+    window.history.replaceState({}, "", "/login")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/api/auth/status")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ setup_complete: false, authenticated: false }),
+          })
+        }
+        if (url.includes("/api/auth/setup-progress")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                user_exists: true,
+                base_domain_set: true,
+                cloudflare_configured: false,
+                acme_email_set: false,
+                tailscale_configured: false,
+                docker_configured: false,
+              }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        })
+      })
+    )
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Sign in to continue.")).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe("/login")
+    expect(screen.queryByText(/Step \d of 6:/)).not.toBeInTheDocument()
+  })
+
+  it("shows startup error instead of assuming setup is complete when auth status fails", async () => {
+    window.history.replaceState({}, "", "/")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/api/auth/status")) {
+          return Promise.resolve({
+            ok: false,
+            status: 500,
+            json: () => Promise.resolve({ detail: "database unavailable" }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        })
+      })
+    )
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Startup error")).toBeInTheDocument()
+    })
+    expect(screen.getByText("database unavailable")).toBeInTheDocument()
+    expect(window.location.pathname).toBe("/")
+    expect(screen.queryByText("Sign in to continue.")).not.toBeInTheDocument()
+  })
+
+  it("shows startup error when setup progress fails", async () => {
+    window.history.replaceState({}, "", "/login")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/api/auth/status")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ setup_complete: false, authenticated: false }),
+          })
+        }
+        if (url.includes("/api/auth/setup-progress")) {
+          return Promise.resolve({
+            ok: false,
+            status: 503,
+            json: () => Promise.resolve({ detail: "setup progress unavailable" }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        })
+      })
+    )
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Startup error")).toBeInTheDocument()
+    })
+    expect(screen.getByText("setup progress unavailable")).toBeInTheDocument()
+    expect(window.location.pathname).toBe("/login")
+    expect(screen.queryByText("Step 1 of 6: Account")).not.toBeInTheDocument()
+  })
+
+  it("redirects unauthenticated setup visits to login after the admin account exists", async () => {
+    window.history.replaceState({}, "", "/setup")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/api/auth/status")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ setup_complete: false, authenticated: false }),
+          })
+        }
+        if (url.includes("/api/auth/setup-progress")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                user_exists: true,
+                base_domain_set: true,
+                cloudflare_configured: false,
+                acme_email_set: false,
+                tailscale_configured: false,
+                docker_configured: false,
+              }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        })
+      })
+    )
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Sign in to continue.")).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe("/login")
+    expect(screen.queryByText(/Step \d of 6:/)).not.toBeInTheDocument()
+  })
+
   it("redirects to the dashboard after completing the final setup step", async () => {
     window.history.replaceState({}, "", "/setup")
 
@@ -127,6 +331,36 @@ describe("App setup flow", () => {
       expect(screen.getByRole("heading", { name: "Dashboard" })).toBeInTheDocument()
     })
     expect(window.location.pathname).toBe("/")
+  })
+
+  it("sends /setup to login once setup is complete and the user is unauthenticated", async () => {
+    window.history.replaceState({}, "", "/setup")
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((url: string) => {
+        if (url.includes("/api/auth/status")) {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ setup_complete: true, authenticated: false }),
+          })
+        }
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({}),
+        })
+      })
+    )
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Sign in to continue.")).toBeInTheDocument()
+    })
+    expect(window.location.pathname).toBe("/login")
+    expect(screen.queryByText(/Step \d of 6:/)).not.toBeInTheDocument()
   })
 })
 

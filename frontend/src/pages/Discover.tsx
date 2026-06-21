@@ -14,13 +14,16 @@ export default function Discover() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
+  const [appliedSearch, setAppliedSearch] = useState("")
   const [runningOnly, setRunningOnly] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
   // Track how many exposures each container already has
   const [exposureCounts, setExposureCounts] = useState<Record<string, number>>({})
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const requestIdRef = useRef(0)
 
   const load = useCallback(async (showSpinner = false) => {
+    const requestId = ++requestIdRef.current
     if (showSpinner) setLoading(true)
     setError(null)
     try {
@@ -28,31 +31,32 @@ export default function Discover() {
         api.get<DiscoveryResponse>(`/discovery/containers?${new URLSearchParams({
           running_only: String(runningOnly),
           hide_managed: "true",
-          ...(search ? { search } : {}),
+          ...(appliedSearch ? { search: appliedSearch } : {}),
         })}`),
         api.get<ServiceListResponse>("/services"),
       ])
+      if (requestId !== requestIdRef.current) return
       setContainers(discovery.containers)
       const counts: Record<string, number> = {}
       for (const svc of services.services) {
-        const phase = svc.status?.phase
-        if (phase === 'healthy' || phase === 'warning') {
+        if (svc.upstream_container_id) {
           counts[svc.upstream_container_id] = (counts[svc.upstream_container_id] || 0) + 1
         }
       }
       setExposureCounts(counts)
       setLastRefresh(new Date())
     } catch (e) {
-      setError(String(e))
+      if (requestId !== requestIdRef.current) return
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
-  }, [runningOnly, search])
+  }, [runningOnly, appliedSearch])
 
   // Load on mount and when runningOnly changes
   useEffect(() => {
     load(true)
-  }, [runningOnly])
+  }, [load])
 
   // Auto-refresh every 30s
   useEffect(() => {
@@ -62,7 +66,13 @@ export default function Discover() {
     }
   }, [load])
 
-  const handleSearch = () => load(true)
+  const handleSearch = () => {
+    if (search === appliedSearch) {
+      load(true)
+    } else {
+      setAppliedSearch(search)
+    }
+  }
 
   const handleExpose = (container: DiscoveredContainer) => {
     const params = new URLSearchParams({

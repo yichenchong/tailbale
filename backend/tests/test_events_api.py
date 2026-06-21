@@ -73,6 +73,22 @@ class TestListEvents:
         assert data["total"] == 1
         assert "DNS" in data["events"][0]["message"]
 
+    def test_filter_by_search_treats_like_wildcards_literally(self, client, db_session):
+        _add_event(db_session, message="Backup 100% complete")
+        _add_event(db_session, message="Backup 1000 complete")
+        _add_event(db_session, message="Probe app_1 ok")
+        _add_event(db_session, message="Probe appX1 ok")
+
+        resp = client.get("/api/events?search=100%25")
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["message"] == "Backup 100% complete"
+
+        resp = client.get("/api/events?search=app_1")
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["message"] == "Probe app_1 ok"
+
     def test_filter_by_service_id(self, client, db_session):
         svc = _create_service(db_session)
         _add_event(db_session, service_id=svc.id, message="Linked")
@@ -96,6 +112,40 @@ class TestListEvents:
         data2 = resp2.json()
         assert len(data2["events"]) == 2
 
+    def test_pagination_is_deterministic_with_tied_timestamps(self, client, db_session):
+        # SQLite's CURRENT_TIMESTAMP has second resolution, so a burst of events
+        # (e.g. one reconcile) shares an identical created_at. Ordering by
+        # created_at alone leaves ties unspecified, so OFFSET/LIMIT pagination
+        # could skip or duplicate events across pages. The query breaks ties by
+        # id, so paging must yield every event exactly once in a stable order.
+        from datetime import UTC, datetime
+
+        ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+        for i in range(10):
+            db_session.add(Event(
+                kind="reconcile_completed", level="info",
+                message=f"Event {i}", created_at=ts,
+            ))
+        db_session.commit()
+
+        seen: list[str] = []
+        for offset in range(0, 10, 3):
+            resp = client.get(f"/api/events?limit=3&offset={offset}")
+            assert resp.status_code == 200
+            seen.extend(e["id"] for e in resp.json()["events"])
+
+        assert len(seen) == 10
+        assert len(set(seen)) == 10  # no event skipped or duplicated across pages
+        assert seen == sorted(seen, reverse=True)  # deterministic id tiebreak
+
+    def test_rejects_invalid_pagination_bounds(self, client):
+        resp = client.get("/api/events?limit=0&offset=-1")
+        assert resp.status_code == 422
+
+        resp = client.get("/api/events/services/svc_nonexistent?limit=501")
+        assert resp.status_code == 422
+
+
     def test_event_details_parsed(self, client, db_session):
         evt = Event(kind="dns_created", level="info", message="DNS created",
                     details=json.dumps({"hostname": "app.example.com"}))
@@ -105,6 +155,16 @@ class TestListEvents:
         resp = client.get("/api/events")
         data = resp.json()
         assert data["events"][0]["details"]["hostname"] == "app.example.com"
+
+    def test_invalid_event_details_do_not_break_listing(self, client, db_session):
+        evt = Event(kind="legacy_event", level="info", message="Legacy", details="{not json")
+        db_session.add(evt)
+        db_session.commit()
+
+        resp = client.get("/api/events")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["events"][0]["details"] is None
 
 
 class TestServiceEvents:

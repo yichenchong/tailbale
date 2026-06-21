@@ -1,5 +1,33 @@
 const API_BASE = "/api"
 
+type ApiErrorDetail = unknown
+
+function formatErrorDetail(detail: ApiErrorDetail): string | null {
+  if (typeof detail === "string") return detail
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((item) => {
+        if (typeof item === "string") return item
+        if (item && typeof item === "object") {
+          for (const key of ["msg", "message", "error"]) {
+            const value = (item as Record<string, unknown>)[key]
+            if (typeof value === "string" && value) return value
+          }
+        }
+        return null
+      })
+      .filter((msg): msg is string => Boolean(msg))
+    return messages.length > 0 ? messages.join("; ") : null
+  }
+  if (detail && typeof detail === "object") {
+    for (const key of ["message", "msg", "error"]) {
+      const value = (detail as Record<string, unknown>)[key]
+      if (typeof value === "string" && value) return value
+    }
+  }
+  return null
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "same-origin",
@@ -12,7 +40,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   }
   if (!res.ok) {
     const body = await res.json().catch(() => null)
-    throw new Error(body?.detail || `Request failed: ${res.status}`)
+    throw new Error(formatErrorDetail(body?.detail) || `Request failed: ${res.status}`)
   }
   if (res.status === 204) return undefined as T
   return res.json()
@@ -77,6 +105,11 @@ export interface ConnectionTestResult {
   message: string
 }
 
+export interface MainLogsResponse {
+  container: string
+  logs: string
+}
+
 // --- Service types ---
 
 export interface ServiceStatus {
@@ -127,7 +160,6 @@ export interface ServiceCreateRequest {
   upstream_port: number
   healthcheck_path?: string | null
   hostname: string
-  base_domain: string
   enabled?: boolean
   preserve_host_header?: boolean
   custom_caddy_snippet?: string | null

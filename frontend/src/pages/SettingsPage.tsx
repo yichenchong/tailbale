@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react"
 import { cn } from "@/lib/utils"
+import { setConfiguredTimezone } from "@/lib/useTimezone"
 import {
   api,
   type AllSettings,
   type ConnectionTestResult,
+  type MainLogsResponse,
 } from "@/lib/api"
 import {
   CheckCircle,
@@ -13,18 +15,25 @@ import {
 
 const ALL_TABS = ["General", "Cloudflare", "Tailscale", "Docker", "Paths", "Account", "Developer"] as const
 type Tab = (typeof ALL_TABS)[number]
+type SaveHandler = (b: Record<string, unknown>) => Promise<void>
+type TestResultState = {
+  service: string
+  result: ConnectionTestResult
+}
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("General")
   const [settings, setSettings] = useState<AllSettings | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null)
+  const [testResult, setTestResult] = useState<TestResultState | null>(null)
   const [testing, setTesting] = useState(false)
   const [version, setVersion] = useState<string | null>(null)
+  const [error, setError] = useState("")
 
   const load = async () => {
     setLoading(true)
+    setError("")
     try {
       const [data, ver] = await Promise.all([
         api.get<AllSettings>("/settings"),
@@ -32,6 +41,8 @@ export default function SettingsPage() {
       ])
       setSettings(data)
       if (ver) setVersion(ver.version)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load settings")
     } finally {
       setLoading(false)
     }
@@ -48,9 +59,16 @@ export default function SettingsPage() {
   const save = async (section: string, body: Record<string, unknown>) => {
     setSaving(true)
     setTestResult(null)
+    setError("")
     try {
       const data = await api.put<AllSettings>(`/settings/${section}`, body)
       setSettings(data)
+      // Keep the shared timezone cache in sync so timestamps across the app
+      // reflect a changed timezone without requiring a full page reload.
+      if (data.general?.timezone) setConfiguredTimezone(data.general.timezone)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to save settings")
+      throw e
     } finally {
       setSaving(false)
     }
@@ -61,18 +79,26 @@ export default function SettingsPage() {
     setTestResult(null)
     try {
       const result = await api.post<ConnectionTestResult>(`/settings/test/${service}`)
-      setTestResult(result)
+      setTestResult({ service, result })
     } catch (e) {
-      setTestResult({ success: false, message: String(e) })
+      setTestResult({ service, result: { success: false, message: e instanceof Error ? e.message : String(e) } })
     } finally {
       setTesting(false)
     }
   }
 
-  if (loading || !settings) {
+  if (loading) {
     return (
       <div className="flex items-center gap-2 p-8 text-zinc-500">
         <Loader2 className="h-4 w-4 animate-spin" /> Loading settings...
+      </div>
+    )
+  }
+
+  if (!settings) {
+    return (
+      <div className="p-8">
+        <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error || "Failed to load settings"}</div>
       </div>
     )
   }
@@ -86,10 +112,13 @@ export default function SettingsPage() {
       <h1 className="text-2xl font-bold">Settings</h1>
       <p className="mt-1 text-sm text-zinc-500">Configure tailBale orchestrator.</p>
 
-      <div className="mt-6 flex gap-1 border-b border-zinc-200">
+      <div className="mt-6 flex gap-1 border-b border-zinc-200" role="tablist" aria-label="Settings sections">
         {tabs.map((t) => (
           <button
             key={t}
+            type="button"
+            role="tab"
+            aria-selected={t === tab}
             onClick={() => { setTab(t); setTestResult(null) }}
             className={cn(
               "px-4 py-2 text-sm font-medium transition-colors",
@@ -103,7 +132,11 @@ export default function SettingsPage() {
         ))}
       </div>
 
-      <div className="mt-6 max-w-lg">
+      {error && (
+        <div className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+      )}
+
+      <div className="mt-6 max-w-lg" role="tabpanel" aria-label={`${tab} settings`}>
         {tab === "General" && (
           <GeneralTab settings={settings.general} onSave={(b) => save("general", b)} saving={saving} version={version} />
         )}
@@ -114,7 +147,7 @@ export default function SettingsPage() {
             onTest={() => runTest("cloudflare")}
             saving={saving}
             testing={testing}
-            testResult={testResult}
+            testResult={testResult?.service === "cloudflare" ? testResult.result : null}
           />
         )}
         {tab === "Tailscale" && (
@@ -124,7 +157,7 @@ export default function SettingsPage() {
             onTest={() => runTest("tailscale")}
             saving={saving}
             testing={testing}
-            testResult={testResult}
+            testResult={testResult?.service === "tailscale" ? testResult.result : null}
           />
         )}
         {tab === "Docker" && (
@@ -134,7 +167,7 @@ export default function SettingsPage() {
             onTest={() => runTest("docker")}
             saving={saving}
             testing={testing}
-            testResult={testResult}
+            testResult={testResult?.service === "docker" ? testResult.result : null}
           />
         )}
         {tab === "Paths" && (
@@ -181,10 +214,13 @@ function Field({
   )
 }
 
-function SaveButton({ saving, onClick, label }: { saving: boolean; onClick: () => void; label?: string }) {
+function SaveButton({ saving, onClick, label }: { saving: boolean; onClick: () => void | Promise<void>; label?: string }) {
+  const handleClick = () => {
+    void Promise.resolve(onClick()).catch(() => undefined)
+  }
   return (
     <button
-      onClick={onClick}
+      onClick={handleClick}
       disabled={saving}
       className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
     >
@@ -196,11 +232,12 @@ function SaveButton({ saving, onClick, label }: { saving: boolean; onClick: () =
 function TestButton({ testing, onClick, label }: { testing: boolean; onClick: () => void; label: string }) {
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={testing}
-      className="rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-4 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
     >
-      {testing ? <Loader2 className="inline h-4 w-4 animate-spin" /> : label}
+      {testing ? <><Loader2 className="h-4 w-4 animate-spin" /> Testing...</> : label}
     </button>
   )
 }
@@ -243,7 +280,7 @@ function GeneralTab({
   version,
 }: {
   settings: AllSettings["general"]
-  onSave: (b: Record<string, unknown>) => void
+  onSave: SaveHandler
   saving: boolean
   version: string | null
 }) {
@@ -253,6 +290,15 @@ function GeneralTab({
   const [renewalWindow, setRenewalWindow] = useState(String(settings.cert_renewal_window_days))
   const [timezone, setTimezone] = useState(settings.timezone)
   const [developerMode, setDeveloperMode] = useState(settings.developer_mode)
+
+  useEffect(() => {
+    setBaseDomain(settings.base_domain)
+    setAcmeEmail(settings.acme_email)
+    setReconcileInterval(String(settings.reconcile_interval_seconds))
+    setRenewalWindow(String(settings.cert_renewal_window_days))
+    setTimezone(settings.timezone)
+    setDeveloperMode(settings.developer_mode)
+  }, [settings])
 
   return (
     <div className="space-y-4">
@@ -338,7 +384,7 @@ function CloudflareTab({
   testResult,
 }: {
   settings: AllSettings["cloudflare"]
-  onSave: (b: Record<string, unknown>) => void
+  onSave: SaveHandler
   onTest: () => void
   saving: boolean
   testing: boolean
@@ -346,6 +392,15 @@ function CloudflareTab({
 }) {
   const [zoneId, setZoneId] = useState(settings.zone_id)
   const [token, setToken] = useState("")
+
+  useEffect(() => {
+    setZoneId(settings.zone_id)
+  }, [settings.zone_id])
+
+  const handleSave = async () => {
+    await onSave({ zone_id: zoneId, token: token || undefined })
+    setToken("")
+  }
 
   return (
     <div className="space-y-4">
@@ -366,7 +421,7 @@ function CloudflareTab({
       <div className="flex gap-2">
         <SaveButton
           saving={saving}
-          onClick={() => onSave({ zone_id: zoneId, token: token || undefined })}
+          onClick={handleSave}
         />
         <TestButton testing={testing} onClick={onTest} label="Test Connection" />
       </div>
@@ -384,7 +439,7 @@ function TailscaleTab({
   testResult,
 }: {
   settings: AllSettings["tailscale"]
-  onSave: (b: Record<string, unknown>) => void
+  onSave: SaveHandler
   onTest: () => void
   saving: boolean
   testing: boolean
@@ -394,6 +449,22 @@ function TailscaleTab({
   const [apiKey, setApiKey] = useState("")
   const [controlUrl, setControlUrl] = useState(settings.control_url)
   const [prefix, setPrefix] = useState(settings.default_ts_hostname_prefix)
+
+  useEffect(() => {
+    setControlUrl(settings.control_url)
+    setPrefix(settings.default_ts_hostname_prefix)
+  }, [settings.control_url, settings.default_ts_hostname_prefix])
+
+  const handleSave = async () => {
+    await onSave({
+      auth_key: authKey || undefined,
+      api_key: apiKey || undefined,
+      control_url: controlUrl,
+      default_ts_hostname_prefix: prefix,
+    })
+    setAuthKey("")
+    setApiKey("")
+  }
 
   return (
     <div className="space-y-4">
@@ -434,14 +505,7 @@ function TailscaleTab({
       <div className="flex gap-2">
         <SaveButton
           saving={saving}
-          onClick={() =>
-            onSave({
-              auth_key: authKey || undefined,
-              api_key: apiKey || undefined,
-              control_url: controlUrl,
-              default_ts_hostname_prefix: prefix,
-            })
-          }
+          onClick={handleSave}
         />
         <TestButton testing={testing} onClick={onTest} label="Validate Key" />
       </div>
@@ -459,13 +523,17 @@ function DockerTab({
   testResult,
 }: {
   settings: AllSettings["docker"]
-  onSave: (b: Record<string, unknown>) => void
+  onSave: SaveHandler
   onTest: () => void
   saving: boolean
   testing: boolean
   testResult: ConnectionTestResult | null
 }) {
   const [socketPath, setSocketPath] = useState(settings.socket_path)
+
+  useEffect(() => {
+    setSocketPath(settings.socket_path)
+  }, [settings.socket_path])
 
   return (
     <div className="space-y-4">
@@ -490,12 +558,18 @@ function PathsTab({
   saving,
 }: {
   settings: AllSettings["paths"]
-  onSave: (b: Record<string, unknown>) => void
+  onSave: SaveHandler
   saving: boolean
 }) {
   const [generated, setGenerated] = useState(settings.generated_root)
   const [cert, setCert] = useState(settings.cert_root)
   const [ts, setTs] = useState(settings.tailscale_state_root)
+
+  useEffect(() => {
+    setGenerated(settings.generated_root)
+    setCert(settings.cert_root)
+    setTs(settings.tailscale_state_root)
+  }, [settings.generated_root, settings.cert_root, settings.tailscale_state_root])
 
   return (
     <div className="space-y-4">
@@ -621,8 +695,12 @@ function AccountTab() {
 }
 
 function DeveloperTab() {
-  const [working, setWorking] = useState(false)
+  const [workingAction, setWorkingAction] = useState<"reset-setup-complete" | "reset-all" | null>(null)
+  const [loadingLogs, setLoadingLogs] = useState(false)
   const [error, setError] = useState("")
+  const [logs, setLogs] = useState<MainLogsResponse | null>(null)
+
+  const working = workingAction !== null
 
   const runReset = async (kind: "reset-setup-complete" | "reset-all") => {
     const warning =
@@ -632,14 +710,27 @@ function DeveloperTab() {
 
     if (!window.confirm(warning)) return
 
-    setWorking(true)
+    setWorkingAction(kind)
     setError("")
     try {
       await api.post(`/settings/developer/${kind}`)
       window.location.assign("/setup")
     } catch (e) {
       setError(e instanceof Error ? e.message : "Developer reset failed")
-      setWorking(false)
+      setWorkingAction(null)
+    }
+  }
+
+  const loadLogs = async () => {
+    setLoadingLogs(true)
+    setError("")
+    setLogs(null)
+    try {
+      setLogs(await api.get<MainLogsResponse>("/settings/developer/main-logs?tail=250"))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load tailBale logs")
+    } finally {
+      setLoadingLogs(false)
     }
   }
 
@@ -647,6 +738,37 @@ function DeveloperTab() {
     <div className="space-y-4">
       <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
         Dangerous tools. Reset actions are for local testing and recovery only.
+      </div>
+
+      <div className="rounded-md border border-zinc-200 p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-zinc-800">tailBale container logs</h3>
+            <p className="mt-1 text-sm text-zinc-500">
+              Shows the latest logs from the main tailBale container.
+            </p>
+          </div>
+          <button
+            onClick={loadLogs}
+            disabled={loadingLogs}
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
+          >
+            {loadingLogs ? <><Loader2 className="h-4 w-4 animate-spin" /> Loading logs...</> : "Refresh logs"}
+          </button>
+        </div>
+        {loadingLogs && (
+          <div className="mt-3 flex items-center gap-2 text-sm text-zinc-500" role="status">
+            <Loader2 className="h-4 w-4 animate-spin" /> Loading main container logs...
+          </div>
+        )}
+        {logs && (
+          <div className="mt-3">
+            <p className="text-xs text-zinc-500">Container: {logs.container}</p>
+            <pre className="mt-2 max-h-80 overflow-auto rounded-md bg-zinc-950 p-3 text-xs text-zinc-100" aria-label="Main tailBale container logs">
+              {logs.logs || "No logs returned."}
+            </pre>
+          </div>
+        )}
       </div>
 
       <div className="rounded-md border border-zinc-200 p-4">
@@ -659,7 +781,7 @@ function DeveloperTab() {
           disabled={working}
           className="mt-3 rounded-md border border-amber-300 px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
         >
-          {working ? "Working..." : "Reset setup_complete"}
+          {workingAction === "reset-setup-complete" ? "Working..." : "Reset setup_complete"}
         </button>
       </div>
 
@@ -673,7 +795,7 @@ function DeveloperTab() {
           disabled={working}
           className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
         >
-          {working ? "Working..." : "Reset all"}
+          {workingAction === "reset-all" ? "Working..." : "Reset all"}
         </button>
       </div>
 

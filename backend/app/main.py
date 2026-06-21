@@ -1,16 +1,20 @@
+# ruff: noqa: E402
 import asyncio
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+
+from app.logging_config import configure_logging
+
+configure_logging()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import app.models
 from app.config import settings
 from app.database import Base, engine
-from app.version import __version__
-import app.models
 from app.routers.auth import router as auth_router
 from app.routers.dashboard import router as dashboard_router
 from app.routers.discovery import router as discovery_router
@@ -19,6 +23,7 @@ from app.routers.jobs import router as jobs_router
 from app.routers.profiles import router as profiles_router
 from app.routers.services import router as services_router
 from app.routers.settings import router as settings_router
+from app.version import __version__
 
 
 @asynccontextmanager
@@ -26,34 +31,43 @@ async def lifespan(app: FastAPI):
     # Startup: ensure data directories and database tables exist
     settings.ensure_dirs()
     Base.metadata.create_all(bind=engine)
-    from app.database import run_migrations
+    from app.database import SessionLocal, run_migrations
     run_migrations()
 
-    # Ensure edge image is built (runs in thread to avoid blocking startup)
-    from app.edge.image_builder import ensure_edge_image
-    try:
-        await asyncio.to_thread(ensure_edge_image)
-    except Exception:
-        import logging
-        logging.getLogger(__name__).warning(
-            "Could not build edge image at startup — will retry on first service reconcile",
-            exc_info=True,
-        )
+    # Recover jobs left "running" by a previous crash so they can be retried
+    # or dismissed again (the retry/dismiss endpoints reject "running").
+    from app.routers.jobs import reset_stale_running_jobs
+    with SessionLocal() as startup_db:
+        reset_stale_running_jobs(startup_db)
+
+    # Build the edge image in the background so it never blocks startup: ASGI
+    # holds off accepting connections (including /api/health) until lifespan
+    # startup returns, and a fresh build can take minutes. The reconcile and
+    # recreate paths also call ensure_edge_image lazily, so this is best-effort.
+    async def _build_edge_image_bg() -> None:
+        from app.edge.image_builder import ensure_edge_image
+        try:
+            await asyncio.to_thread(ensure_edge_image)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "Could not build edge image at startup — will retry on first service reconcile",
+                exc_info=True,
+            )
 
     # Start background tasks
     from app.certs.renewal_task import cert_renewal_loop
     from app.reconciler.reconcile_loop import reconcile_loop
 
+    image_task = asyncio.create_task(_build_edge_image_bg())
     renewal_task = asyncio.create_task(cert_renewal_loop())
     reconcile_task = asyncio.create_task(reconcile_loop())
     yield
     # Shutdown: cancel background tasks
-    for task in (renewal_task, reconcile_task):
+    for task in (image_task, renewal_task, reconcile_task):
         task.cancel()
-        try:
+        with suppress(asyncio.CancelledError):
             await task
-        except asyncio.CancelledError:
-            pass
 
 
 app = FastAPI(
@@ -63,14 +77,26 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-_cors_origins = [o.strip() for o in settings.cors_origins.split(",")]
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+def _cors_middleware_options(cors_origins: str) -> dict[str, object] | None:
+    origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
+    if not origins:
+        return None
+    if "*" in origins:
+        origins = ["*"]
+        allow_credentials = False
+    else:
+        allow_credentials = True
+    return {
+        "allow_origins": origins,
+        "allow_credentials": allow_credentials,
+        "allow_methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        "allow_headers": ["Authorization", "Content-Type"],
+    }
+
+
+_cors_options = _cors_middleware_options(settings.cors_origins)
+if _cors_options is not None:
+    app.add_middleware(CORSMiddleware, **_cors_options)
 
 
 app.include_router(auth_router)

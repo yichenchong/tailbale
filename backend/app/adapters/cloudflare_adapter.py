@@ -6,6 +6,7 @@ All functions are synchronous (httpx sync client).
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any
 
@@ -24,8 +25,25 @@ def _headers(token: str) -> dict[str, str]:
 
 
 def _check_response(resp: httpx.Response, action: str) -> dict:
-    """Raise on Cloudflare API error, return result dict on success."""
-    data = resp.json()
+    """Raise on Cloudflare API error, return result dict on success.
+
+    Cloudflare's edge can return non-JSON bodies (HTML 5xx error pages, plain
+    "522"/"524" timeouts, rate-limit notices). Parsing those directly would
+    raise a cryptic ``JSONDecodeError`` that surfaces to the operator as the
+    cert/DNS failure reason, so translate it into a clear status-coded error.
+    """
+    try:
+        data = resp.json()
+    except (json.JSONDecodeError, ValueError) as exc:
+        snippet = " ".join((resp.text or "").split())[:200]
+        raise RuntimeError(
+            f"Cloudflare {action} failed: non-JSON response (HTTP {resp.status_code})"
+            + (f": {snippet}" if snippet else "")
+        ) from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(
+            f"Cloudflare {action} failed: unexpected response shape (HTTP {resp.status_code})"
+        )
     if not data.get("success", False):
         errors = data.get("errors", [])
         msg = "; ".join(e.get("message", str(e)) for e in errors) if errors else resp.text

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 
 import docker
@@ -11,19 +12,34 @@ from app.version import __version__
 
 logger = logging.getLogger(__name__)
 
+
+def _close_client(client: docker.DockerClient) -> None:
+    close = getattr(client, "close", None)
+    if close is not None:
+        try:
+            close()
+        except Exception:
+            logger.debug("Failed to close Docker client", exc_info=True)
+
 EDGE_IMAGE = "tailbale-edge:latest"
 # Relative to the app working directory inside the orchestrator container
 _EDGE_CONTEXT = Path("/app/edge-image")
+# Serializes ensure_edge_image so a startup build and a concurrent lazy build
+# (reconcile/recreate) cannot both rebuild the same tag at once.
+_BUILD_LOCK = threading.Lock()
 
 
 def edge_image_exists(socket_path: str | None = None) -> bool:
     """Check if the edge image is already available locally."""
     client = _get_client(socket_path)
     try:
-        client.images.get(EDGE_IMAGE)
-        return True
-    except docker.errors.ImageNotFound:
-        return False
+        try:
+            client.images.get(EDGE_IMAGE)
+            return True
+        except docker.errors.ImageNotFound:
+            return False
+    finally:
+        _close_client(client)
 
 
 
@@ -54,21 +70,24 @@ def build_edge_image(socket_path: str | None = None) -> str:
         )
 
     client = _get_client(socket_path)
-    logger.info("Building edge image %s from %s ...", EDGE_IMAGE, _EDGE_CONTEXT)
-    image, build_logs = client.images.build(
-        path=str(_EDGE_CONTEXT),
-        tag=EDGE_IMAGE,
-        rm=True,
-        labels={"tailbale.version": __version__},
-    )
-    for chunk in build_logs:
-        if "stream" in chunk:
-            line = chunk["stream"].strip()
-            if line:
-                logger.debug("[edge-build] %s", line)
+    try:
+        logger.info("Building edge image %s from %s ...", EDGE_IMAGE, _EDGE_CONTEXT)
+        image, build_logs = client.images.build(
+            path=str(_EDGE_CONTEXT),
+            tag=EDGE_IMAGE,
+            rm=True,
+            labels={"tailbale.version": __version__},
+        )
+        for chunk in build_logs:
+            if "stream" in chunk:
+                line = chunk["stream"].strip()
+                if line:
+                    logger.debug("[edge-build] %s", line)
 
-    logger.info("Edge image built: %s (id=%s)", EDGE_IMAGE, image.id)
-    return image.id
+        logger.info("Edge image built: %s (id=%s)", EDGE_IMAGE, image.id)
+        return image.id
+    finally:
+        _close_client(client)
 
 
 def ensure_edge_image(socket_path: str | None = None) -> None:
@@ -78,29 +97,36 @@ def ensure_edge_image(socket_path: str | None = None) -> None:
     doesn't match the current orchestrator version, the image is rebuilt
     so that containers created from it carry the correct code.
     """
-    client = _get_client(socket_path)
-    previous_image_id: str | None = None
-    try:
-        image = client.images.get(EDGE_IMAGE)
-        previous_image_id = image.id
-        image_version = (image.labels or {}).get("tailbale.version")
-        if image_version == __version__:
-            logger.info("Edge image %s already at version %s", EDGE_IMAGE, __version__)
-            return
-        logger.info(
-            "Edge image version mismatch (image=%s, orchestrator=%s), rebuilding...",
-            image_version, __version__,
-        )
-    except docker.errors.ImageNotFound:
-        logger.info("Edge image %s not found, building...", EDGE_IMAGE)
+    # Serialize so a startup build and a concurrent lazy build (reconcile or
+    # recreate, which also call ensure_edge_image) cannot both rebuild at once.
+    # The loser of the lock re-checks the version label and returns early.
+    with _BUILD_LOCK:
+        client = _get_client(socket_path)
+        previous_image_id: str | None = None
+        try:
+            try:
+                image = client.images.get(EDGE_IMAGE)
+                previous_image_id = image.id
+                image_version = (image.labels or {}).get("tailbale.version")
+                if image_version == __version__:
+                    logger.info("Edge image %s already at version %s", EDGE_IMAGE, __version__)
+                    return
+                logger.info(
+                    "Edge image version mismatch (image=%s, orchestrator=%s), rebuilding...",
+                    image_version, __version__,
+                )
+            except docker.errors.ImageNotFound:
+                logger.info("Edge image %s not found, building...", EDGE_IMAGE)
 
-    new_image_id = build_edge_image(socket_path)
-    if previous_image_id and previous_image_id != new_image_id:
-        _remove_image_if_present(
-            client,
-            previous_image_id,
-            reason=f"replaced by {new_image_id}",
-        )
+            new_image_id = build_edge_image(socket_path)
+            if previous_image_id and previous_image_id != new_image_id:
+                _remove_image_if_present(
+                    client,
+                    previous_image_id,
+                    reason=f"replaced by {new_image_id}",
+                )
+        finally:
+            _close_client(client)
 
 
 def _get_client(socket_path: str | None = None) -> docker.DockerClient:
