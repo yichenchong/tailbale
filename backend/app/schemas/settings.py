@@ -1,3 +1,5 @@
+import re
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -14,9 +16,36 @@ class GeneralSettingsUpdate(_SettingsUpdateModel):
     base_domain: str | None = Field(default=None, min_length=1)
     acme_email: str | None = Field(default=None, min_length=1)
     reconcile_interval_seconds: int | None = Field(default=None, ge=1)
+    health_check_interval_seconds: int | None = Field(default=None, ge=1)
     cert_renewal_window_days: int | None = Field(default=None, ge=1)
+    event_retention_days: int | None = Field(default=None, ge=1)
     timezone: str | None = Field(default=None, min_length=1)
     developer_mode: bool | None = None
+
+    @field_validator("base_domain")
+    @classmethod
+    def normalize_base_domain(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        domain = value.lower()
+        if not re.fullmatch(
+            r"[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*",
+            domain,
+        ):
+            raise ValueError("Invalid base domain format")
+        return domain
+
+    @field_validator("acme_email")
+    @classmethod
+    def validate_acme_email(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        # Very general shape: exactly one '@', non-empty whitespace-free local
+        # part, and a domain with at least one dot. Deliberately lenient — it
+        # only catches obvious mistakes, never rejects a real address.
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value):
+            raise ValueError("Invalid email address")
+        return value
 
 
 class CloudflareSettingsUpdate(_SettingsUpdateModel):
@@ -45,7 +74,9 @@ class GeneralSettingsResponse(BaseModel):
     base_domain: str
     acme_email: str
     reconcile_interval_seconds: int
+    health_check_interval_seconds: int
     cert_renewal_window_days: int
+    event_retention_days: int
     timezone: str
     developer_mode: bool
 

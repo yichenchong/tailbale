@@ -1,6 +1,6 @@
 # tailBale
 
-Self-hosted orchestrator for Unraid that exposes Docker containers as individually shareable HTTPS services via per-service Tailscale edge containers.
+Self-hosted orchestrator that exposes Docker containers as individually shareable HTTPS services via per-service Tailscale edge containers.
 
 Each exposed service gets its own Tailscale identity, Let's Encrypt certificate, and Cloudflare DNS record under `<service>.yourdomain.com` — no public inbound ports, no Cloudflare Tunnel, no reverse-proxy dashboard click-ops.
 
@@ -13,7 +13,7 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
                                          DNS A record → Tailscale IP
 ```
 
-1. **Discover** running Docker containers on your Unraid server
+1. **Discover** running Docker containers on your server
 2. **Complete the setup wizard** — tailBale stores and validates:
    - base domain
    - Cloudflare zone ID + API token
@@ -29,7 +29,7 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 
 ## Prerequisites
 
-- **Unraid 6.12+** with Docker enabled
+- **A Linux host** with Docker installed
 - **Domain** managed in Cloudflare
 - **Cloudflare API token** with DNS:Edit permission
 - **Tailscale account** with both:
@@ -40,16 +40,16 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 
 ```bash
 # Clone
-git clone https://github.com/yichenchong/tailbale.git /mnt/user/appdata/tailbale
-cd /mnt/user/appdata/tailbale
+git clone https://github.com/yichenchong/tailbale.git /opt/tailbale
+cd /opt/tailbale
 
 # Build and run (safe for first-time deploys, upgrades, and non-executable checkouts)
 bash ./deploy.sh
 
 # Optional host port, host data path, or runtime override:
-# HOST_PORT=6790 HOST_DATA_DIR=/mnt/user/appdata/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
+# HOST_PORT=6790 HOST_DATA_DIR=/opt/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
 
-# Open http://<unraid-ip>:6780 (or your HOST_PORT override) and complete the setup wizard
+# Open http://localhost:6780 on the server (or your HOST_PORT override) and complete the setup wizard
 ```
 
 See [DEPLOY.md](DEPLOY.md) for detailed deployment instructions, environment variables, and troubleshooting.
@@ -69,7 +69,7 @@ See [DEPLOY.md](DEPLOY.md) for detailed deployment instructions, environment var
 
 | Layer | Technology |
 |---|---|
-| Backend | Python 3.12, FastAPI, SQLAlchemy 2.0, SQLite |
+| Backend | Python 3.14, FastAPI, SQLAlchemy 2.0, SQLite |
 | Frontend | React 18, TypeScript, Vite 8, Tailwind CSS 4 |
 | Edge proxy | Caddy (per-service, with file-based TLS) |
 | Networking | Tailscale (per-service identity) |
@@ -120,7 +120,7 @@ npx vitest run
 │       ├── certs/               # Certificate issuance + renewal
 │       ├── adapters/            # Cloudflare DNS adapter
 │       ├── reconciler/          # Idempotent service reconciliation
-│       ├── health/              # Health check system (11 subchecks)
+│       ├── health/              # Health check system (12 subchecks)
 │       └── events/              # Event emission
 ├── edge/
 │   ├── Dockerfile               # Tailscale + Caddy edge image

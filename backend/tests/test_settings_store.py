@@ -1,5 +1,7 @@
 """Tests for the settings key-value store."""
 
+import pytest
+
 from app.models.setting import Setting
 from app.settings_store import (
     DEFAULTS,
@@ -33,7 +35,7 @@ class TestSettingsStore:
     def test_get_all_settings_defaults(self, db_session):
         result = get_all_settings(db_session)
         assert result["base_domain"] == "example.com"
-        assert result["reconcile_interval_seconds"] == "60"
+        assert result["reconcile_interval_seconds"] == "3600"
         assert result["setup_complete"] == "false"
 
     def test_get_all_settings_with_overrides(self, db_session):
@@ -49,12 +51,41 @@ class TestSettingsStore:
         set_setting(db_session, "reconcile_interval_seconds", "120")
         assert get_positive_int_setting(db_session, "reconcile_interval_seconds") == 120
 
-    def test_get_positive_int_setting_falls_back_for_stale_invalid_values(self, db_session):
-        set_setting(db_session, "reconcile_interval_seconds", "not-an-int")
-        set_setting(db_session, "cert_renewal_window_days", "0")
+    def test_get_positive_int_setting_returns_stored_digits(self, db_session):
+        # A clean digit string is returned verbatim: writes are validated ge=1.
+        set_setting(db_session, "event_retention_days", "7")
+        assert get_positive_int_setting(db_session, "event_retention_days") == 7
 
-        assert get_positive_int_setting(db_session, "reconcile_interval_seconds") == 60
-        assert get_positive_int_setting(db_session, "cert_renewal_window_days") == 30
+    def test_get_positive_int_setting_unset_key_returns_default(self, db_session):
+        # An unset key resolves to its DEFAULTS entry (all valid positive ints).
+        assert get_positive_int_setting(db_session, "reconcile_interval_seconds") == 3600
+        assert get_positive_int_setting(db_session, "health_check_interval_seconds") == 60
+        assert get_positive_int_setting(db_session, "event_retention_days") == 30
+
+    def test_get_positive_int_setting_raises_on_stored_zero(self, db_session):
+        # Writes enforce ge=1, so a stored "0" is corruption: fail loud rather
+        # than silently masking a non-positive interval with the default.
+        set_setting(db_session, "reconcile_interval_seconds", "0")
+        with pytest.raises(ValueError):
+            get_positive_int_setting(db_session, "reconcile_interval_seconds")
+
+    def test_get_positive_int_setting_raises_on_negative_value(self, db_session):
+        set_setting(db_session, "reconcile_interval_seconds", "-5")
+        with pytest.raises(ValueError):
+            get_positive_int_setting(db_session, "reconcile_interval_seconds")
+
+    def test_get_positive_int_setting_raises_on_non_integer(self, db_session):
+        # A non-integer string could never have passed write validation.
+        set_setting(db_session, "reconcile_interval_seconds", "not-an-int")
+        with pytest.raises(ValueError):
+            get_positive_int_setting(db_session, "reconcile_interval_seconds")
+
+    def test_get_positive_int_setting_raises_on_non_ascii_digit(self, db_session):
+        # str.isdigit() accepts superscript digits ("\u00b2") that int() rejects;
+        # such corruption must raise, not silently fall back to the default.
+        set_setting(db_session, "reconcile_interval_seconds", "\u00b2")
+        with pytest.raises(ValueError):
+            get_positive_int_setting(db_session, "reconcile_interval_seconds")
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +101,6 @@ class TestRuntimePaths:
         assert "generated_dir" in paths
         assert "certs_dir" in paths
         assert "tailscale_state_dir" in paths
-        assert "docker_socket" in paths
         for v in paths.values():
             assert v
 
@@ -152,3 +182,53 @@ class TestRuntimePaths:
         finally:
             app_settings.data_dir = original_data
             app_settings.host_data_dir = original_host
+
+    def test_host_paths_equal_internal_for_noncanonical_roots_without_host_data_dir(self, db_session):
+        """Without HOST_DATA_DIR the host path must be byte-for-byte equal to the
+        internal path even when the configured root is non-canonical (contains
+        '..'). resolve()-ing only the host side would silently diverge them."""
+        from app.config import settings as app_settings
+        from app.settings_store import get_runtime_paths, set_setting
+
+        original_host = app_settings.host_data_dir
+        app_settings.host_data_dir = None
+        set_setting(db_session, "generated_root", "/data/sub/../generated")
+        db_session.flush()
+        try:
+            paths = get_runtime_paths(db_session)
+            assert paths["generated_dir"] == "/data/sub/../generated"
+            assert paths["host_generated_dir"] == paths["generated_dir"]
+        finally:
+            app_settings.host_data_dir = original_host
+
+
+class TestResolveSocket:
+    def test_unset_returns_default(self, db_session):
+        from app.edge.docker_client import resolve_socket
+
+        # Unset falls back to the default unix socket (non-None).
+        assert resolve_socket(db_session) == "unix:///var/run/docker.sock"
+
+    def test_empty_returns_none(self, db_session):
+        from app.edge.docker_client import resolve_socket
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "docker_socket_path", "")
+        db_session.commit()
+        assert resolve_socket(db_session) is None
+
+    def test_whitespace_returns_none(self, db_session):
+        from app.edge.docker_client import resolve_socket
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "docker_socket_path", "   ")
+        db_session.commit()
+        assert resolve_socket(db_session) is None
+
+    def test_configured_value_is_returned(self, db_session):
+        from app.edge.docker_client import resolve_socket
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "docker_socket_path", "tcp://10.0.0.1:2375")
+        db_session.commit()
+        assert resolve_socket(db_session) == "tcp://10.0.0.1:2375"

@@ -127,6 +127,46 @@ describe("useDynamicFavicon", () => {
     expect(fetchMock.mock.calls.length).toBe(callsBeforeUnmount)
   })
 
+  it("clears interval id zero on unmount", async () => {
+    const clearIntervalMock = vi.spyOn(globalThis, "clearInterval")
+    vi.spyOn(globalThis, "setInterval").mockReturnValue(0 as unknown as ReturnType<typeof setInterval>)
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve({ services: { error: 0 } }),
+    }) as unknown as typeof fetch
+
+    const { unmount } = render(<Probe interval={1000} />)
+    await flushMicrotasks()
+    unmount()
+
+    expect(clearIntervalMock).toHaveBeenCalledWith(0)
+  })
+
+  it("does not rewrite a static favicon from an in-flight request after unmount", async () => {
+    let resolveFetch!: (value: Response) => void
+    global.fetch = vi.fn().mockReturnValue(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve
+      })
+    ) as unknown as typeof fetch
+
+    const { unmount } = render(<Probe />)
+    unmount()
+    setFavicon("/favicon-healthy.svg")
+
+    await act(async () => {
+      resolveFetch({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ services: { error: 1 } }),
+      } as Response)
+    })
+    await flushMicrotasks()
+
+    expect(iconHref()).toBe("/favicon-healthy.svg")
+  })
+
   it("stops polling permanently after a 401 response", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

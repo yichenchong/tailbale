@@ -1,15 +1,15 @@
-# Unraid Per-Service Edge Orchestrator — Detailed Product & Technical Specification
+# Per-Service Edge Orchestrator — Detailed Product & Technical Specification
 
 Version: 1.0  
 Status: Draft build spec  
-Target platform: Unraid (Docker-based)  
+Target platform: any Linux host with Docker
 Primary audience: Solo builder / future contributors / implementation AIs
 
 ---
 
 ## 1. Purpose
 
-Build a self-hosted orchestrator for Unraid that lets the user expose selected Docker containers as individually shareable HTTPS services under:
+Build a self-hosted orchestrator that lets the user expose selected Docker containers as individually shareable HTTPS services under:
 
 `https://<service>.mydomain.com`
 
@@ -20,7 +20,7 @@ The orchestrator must:
 - avoid Cloudflare Tunnel
 - avoid reverse-proxy dashboard click-ops
 - keep existing application containers largely unchanged
-- make edge creation simple through a UI similar in spirit to Unraid’s app config flow
+- make edge creation simple through a UI similar in spirit to a typical app config flow
 
 The orchestrator is both:
 
@@ -43,7 +43,7 @@ Each edge container contains:
 
 The orchestrator itself:
 
-- discovers Unraid Docker containers
+- discovers Docker containers
 - stores desired exposure configuration
 - issues and renews certificates centrally using ACME DNS-01
 - writes certificates to per-service cert directories
@@ -57,7 +57,7 @@ The orchestrator itself:
 
 ### 3.1 Functional goals
 
-- List existing Docker containers running on Unraid
+- List existing Docker containers running on the host
 - Let user select one and “wrap” it with an edge
 - Generate one edge container per exposed service
 - Manage TLS certificates centrally
@@ -107,7 +107,7 @@ The orchestrator itself:
 
 ### 5.1 Environment assumptions
 
-- Unraid host is already running Docker
+- The host is already running Docker
 - User installs apps mainly through Community Applications
 - User has:
   - a domain managed in Cloudflare
@@ -160,7 +160,7 @@ Responsibilities:
 - terminate TLS using file-based certs
 - proxy traffic to upstream app container
 
-#### D. Docker engine / Unraid
+#### D. Docker engine
 Provides:
 
 - container list
@@ -436,7 +436,7 @@ Must provide:
 - Writes to service state should be transactional
 
 ### 9.2 Performance
-- UI container list should load quickly on typical Unraid scale
+- UI container list should load quickly at typical self-hosted scale
 - Reconciliation should be per-service, not block all services unnecessarily
 - Cert renew scan can be periodic, not constant
 
@@ -519,9 +519,9 @@ docker:
 runtime:
   reconcile_interval_seconds: 60
   cert_renewal_window_days: 30
-  generated_root: /mnt/user/appdata/orchestrator/generated
-  cert_root: /mnt/user/appdata/orchestrator/certs
-  tailscale_state_root: /mnt/user/appdata/orchestrator/tailscale
+  generated_root: /opt/orchestrator/generated
+  cert_root: /opt/orchestrator/certs
+  tailscale_state_root: /opt/orchestrator/tailscale
 ```
 
 ### 10.3 EventRecord
@@ -1287,7 +1287,7 @@ Observed cert metadata per service
 ### 21.2 Filesystem layout
 
 Suggested root:
-`/mnt/user/appdata/orchestrator/`
+`/opt/orchestrator/`
 
 Subdirs:
 - `db/`
@@ -1446,7 +1446,7 @@ Examples:
 
 A build is acceptable if the following are all true:
 
-1. User can install orchestrator on Unraid
+1. User can install the orchestrator on a Docker host
 2. User can configure base domain, Cloudflare, and Tailscale credentials
 3. User can discover an existing app container
 4. User can expose it via a form in under a few minutes
@@ -1544,7 +1544,7 @@ The user experience should feel simple, but the internals should behave like a s
 
 ## 30. Final summary
 
-This orchestrator is a **Unraid-native control plane for per-service Tailscale edges**.
+This orchestrator is a **control plane for per-service Tailscale edges**.
 
 The product should let the user take an existing self-hosted application container and, with a simple form, turn it into:
 

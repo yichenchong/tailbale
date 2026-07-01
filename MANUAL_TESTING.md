@@ -1,6 +1,6 @@
 # tailBale Manual Testing Checklist
 
-Test these journeys on the Unraid box after deployment. Work through them in
+Test these journeys on the host after deployment. Work through them in
 order — each section builds on the previous one.
 
 ---
@@ -8,7 +8,7 @@ order — each section builds on the previous one.
 ## Prerequisites
 
 - [ ] tailBale container is running (`docker logs tailbale` shows startup)
-- [ ] `/api/health` returns `{"status":"ok"}` (curl from Unraid shell)
+- [ ] `/api/health` returns `{"status":"ok"}` (curl from the host shell)
 - [ ] You have a Cloudflare zone ID + API token with DNS edit permissions
 - [ ] You have a Tailscale auth key (reusable, tagged for the tailnet)
 - [ ] You have a Tailscale API key for device management
@@ -85,7 +85,7 @@ Open the UI in a browser. You should be redirected to `/setup`.
 Navigate to **Discover** in the sidebar.
 
 - [ ] Page loads and shows running Docker containers from the host
-- [ ] The tailBale container itself is hidden (it has `tailbale.managed` label)
+- [ ] The tailBale container itself is hidden (it has the `tailbale.main` label)
 - [ ] Each container shows: name, image, state (running), ports, networks
 - [ ] Toggle "Running only" off — stopped containers appear
 - [ ] Toggle it back on — only running containers shown
@@ -116,18 +116,22 @@ You should now be on the Expose Service wizard with fields pre-filled.
       upstream, network all look correct
 - [ ] Click **Create Service**
 
-### 4c. Progress screen
+### 4c. Reconcile progress
 
-- [ ] Screen switches to the progress tracker with steps:
-      Queued → Validating → Creating Network → Issuing Certificate → Generating
-      Config → Creating Edge → Waiting for Tailscale → Syncing DNS → Reloading
-      Caddy → Health Checks → Healthy
-- [ ] Steps complete one by one with green checkmarks
-- [ ] **Certificate step may take 30–60 seconds** (ACME DNS-01 challenge)
-- [ ] **Tailscale step may take 10–30 seconds** (auth + IP assignment)
-- [ ] Final state should be **Healthy** with all steps green
-- [ ] If a profile was detected, a post-setup reminder may appear (blue banner)
-- [ ] Click **View Service** to go to the detail page
+- [ ] On **Create Service** the button shows a "Creating..." spinner, then you
+      are taken straight to the service detail page (`/services/{id}`)
+- [ ] The **Phase** badge starts at `pending` and transitions to `healthy` as
+      the reconciler runs (the page polls and refreshes on its own)
+- [ ] The **Health Checks** grid fills in — the 12 checks flip to green
+      checkmarks as each converges
+- [ ] **Certificate issuance may take 30–60 seconds** (ACME DNS-01 challenge):
+      the `Certificate` / `Cert Valid` checks stay red until it completes
+- [ ] **Tailscale IP may take 10–30 seconds** (auth + IP assignment): the
+      `Tailscale Ready` / `Tailscale IP` checks stay red until then
+- [ ] Final state should be **Phase: healthy** with all 12 health checks green
+- [ ] If a profile was detected, its post-setup reminder was shown on the Expose
+      form's blue "Detected profile" banner ("After creating: ...") before you
+      submitted — act on it now if needed
 
 ### 4d. Verify the service actually works
 
@@ -165,12 +169,12 @@ You should now be on the Expose Service wizard with fields pre-filled.
 
 ### 5c. Health checks grid
 
-- [ ] All 11 checks should show green checkmarks when healthy:
+- [ ] All 12 checks should show green checkmarks when healthy:
   - Upstream Container, Network Connected, Edge Container, Edge Running
   - Tailscale Ready, Tailscale IP
   - Certificate, Cert Valid
   - DNS Record, DNS Matches IP
-  - Caddy Config
+  - Caddy Config, HTTPS Probe
 - [ ] If any check fails, a red suggestion banner explains what to do
 
 ### 5d. Actions
@@ -185,7 +189,7 @@ Test each action button:
       **Verify the service URL still works after recreation.**
 - [ ] **Force Renew Cert** — triggers ACME renewal. May take 30–60s. Check that
       cert expiry date updates.
-- [ ] **Re-run Reconcile** — manually triggers the full 12-step reconciliation.
+- [ ] **Re-run Reconcile** — manually triggers the full 14-step reconciliation.
       Phase should end at "healthy".
 
 ---
@@ -241,7 +245,7 @@ These tests verify the system detects and recovers from problems.
 
 ### 9a. Stop the upstream container
 
-- [ ] `docker stop {upstream_container_name}` from the Unraid shell
+- [ ] `docker stop {upstream_container_name}` from the host shell
 - [ ] Wait for the next reconcile cycle (or trigger manually)
 - [ ] Service detail should show:
   - Phase: "error"
@@ -258,14 +262,14 @@ These tests verify the system detects and recovers from problems.
 
 ### 9c. Stop the edge container manually
 
-- [ ] `docker stop edge_{slug}` from the Unraid shell
+- [ ] `docker stop edge_{slug}` from the host shell
 - [ ] Wait for reconcile — the reconciler should detect it's stopped and restart
       it automatically
 - [ ] Service should return to healthy without manual intervention
 
 ### 9d. Remove the edge container manually
 
-- [ ] `docker rm -f edge_{slug}` from the Unraid shell
+- [ ] `docker rm -f edge_{slug}` from the host shell
 - [ ] Wait for reconcile — the reconciler should detect it's missing and
       recreate it from scratch (new container, re-auth to Tailscale)
 - [ ] Service should return to healthy (may take 30–60s for Tailscale IP)
@@ -295,10 +299,10 @@ Navigate to **Settings** in the sidebar.
 ### 11a. General tab
 
 - [ ] Shows current base domain and ACME email (from setup)
-- [ ] Reconcile interval shows default (60 seconds)
+- [ ] Full reconcile interval shows default (3600 seconds); health-check interval shows default (60 seconds)
 - [ ] Cert renewal window shows default (30 days)
 - [ ] Change reconcile interval to 120, click Save — should save and refresh
-- [ ] Change it back to 60
+- [ ] Change it back to 3600
 
 ### 11b. Cloudflare tab
 
@@ -332,7 +336,8 @@ Navigate to **Services** in the sidebar.
 - [ ] All exposed services appear in a table
 - [ ] Columns: name (clickable), hostname, upstream, status badge, Tailscale IP,
       cert expiry
-- [ ] Cert expiry is color-coded: green (>7d), yellow (<7d), red (expired)
+- [ ] Cert expiry is color-coded: gray (more than 14 days left), yellow (14 days
+      or fewer left), red (expired)
 - [ ] Click the "..." menu on a service — shows quick actions:
   - View Details, Reload Caddy, Restart Edge, Recreate Edge, Disable, Delete
 - [ ] **Reload Caddy** from the menu — success message appears briefly
@@ -345,7 +350,7 @@ Navigate to **Services** in the sidebar.
 
 ### 13a. Logout
 
-- [ ] Open browser dev tools, check that `tailbale_session` cookie exists under
+- [ ] Open browser dev tools, check that `access_token` cookie exists under
       `/api` path
 - [ ] Log out (if there's a logout button in the sidebar/header)
 - [ ] Should redirect to `/login`

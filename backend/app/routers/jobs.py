@@ -1,50 +1,18 @@
 """Jobs API — manage orphaned DNS cleanup records and other background jobs."""
 
-import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app.adapters.cloudflare_adapter import CF_CLEANUP_TIMEOUT
 from app.auth import get_current_user
 from app.database import commit_with_lock, db_write_section, get_db
-from app.models.event import Event
+from app.events.event_emitter import emit_event
 from app.models.job import Job
 
 logger = logging.getLogger(__name__)
 
-
-def _job_details(job: Job, *, required: bool = False) -> dict:
-    """Parse a job details payload, raising 422 when a required payload is unusable."""
-    if not job.details:
-        return {}
-    try:
-        details = json.loads(job.details)
-    except json.JSONDecodeError as exc:
-        if required:
-            raise HTTPException(status_code=422, detail="Job details contain invalid JSON") from exc
-        logger.warning("Job %s has invalid JSON details", job.id)
-        return {}
-    if not isinstance(details, dict):
-        if required:
-            raise HTTPException(status_code=422, detail="Job details must be a JSON object")
-        logger.warning("Job %s has non-object JSON details", job.id)
-        return {}
-    return details
-
-
-def _job_details_for_response(job: Job) -> dict | None:
-    if not job.details:
-        return None
-    try:
-        details = json.loads(job.details)
-    except json.JSONDecodeError:
-        logger.warning("Job %s has invalid JSON details", job.id)
-        return None
-    if not isinstance(details, dict):
-        logger.warning("Job %s has non-object JSON details", job.id)
-        return None
-    return details
 
 router = APIRouter(
     prefix="/api/jobs",
@@ -61,24 +29,10 @@ def _job_to_dict(job: Job) -> dict:
         "status": job.status,
         "progress": job.progress,
         "message": job.message,
-        "details": _job_details_for_response(job),
+        "details": job.details,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "updated_at": job.updated_at.isoformat() if job.updated_at else None,
     }
-
-
-def _emit_event(
-    db: Session, service_id: str | None, kind: str, message: str,
-    details: dict | None = None, level: str = "info",
-) -> None:
-    event = Event(
-        service_id=service_id,
-        kind=kind,
-        level=level,
-        message=message,
-        details=json.dumps(details) if details else None,
-    )
-    db.add(event)
 
 
 def reset_stale_running_jobs(db: Session) -> int:
@@ -101,7 +55,7 @@ def reset_stale_running_jobs(db: Session) -> int:
 
 
 @router.get("")
-async def list_jobs(
+def list_jobs(
     status: str | None = None,
     kind: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
@@ -126,7 +80,7 @@ async def list_jobs(
 
 
 @router.get("/{job_id}")
-async def get_job(job_id: str, db: Session = Depends(get_db)):
+def get_job(job_id: str, db: Session = Depends(get_db)):
     """Get a single job."""
     job = db.get(Job, job_id)
     if not job:
@@ -135,14 +89,15 @@ async def get_job(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.post("/{job_id}/retry")
-async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
+def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
     """Retry an orphaned DNS cleanup job.
 
     Steps:
-    1. Check if the Cloudflare record still exists (via find_record).
-    2. If it exists, delete it.
-    3. If it's already gone, mark completed.
-    4. On success, delete the job row.
+    1. Check whether the Cloudflare record still exists (via find_record).
+    2. If it still exists and is still orphaned, delete it from Cloudflare.
+    3. If a live service has reclaimed the record id, skip deletion (deleting it
+       would cause an outage); if it is already gone, there is nothing to delete.
+    4. On success (any of the above), delete the job row.
     """
     job = db.get(Job, job_id)
     if not job:
@@ -150,23 +105,31 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
     if job.kind != "dns_orphan_cleanup":
         raise HTTPException(status_code=422, detail="Only dns_orphan_cleanup jobs can be retried")
 
-    details = _job_details(job, required=True)
+    details = job.details
+    if not isinstance(details, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Job details are missing or malformed",
+        )
     record_id = details.get("record_id")
-    hostname = details.get("hostname", "unknown")
+    hostname = details.get("hostname")
     zone_id = details.get("zone_id")
     if not zone_id:
         from app.settings_store import get_setting
 
         zone_id = get_setting(db, "cf_zone_id")
 
-    if not record_id or not zone_id:
+    if not record_id or not hostname or not zone_id:
         raise HTTPException(
             status_code=422,
-            detail="Job is missing record_id or zone_id in details",
+            detail="Job is missing record_id, hostname, or zone_id in details",
         )
 
-    from app.reconciler.reconciler import _RECONCILE_MUTEX
-    from app.routers.services import _SERVICE_LIFECYCLE_MUTEX
+    # This job acts on a DNS record whose service is already deleted, so there is
+    # no per-service reconcile lock to take. Serialize service-less/global ops via
+    # lifecycle_then_global_ops, which takes _SERVICE_LIFECYCLE_MUTEX then
+    # _GLOBAL_OPS_MUTEX — the documented tier-1 -> tier-2 (reconcile-slot) order.
+    from app.locks import lifecycle_then_global_ops
     from app.secrets import CLOUDFLARE_TOKEN, read_secret
     cf_token = read_secret(CLOUDFLARE_TOKEN)
     if not cf_token:
@@ -174,7 +137,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             status_code=422,
             detail="Cloudflare API token is not configured",
         )
-    with _SERVICE_LIFECYCLE_MUTEX, _RECONCILE_MUTEX:
+    with lifecycle_then_global_ops():
         with db_write_section(db):
             job = db.get(Job, job_id, populate_existing=True)
             if not job:
@@ -188,7 +151,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             from app.adapters.cloudflare_adapter import delete_a_record, find_record
 
             # Check whether the record still exists in Cloudflare
-            existing = find_record(cf_token, zone_id, hostname, "A")
+            existing = find_record(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
 
             if existing and existing.get("id") == record_id:
                 # Guard against deleting a record a service has since reclaimed:
@@ -200,7 +163,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                     with db_write_section(db):
                         current_job = db.get(Job, job_id, populate_existing=True)
                         if current_job is not None:
-                            _emit_event(
+                            emit_event(
                                 db, current_job.service_id, "dns_orphan_resolved",
                                 f"Orphaned DNS record for '{hostname}' is now in use by an "
                                 f"active service; skipping deletion and clearing the job",
@@ -213,12 +176,12 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                         "message": f"DNS record for '{hostname}' is now in use by an active service; orphan job cleared",
                     }
                 # Record still exists and is orphaned — delete it
-                delete_a_record(cf_token, zone_id, record_id)
+                delete_a_record(cf_token, zone_id, record_id, timeout=CF_CLEANUP_TIMEOUT)
                 with db_write_section(db):
                     current_job = db.get(Job, job_id, populate_existing=True)
                     if current_job is None:
                         return {"success": True, "message": f"DNS record for '{hostname}' cleaned up"}
-                    _emit_event(
+                    emit_event(
                         db, current_job.service_id, "dns_orphan_resolved",
                         f"Orphaned DNS record for '{hostname}' successfully deleted from Cloudflare",
                         details={"record_id": record_id, "hostname": hostname, "job_id": job_id},
@@ -231,7 +194,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                     current_job = db.get(Job, job_id, populate_existing=True)
                     if current_job is None:
                         return {"success": True, "message": f"DNS record for '{hostname}' cleaned up"}
-                    _emit_event(
+                    emit_event(
                         db, current_job.service_id, "dns_orphan_resolved",
                         f"Orphaned DNS record for '{hostname}' was already removed from Cloudflare",
                         details={"record_id": record_id, "hostname": hostname, "job_id": job_id},
@@ -251,7 +214,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                 if current_job is not None:
                     current_job.status = "failed"
                     current_job.message = f"Retry failed: {error_msg}"
-                    _emit_event(
+                    emit_event(
                         db, current_job.service_id, "dns_orphan_retry_failed",
                         f"Retry of orphaned DNS cleanup for '{hostname}' failed: {error_msg}",
                         details={"record_id": record_id, "hostname": hostname, "error": error_msg},
@@ -262,7 +225,7 @@ async def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{job_id}", status_code=204)
-async def dismiss_orphan_job(job_id: str, db: Session = Depends(get_db)):
+def dismiss_orphan_job(job_id: str, db: Session = Depends(get_db)):
     """Dismiss/acknowledge an orphaned DNS job (e.g. after manual cleanup in Cloudflare).
 
     Deletes the job row without attempting Cloudflare deletion.
@@ -276,9 +239,9 @@ async def dismiss_orphan_job(job_id: str, db: Session = Depends(get_db)):
         if job.status == "running":
             raise HTTPException(status_code=409, detail="Job is already running")
 
-        details = _job_details(job)
+        details = job.details if isinstance(job.details, dict) else {}
         hostname = details.get("hostname", "unknown")
-        _emit_event(
+        emit_event(
             db, job.service_id, "dns_orphan_dismissed",
             f"Orphaned DNS cleanup job for '{hostname}' dismissed by user",
             details={"record_id": details.get("record_id"), "hostname": hostname, "job_id": job.id},

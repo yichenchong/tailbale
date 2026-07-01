@@ -1,8 +1,11 @@
 """Tests for the cert renewal background task."""
 
+import os
 import threading
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from app.models.certificate import Certificate
 from app.models.event import Event
@@ -33,6 +36,52 @@ def _create_service(db, **overrides):
     db.commit()
     return svc
 
+
+def _write_real_pair(cert_dir, *, matching=True, not_after=None):
+    """Publish a real cert + privkey under *cert_dir* in the generation layout.
+
+    Mirrors what _atomic_copy_certs leaves on disk - a ``gen-*`` directory
+    holding the pair plus a relative ``current`` symlink - so process_service_cert
+    runs its actual get_cert_expiry / cert_key_pair_matches checks against the
+    same ``current/`` path it reads in production. Mismatch the key if asked.
+    """
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+
+    cert_dir.mkdir(parents=True, exist_ok=True)
+    gen_dir = cert_dir / "gen-test"
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    cert_key = key if matching else rsa.generate_private_key(
+        public_exponent=65537, key_size=2048
+    )
+    if not_after is None:
+        not_after = datetime.now(UTC) + timedelta(days=300)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "testapp.example.com")])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(cert_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.now(UTC) - timedelta(days=1))
+        .not_valid_after(not_after)
+        .sign(cert_key, hashes.SHA256())
+    )
+    (gen_dir / "fullchain.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    (gen_dir / "privkey.pem").write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+    )
+    current = cert_dir / "current"
+    if current.is_symlink() or current.exists():
+        current.unlink()
+    os.symlink("gen-test", current)
 
 class TestProcessServiceCert:
     @patch("app.certs.renewal_task.read_secret")
@@ -80,7 +129,7 @@ class TestProcessServiceCert:
         from sqlalchemy.orm import sessionmaker
 
         from app.certs.renewal_task import process_service_cert
-        from app.reconciler.reconciler import _RECONCILE_MUTEX
+        from app.locks import reconcile_lock_for
 
         mock_secret.return_value = None
         svc = _create_service(db_session)
@@ -102,7 +151,7 @@ class TestProcessServiceCert:
             finally:
                 thread_db.close()
 
-        with _RECONCILE_MUTEX:
+        with reconcile_lock_for(service_id):
             worker = threading.Thread(target=run_cert_check)
             worker.start()
             assert started.wait(1)
@@ -148,6 +197,9 @@ class TestProcessServiceCert:
         soon = datetime.now(UTC) + timedelta(days=10)
         renewed = datetime.now(UTC) + timedelta(days=90)
         mock_expiry.side_effect = [soon, renewed]
+        # renew_cert returns (cert_dir, fresh_issued); a real in-place renewal
+        # reports fresh_issued=False, so the caller emits cert_renewed.
+        mock_renew.return_value = (MagicMock(), False)
 
         svc = _create_service(db_session)
         process_service_cert(db_session, svc)
@@ -155,6 +207,39 @@ class TestProcessServiceCert:
         mock_renew.assert_called_once()
         events = db_session.query(Event).filter(Event.kind == "cert_renewed").all()
         assert len(events) == 1
+        assert (
+            db_session.query(Event).filter(Event.kind == "cert_issued").count() == 0
+        )
+
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_renew_fallback_emits_cert_issued(
+        self, mock_secret, mock_renew, mock_expiry, db_session
+    ):
+        """When renew_cert internally falls back to a fresh issue it returns
+        fresh_issued=True, and the caller must label the event cert_issued (not
+        cert_renewed) so the event log truthfully reflects what happened."""
+        from app.certs.renewal_task import process_service_cert
+
+        mock_secret.return_value = "cf-token"
+        # Cert exists but expires within the renewal window -> needs_renew path.
+        soon = datetime.now(UTC) + timedelta(days=10)
+        fresh = datetime.now(UTC) + timedelta(days=90)
+        mock_expiry.side_effect = [soon, fresh]
+        # renew_cert fell back to a fresh issue.
+        mock_renew.return_value = (MagicMock(), True)
+
+        svc = _create_service(db_session)
+        process_service_cert(db_session, svc)
+
+        mock_renew.assert_called_once()
+        assert (
+            db_session.query(Event).filter(Event.kind == "cert_issued").count() == 1
+        )
+        assert (
+            db_session.query(Event).filter(Event.kind == "cert_renewed").count() == 0
+        )
 
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.read_secret")
@@ -182,9 +267,12 @@ class TestProcessServiceCert:
 
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.read_secret")
-    def test_stale_invalid_renewal_window_falls_back_to_default(
+    def test_stale_invalid_renewal_window_fails_loud(
         self, mock_secret, mock_expiry, db_session
     ):
+        """A corrupt cert_renewal_window_days now fails loud (raises ValueError)
+        instead of silently falling back: writes enforce ge=1, so a stored
+        non-integer is corruption that must surface rather than be masked."""
         from app.certs.renewal_task import process_service_cert
         from app.settings_store import set_setting
 
@@ -195,11 +283,8 @@ class TestProcessServiceCert:
 
         svc = _create_service(db_session)
 
-        process_service_cert(db_session, svc)
-
-        cert = db_session.get(Certificate, svc.id)
-        assert cert is not None
-        assert cert.last_failure is None
+        with pytest.raises(ValueError):
+            process_service_cert(db_session, svc)
 
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.issue_cert")
@@ -276,10 +361,196 @@ class TestProcessServiceCert:
         ).all()
         assert len(events) == 0
 
+    @patch("app.certs.renewal_task.issue_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_reissues_when_cert_key_pair_mismatches(self, mock_secret, mock_issue, db_session):
+        """An unexpired cert whose private key does not match (on-disk corruption
+        or external tampering producing a mismatched current/ pair) must be
+        force-reissued, not left serving a broken pair to Caddy."""
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        certs_root = self._tmp_certs_root(db_session, set_setting)
+
+        svc = _create_service(db_session)
+        # Valid (far-future) cert on disk, but privkey.pem holds an unrelated key.
+        _write_real_pair(certs_root / svc.hostname, matching=False)
+
+        process_service_cert(db_session, svc)
+
+        # The mismatch forced a fresh issue rather than the healthy skip path.
+        mock_issue.assert_called_once()
+        assert (
+            db_session.query(Event).filter(Event.kind == "cert_issued").count() == 1
+        )
+
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.issue_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_skips_when_pair_matches(self, mock_secret, mock_issue, mock_renew, db_session):
+        """False-positive guard: a healthy matching pair far from expiry must take
+        the skip path and never trigger an ACME issue/renew."""
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        certs_root = self._tmp_certs_root(db_session, set_setting)
+
+        svc = _create_service(db_session)
+        _write_real_pair(certs_root / svc.hostname, matching=True)
+
+        process_service_cert(db_session, svc)
+
+        mock_issue.assert_not_called()
+        mock_renew.assert_not_called()
+        cert = db_session.get(Certificate, svc.id)
+        assert cert is not None
+        assert cert.expires_at is not None
+        assert cert.last_failure is None
+        assert (
+            db_session.query(Event)
+            .filter(Event.kind.in_(["cert_issued", "cert_renewed"]))
+            .count()
+            == 0
+        )
+
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.issue_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_force_bypasses_retry_backoff(
+        self, mock_secret, mock_issue, mock_expiry, db_session
+    ):
+        """force=True must skip the next_retry_at backoff and process anyway."""
+        from app.certs.renewal_task import process_service_cert
+
+        mock_secret.return_value = "cf-token"
+        # No cert on disk before; readable after the forced issue.
+        mock_expiry.side_effect = [None, datetime(2027, 6, 1, tzinfo=UTC)]
+
+        svc = _create_service(db_session)
+        cert_record = Certificate(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            last_failure="previous error",
+            next_retry_at=datetime.now(UTC) + timedelta(hours=3),
+        )
+        db_session.add(cert_record)
+        db_session.commit()
+
+        process_service_cert(db_session, svc, force=True)
+
+        # Backoff bypassed: a real issue happened despite the future retry time.
+        mock_issue.assert_called_once()
+        assert db_session.query(Event).filter(Event.kind == "cert_issued").count() == 1
+
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.issue_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_force_bypasses_healthy_noop(
+        self, mock_secret, mock_issue, mock_renew, db_session
+    ):
+        """force=True must renew a healthy, far-from-expiry, matching pair that
+        the unforced path would skip."""
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        mock_renew.return_value = (MagicMock(), False)
+        certs_root = self._tmp_certs_root(db_session, set_setting)
+
+        svc = _create_service(db_session)
+        # Healthy matching pair far from expiry -> unforced skip path.
+        _write_real_pair(certs_root / svc.hostname, matching=True)
+
+        process_service_cert(db_session, svc, force=True)
+
+        # Healthy-noop bypassed: a renew happened instead of skipping.
+        mock_issue.assert_not_called()
+        mock_renew.assert_called_once()
+        assert db_session.query(Event).filter(Event.kind == "cert_renewed").count() == 1
+
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_force_threads_force_into_renew_cert(
+        self, mock_secret, mock_renew, mock_expiry, db_session
+    ):
+        """A forced renewal of a far-from-expiry cert must tell renew_cert to
+        force, so `lego renew` actually re-issues instead of no-opping on its
+        --days skip. Without force=force the manual renew silently does nothing."""
+        from app.certs.renewal_task import process_service_cert
+
+        mock_secret.return_value = "cf-token"
+        # Far from expiry (60 days > 30-day window): the unforced path would skip.
+        far = datetime.now(UTC) + timedelta(days=60)
+        renewed = datetime.now(UTC) + timedelta(days=90)
+        mock_expiry.side_effect = [far, renewed]
+        mock_renew.return_value = (MagicMock(), False)
+
+        svc = _create_service(db_session)
+        process_service_cert(db_session, svc, force=True)
+
+        mock_renew.assert_called_once()
+        assert mock_renew.call_args.kwargs.get("force") is True
+
+    @patch("app.certs.renewal_task.read_secret")
+    def test_healthy_skip_clears_stale_retry_marker(self, mock_secret, db_session):
+        """A healthy, matching pair found AFTER a prior failure's backoff has
+        elapsed must clear the stale next_retry_at/last_failure so the success
+        state matches the issue/renew path. The expired marker no longer skips
+        (now >= retry_at), so the healthy-skip branch is reached and must reset
+        the pending-retry bookkeeping instead of leaving it dangling."""
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        certs_root = self._tmp_certs_root(db_session, set_setting)
+
+        svc = _create_service(db_session)
+        _write_real_pair(certs_root / svc.hostname, matching=True)
+
+        # A prior failure left a now-EXPIRED retry marker; the backoff guard must
+        # not skip (retry time already passed), so the healthy-skip path runs.
+        cert_record = Certificate(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            last_failure="previous error",
+            next_retry_at=datetime.now(UTC) - timedelta(hours=1),
+        )
+        db_session.add(cert_record)
+        db_session.commit()
+
+        process_service_cert(db_session, svc)
+
+        cert = db_session.get(Certificate, svc.id)
+        assert cert is not None
+        assert cert.expires_at is not None
+        # The healthy skip cleared the stale failure bookkeeping.
+        assert cert.last_failure is None
+        assert cert.next_retry_at is None
+        # No ACME contact: a healthy matching pair must not issue or renew.
+        assert (
+            db_session.query(Event)
+            .filter(Event.kind.in_(["cert_issued", "cert_renewed"]))
+            .count()
+            == 0
+        )
+
+    @staticmethod
+    def _tmp_certs_root(db_session, set_setting):
+        import tempfile
+        from pathlib import Path
+
+        root = Path(tempfile.mkdtemp(prefix="tb-certs-"))
+        set_setting(db_session, "cert_root", str(root))
+        db_session.commit()
+        return root
+
 
 class TestRunRenewalScan:
     @patch("app.certs.renewal_task.process_service_cert")
-    @patch("app.certs.renewal_task.SessionLocal")
+    @patch("app.database.SessionLocal")
     def test_processes_enabled_services(self, mock_session_cls, mock_process):
         from app.certs.renewal_task import run_renewal_scan
 
@@ -297,7 +568,7 @@ class TestRunRenewalScan:
         mock_db.close.assert_called_once()
 
     @patch("app.certs.renewal_task.process_service_cert")
-    @patch("app.certs.renewal_task.SessionLocal")
+    @patch("app.database.SessionLocal")
     def test_continues_on_individual_failure(self, mock_session_cls, mock_process):
         from app.certs.renewal_task import run_renewal_scan
 
@@ -315,6 +586,50 @@ class TestRunRenewalScan:
         # Should still process both (count failures as processed=1 for the successful one)
         assert mock_process.call_count == 2
         mock_db.close.assert_called_once()
+
+    @patch("app.certs.renewal_task.read_secret")
+    @patch("app.database.SessionLocal")
+    def test_scan_survives_corrupt_renewal_window(
+        self, mock_session_cls, mock_secret, db_session, db_engine, caplog
+    ):
+        """A corrupt cert_renewal_window_days makes get_positive_int_setting fail
+        loud (ValueError) for every service. The scan must catch it per-service
+        and keep going - not raise out and wedge after the first, skipping every
+        remaining service until the next daily run."""
+        import logging
+
+        from sqlalchemy.orm import sessionmaker
+
+        from app.certs.renewal_task import run_renewal_scan
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        # run_renewal_scan opens its own session_scope() session; bind it to the
+        # shared in-memory test engine so it sees the rows committed below.
+        mock_session_cls.side_effect = sessionmaker(bind=db_engine)
+
+        set_setting(db_session, "cert_renewal_window_days", "garbage")
+        _create_service(db_session)
+        _create_service(
+            db_session,
+            hostname="second.example.com",
+            edge_container_name="edge_second",
+            network_name="edge_net_second",
+            ts_hostname="edge-second",
+        )
+        db_session.commit()
+
+        with caplog.at_level(logging.ERROR, logger="app.certs.renewal_task"):
+            result = run_renewal_scan()  # must NOT raise
+
+        # Every service failed loud, none "processed"; but the loop did NOT wedge:
+        # both services were attempted (one per-service error logged each).
+        assert result == 0
+        attempted = [
+            r for r in caplog.records
+            if "Unexpected error processing cert" in r.getMessage()
+        ]
+        assert len(attempted) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -362,9 +677,9 @@ class TestCertRenewalDbPaths:
         mock_issue.side_effect = RuntimeError("stopped for test")
         process_service_cert(db_session, svc)
 
-        if mock_issue.called:
-            call_args = mock_issue.call_args
-            cert_dir = call_args[0][3] if len(call_args[0]) > 3 else call_args.kwargs.get("cert_dir")
-            lego_dir = call_args[0][4] if len(call_args[0]) > 4 else call_args.kwargs.get("lego_dir")
-            assert str(cert_dir) == str(Path("/custom/certs") / svc.hostname)
-            assert str(lego_dir) == str(Path("/custom/certs") / ".lego")
+        assert mock_issue.called
+        call_args = mock_issue.call_args
+        cert_dir = call_args[0][3] if len(call_args[0]) > 3 else call_args.kwargs.get("cert_dir")
+        lego_dir = call_args[0][4] if len(call_args[0]) > 4 else call_args.kwargs.get("lego_dir")
+        assert str(cert_dir) == str(Path("/custom/certs") / svc.hostname)
+        assert str(lego_dir) == str(Path("/custom/certs") / ".lego")

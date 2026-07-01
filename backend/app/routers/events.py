@@ -1,12 +1,11 @@
 """Events API endpoints — query the structured event log."""
 
-import json
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.events.event_emitter import EVENT_KINDS
 from app.models.event import Event
 from app.models.service import Service
 
@@ -17,15 +16,6 @@ router = APIRouter(
 )
 
 
-def _parse_event_details(details: str | None) -> dict | list | str | int | float | bool | None:
-    if not details:
-        return None
-    try:
-        return json.loads(details)
-    except (json.JSONDecodeError, TypeError):
-        return None
-
-
 def _event_to_dict(evt: Event) -> dict:
     return {
         "id": evt.id,
@@ -33,7 +23,7 @@ def _event_to_dict(evt: Event) -> dict:
         "kind": evt.kind,
         "level": evt.level,
         "message": evt.message,
-        "details": _parse_event_details(evt.details),
+        "details": evt.details,
         "created_at": evt.created_at.isoformat() if evt.created_at else None,
     }
 
@@ -43,7 +33,7 @@ def _escape_like(value: str) -> str:
 
 
 @router.get("")
-async def list_events(
+def list_events(
     service_id: str | None = None,
     kind: str | None = None,
     level: str | None = None,
@@ -78,11 +68,22 @@ async def list_events(
     }
 
 
+@router.get("/kinds")
+def event_kinds():
+    """Return the canonical registry of event kinds.
+
+    The single source the frontend's kind filter is built from, so the dropdown
+    never drifts from what the backend actually emits.
+    """
+    return {"kinds": sorted(EVENT_KINDS)}
+
+
 @router.get("/services/{service_id}")
-async def service_events(
+def service_events(
     service_id: str,
     kind: str | None = None,
     level: str | None = None,
+    search: str | None = None,
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -97,6 +98,8 @@ async def service_events(
         query = query.filter(Event.kind == kind)
     if level:
         query = query.filter(Event.level == level)
+    if search:
+        query = query.filter(Event.message.ilike(f"%{_escape_like(search)}%", escape="\\"))
 
     total = query.count()
     events = (

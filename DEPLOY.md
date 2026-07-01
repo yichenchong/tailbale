@@ -1,21 +1,21 @@
-# Deploying tailBale to Unraid
+# Deploying tailBale
 
 ## Prerequisites
 
-- **Unraid 6.12+** with Docker enabled
+- **A Linux host** with Docker installed
 - **Domain** managed in Cloudflare (e.g. `mydomain.com`)
 - **Cloudflare API token** with DNS:Edit permission for your zone
 - **Tailscale account** with both:
   - a reusable auth key from the admin console
   - an API key for tailnet device management
-- SSH or terminal access to Unraid
+- SSH or terminal access to the host
 
 ## Option A: deploy.sh (recommended)
 
-### 1. Clone the repo on your Unraid server
+### 1. Clone the repo on your server
 
 ```bash
-cd /mnt/user/appdata
+cd /opt
 git clone <your-repo-url> tailbale
 cd tailbale
 ```
@@ -27,7 +27,7 @@ cd tailbale
 bash ./deploy.sh
 
 # Optional host port, host data path, or runtime override:
-HOST_PORT=6790 HOST_DATA_DIR=/mnt/user/appdata/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
+HOST_PORT=6790 HOST_DATA_DIR=/opt/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
 ```
 
 > `deploy.sh` delegates to `redeploy.sh`, which builds both images from the
@@ -36,7 +36,7 @@ HOST_PORT=6790 HOST_DATA_DIR=/mnt/user/appdata/tailbale/data COOKIE_SECURE=true 
 > `CORS_ORIGINS`, `JWT_EXPIRY_HOURS`, and data/socket settings).
 >
 > If you prefer Compose, set `HOST_DATA_DIR` explicitly and use
-> `HOST_DATA_DIR=/mnt/user/appdata/tailbale/data docker compose -f docker-compose.prod.yml up -d --build`
+> `HOST_DATA_DIR=/opt/tailbale/data docker compose -f docker-compose.prod.yml up -d --build`
 > (or the v1 `docker-compose` binary). Do not switch between Compose and
 > `deploy.sh` without first stopping/removing the container created by the other
 > mode; they use different Docker ownership metadata and can otherwise conflict
@@ -44,25 +44,38 @@ HOST_PORT=6790 HOST_DATA_DIR=/mnt/user/appdata/tailbale/data COOKIE_SECURE=true 
 
 ### 3. Access the setup wizard
 
-Open `http://<unraid-ip>:6780` in your browser. The first-time setup wizard will walk you through:
+By default the orchestrator publishes **only on `127.0.0.1` (loopback)** — it
+controls the Docker socket (host-root), so it must not be reachable in cleartext
+on your LAN. Choose how to reach it over your tailnet:
+
+- **HTTPS via `tailscale serve` (recommended):** on the host, run
+  `tailscale serve --bg 443 http://127.0.0.1:6780`, then open
+  `https://<machine>.<tailnet>.ts.net`. Real cert, tailnet-only, and the session
+  cookie auto-upgrades to `Secure` (via `X-Forwarded-Proto`). See "Network access" below.
+- **Plain ip:port over the tailnet:** set `BIND_ADDR=<your-tailnet-ip>` (e.g.
+  `100.x.y.z`) and open `http://<tailnet-ip>:6780`. WireGuard encrypts the wire,
+  but there is no TLS/HSTS and the browser shows "not secure".
+- **Local only:** open `http://localhost:6780` on the host itself.
+
+The first-time setup wizard will walk you through:
 
 1. **Account** — create your admin username and password
 2. **Domain** — enter your base domain (e.g. `mydomain.com`)
 3. **Cloudflare** — zone ID and API token
 4. **ACME Email** — for Let's Encrypt certificate registration
 5. **Tailscale** — your reusable auth key and API key
-6. **Docker** — socket path (default is correct for Unraid)
+6. **Docker** — socket path (default is correct for most Linux hosts)
 
 ### 4. Verify
 
-- Check the dashboard at `http://<unraid-ip>:6780`
+- Check the dashboard at your chosen address (see step 3 — e.g. `https://<machine>.<tailnet>.ts.net` via `tailscale serve`, or `http://localhost:6780` on the host)
 - Go to **Discover** to see your running containers
 - Use **Expose** to create your first service
 
 ### Rebuilding the Orchestrator
 
 ```bash
-cd /mnt/user/appdata/tailbale
+cd /opt/tailbale
 git pull
 bash ./deploy.sh
 ```
@@ -76,7 +89,7 @@ If you prefer to run the Docker commands manually:
 ### 1. Build the image
 
 ```bash
-cd /mnt/user/appdata/tailbale
+cd /opt/tailbale
 docker build -t tailbale:latest .
 ```
 
@@ -93,11 +106,11 @@ docker run -d \
   --name tailbale \
   --label tailbale.main=true \
   --restart unless-stopped \
-  -p 6780:8080 \
-  -v /mnt/user/appdata/tailbale/data:/data \
+  -p 127.0.0.1:6780:8080 \
+  -v /opt/tailbale/data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATA_DIR=/data \
-  -e HOST_DATA_DIR=/mnt/user/appdata/tailbale/data \
+  -e HOST_DATA_DIR=/opt/tailbale/data \
   -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
@@ -109,7 +122,7 @@ docker run -d \
 > container. Without this variable, edge container creation will fail with
 > "bind source path does not exist".
 
-Then open `http://<unraid-ip>:6780` to complete setup.
+Then reach it as described in "Access the setup wizard" above (loopback by default — e.g. `http://localhost:6780` on the host, or your tailnet address) to complete setup.
 
 ### Rebuilding the Orchestrator
 ```bash
@@ -120,11 +133,11 @@ docker run -d \
   --name tailbale \
   --label tailbale.main=true \
   --restart unless-stopped \
-  -p 6780:8080 \
-  -v /mnt/user/appdata/tailbale/data:/data \
+  -p 127.0.0.1:6780:8080 \
+  -v /opt/tailbale/data:/data \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATA_DIR=/data \
-  -e HOST_DATA_DIR=/mnt/user/appdata/tailbale/data \
+  -e HOST_DATA_DIR=/opt/tailbale/data \
   -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
@@ -148,7 +161,7 @@ container name or host port reserved.
 
 | Host path | Container path | Purpose |
 |---|---|---|
-| `/mnt/user/appdata/tailbale/data` | `/data` | SQLite DB, secrets, certs, generated configs, Tailscale state |
+| `/opt/tailbale/data` | `/data` | SQLite DB, secrets, certs, generated configs, Tailscale state |
 | `/var/run/docker.sock` | `/var/run/docker.sock` | Docker API access (required to manage edge containers) |
 
 The `/data` volume contains everything persistent. Back it up regularly.
@@ -160,6 +173,26 @@ The JWT signing secret is **auto-generated on first startup** and stored in
 invalidate all sessions, delete that file and restart the container — a new
 secret will be generated automatically.
 
+### Network access & exposure
+
+The orchestrator wields the Docker socket, so an authenticated session on it is
+effectively host-root. It therefore publishes on **`127.0.0.1` only by default**
+(`BIND_ADDR`), and the session cookie's `Secure` flag is auto-enabled whenever the
+request arrives over HTTPS (honoring `X-Forwarded-Proto`).
+
+To reach it over your tailnet with real HTTPS, run on the host:
+
+```bash
+tailscale serve --bg 443 http://127.0.0.1:6780
+```
+
+This config lives in the host's `tailscaled`, **not** in the container: you set it
+once, it survives container restarts/redeploys (the loopback port is stable), and
+it self-heals when the app comes back up (a brief 502 while the container is down).
+It is not re-created per deploy, so it never accumulates. Remove it with
+`tailscale serve --https=443 off` only if you uninstall tailBale. Avoid
+`tailscale funnel` for the admin UI — that exposes it to the public internet.
+
 ## Environment Variables Reference
 
 | Variable | Required | Default | Description |
@@ -167,16 +200,17 @@ secret will be generated automatically.
 | `HOST_DATA_DIR` | **Yes** for Compose/manual Docker; auto-detected by `deploy.sh` | repo `data` directory for `deploy.sh` | Absolute host-side path to the data directory. `deploy.sh` resolves relative values before passing them to Docker; Compose requires an explicit absolute value and uses it for both the `/data` bind mount and edge-container bind sources. |
 | `DATA_DIR` | No | `/data` | Data directory inside the container |
 | `JWT_EXPIRY_HOURS` | No | `24` | Session duration in hours |
-| `COOKIE_SECURE` | No | `false` | Set `true` if behind HTTPS |
-| `CORS_ORIGINS` | No | `*` | Comma-separated allowed origins |
+| `COOKIE_SECURE` | No | `false` (auto on HTTPS) | Force the session cookie's `Secure` flag. Auto-enabled when the request arrives over HTTPS (incl. `X-Forwarded-Proto`); set `true` to force it always. |
+| `CORS_ORIGINS` | No | `(empty — CORS middleware disabled; same-origin only)` | Comma-separated allowed origins |
 | `PORT` | No | `8080` | Container listen port |
-| `HOST` | No | `0.0.0.0` | Listen address |
+| `HOST` | No | `0.0.0.0` | Listen address **inside the container** (leave as `0.0.0.0`; Docker forwards the published port to it) |
+| `BIND_ADDR` | No | `127.0.0.1` | Host interface the published port binds to. Loopback by default; set to your tailnet IP for `http://<tailnet-ip>:PORT`, or `0.0.0.0` to expose on all host interfaces. |
 | `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path |
 
 ## Updating
 
 ```bash
-cd /mnt/user/appdata/tailbale
+cd /opt/tailbale
 git pull
 bash ./deploy.sh
 ```
@@ -197,11 +231,11 @@ docker tag tailbale-edge:latest ghcr.io/<your-username>/tailbale-edge:latest
 docker push ghcr.io/<your-username>/tailbale-edge:latest
 ```
 
-Then update the edge image reference in the orchestrator's container_manager to point to your registry image instead of a local build.
+Then update the edge image reference in the orchestrator's `image_builder.py` (the `EDGE_IMAGE` constant) to point to your registry image instead of a local build.
 
 ## Troubleshooting
 
-- **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the host path of your data directory (e.g. `/mnt/user/appdata/tailbale/data`). `deploy.sh` resolves relative paths to absolute paths; Docker Compose now requires `HOST_DATA_DIR` explicitly so it cannot accidentally use the caller's working directory.
+- **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the host path of your data directory (e.g. `/opt/tailbale/data`). `deploy.sh` resolves relative paths to absolute paths; Docker Compose now requires `HOST_DATA_DIR` explicitly so it cannot accidentally use the caller's working directory.
 - **Can't connect to Docker**: Ensure `/var/run/docker.sock` is mounted and the container user has access
 - **Edge container won't start**: Check the Tailscale auth key is valid and reusable; the API key is also required during setup but is not used for login
 - **Certs not issuing**: Verify Cloudflare API token has DNS:Edit permission for your zone

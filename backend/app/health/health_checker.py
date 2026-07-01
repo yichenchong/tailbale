@@ -15,8 +15,10 @@ from typing import TYPE_CHECKING
 
 import docker
 
+from app.edge.container_manager import find_edge_container
+from app.edge.docker_client import close_client, connect
 from app.models.dns_record import DnsRecord
-from app.models.service_status import ServiceStatus
+from app.settings_store import get_positive_int_setting
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -46,45 +48,6 @@ WARNING_CHECKS = frozenset({
 })
 
 
-def _get_docker_client(socket_path: str | None = None) -> docker.DockerClient:
-    if socket_path:
-        return docker.DockerClient(base_url=socket_path)
-    return docker.DockerClient.from_env()
-
-
-def _close_docker_client(client: docker.DockerClient) -> None:
-    close = getattr(client, "close", None)
-    if close is not None:
-        try:
-            close()
-        except Exception:
-            logger.debug("Failed to close Docker client", exc_info=True)
-
-def _find_edge_container_for_health(
-    client: docker.DockerClient,
-    service: Service,
-) -> docker.models.containers.Container | None:
-    from app.edge.container_manager import _container_service_id, _is_container_for_service
-
-    try:
-        container = client.containers.get(service.edge_container_name)
-        if _is_container_for_service(container, service.id):
-            return container
-        logger.warning(
-            "Ignoring container named %s during health check because it belongs to service %s, not %s",
-            service.edge_container_name,
-            _container_service_id(container),
-            service.id,
-        )
-    except Exception:
-        pass
-
-    containers = client.containers.list(
-        all=True, filters={"label": f"tailbale.service_id={service.id}"}
-    )
-    return containers[0] if isinstance(containers, list) and containers else None
-
-
 def run_health_checks(
     db: Session,
     service: Service,
@@ -98,9 +61,19 @@ def run_health_checks(
     checks: dict[str, bool] = {}
 
     try:
-        client = _get_docker_client(socket_path)
+        client = connect(socket_path)
     except Exception:
         logger.warning("Cannot connect to Docker for health checks", exc_info=True)
+        # Docker is unreachable, but the filesystem- and DB-backed subchecks do
+        # not need it: report them accurately instead of forcing False, so a
+        # transient daemon outage does not misreport an on-disk cert or a stored
+        # DNS record as failing. ``cert_present``/``caddy_config_present`` were
+        # already computed offline here; ``cert_not_expiring`` reads the very
+        # same cert file and ``dns_record_present`` is a pure DB read, so leaving
+        # them hardcoded False was an inconsistency. Only the Docker-dependent
+        # checks (and the IP-dependent DNS match, which needs the live Tailscale
+        # IP) stay False; the aggregate is "error" regardless.
+        dns_record_present, dns_matches_ip = _check_dns(db, service, None)
         return {
             "upstream_container_present": False,
             "upstream_network_connected": False,
@@ -109,9 +82,9 @@ def run_health_checks(
             "tailscale_ready": False,
             "tailscale_ip_present": False,
             "cert_present": _check_cert_present(service, certs_dir),
-            "cert_not_expiring": False,
-            "dns_record_present": False,
-            "dns_matches_ip": False,
+            "cert_not_expiring": _cert_not_expiring_subcheck(db, service, certs_dir),
+            "dns_record_present": dns_record_present,
+            "dns_matches_ip": dns_matches_ip,
             "caddy_config_present": _check_caddy_config(service, generated_dir),
             "https_probe_ok": False,
         }
@@ -129,15 +102,13 @@ def run_health_checks(
         # --- Tailscale ---
         ts_ready, ts_ip_present, live_tailscale_ip = _check_tailscale(client, service, edge_running)
 
-        status = db.get(ServiceStatus, service.id)
-        stored_tailscale_ip = status.tailscale_ip if status else None
-        current_ip = live_tailscale_ip or (stored_tailscale_ip if ts_ip_present else None)
+        current_ip = live_tailscale_ip
         checks["tailscale_ready"] = ts_ready
         checks["tailscale_ip_present"] = ts_ip_present
 
         # --- Certs ---
         checks["cert_present"] = _check_cert_present(service, certs_dir)
-        checks["cert_not_expiring"] = _check_cert_not_expiring(service, certs_dir)
+        checks["cert_not_expiring"] = _cert_not_expiring_subcheck(db, service, certs_dir)
 
         # --- DNS ---
         checks["dns_record_present"], checks["dns_matches_ip"] = _check_dns(
@@ -148,10 +119,10 @@ def run_health_checks(
         checks["caddy_config_present"] = _check_caddy_config(service, generated_dir)
 
         # --- HTTPS probe (spec §18.1) ---
-        checks["https_probe_ok"] = _check_https_probe(service, current_ip, certs_dir, client)
+        checks["https_probe_ok"] = _check_https_probe(service, current_ip, client)
         return checks
     finally:
-        _close_docker_client(client)
+        close_client(client)
 
 
 # ---- Individual check helpers ----
@@ -216,7 +187,7 @@ def _check_upstream_network(client: docker.DockerClient, service: Service) -> bo
 
 def _check_edge(client: docker.DockerClient, service: Service) -> tuple[bool, bool]:
     try:
-        container = _find_edge_container_for_health(client, service)
+        container = find_edge_container(client, service.id, service.edge_container_name)
         if container is None:
             return False, False
         return True, container.status == "running"
@@ -231,7 +202,7 @@ def _check_tailscale(
     if not edge_running:
         return False, False, None
     try:
-        container = _find_edge_container_for_health(client, service)
+        container = find_edge_container(client, service.id, service.edge_container_name)
         if container is None:
             return False, False, None
         result = container.exec_run(
@@ -251,12 +222,14 @@ def _check_tailscale(
 
 
 def _check_cert_present(service: Service, certs_dir: str | Path) -> bool:
-    d = Path(certs_dir) / service.hostname
+    d = Path(certs_dir) / service.hostname / "current"
     return (d / "fullchain.pem").exists() and (d / "privkey.pem").exists()
 
 
-def _check_cert_not_expiring(service: Service, certs_dir: str | Path) -> bool:
-    cert_path = Path(certs_dir) / service.hostname / "fullchain.pem"
+def _check_cert_not_expiring(
+    service: Service, certs_dir: str | Path, renewal_window_days: int
+) -> bool:
+    cert_path = Path(certs_dir) / service.hostname / "current" / "fullchain.pem"
     if not cert_path.exists():
         return False
     try:
@@ -265,9 +238,31 @@ def _check_cert_not_expiring(service: Service, certs_dir: str | Path) -> bool:
         expiry = get_cert_expiry(cert_path)
         if expiry is None:
             return False
-        return expiry > datetime.now(UTC) + timedelta(days=14)
+        return expiry > datetime.now(UTC) + timedelta(days=renewal_window_days)
     except Exception:
         return False
+
+
+def _cert_not_expiring_subcheck(db: Session, service: Service, certs_dir: str | Path) -> bool:
+    """``cert_not_expiring`` subcheck, resilient to a corrupt renewal-window setting.
+
+    The renewal window comes from ``get_positive_int_setting``, which fails loud
+    (raises ``ValueError``) on a corrupt stored value. That fail-loud must stay
+    isolated to this one subcheck: a single corrupt *global* setting otherwise
+    crashes ``run_health_checks`` outright, staling health for every service in
+    the sweep. On a corrupt window we report the subcheck as failing — consistent
+    with ``_check_cert_not_expiring`` returning ``False`` on any internal error.
+    """
+    try:
+        window = get_positive_int_setting(db, "cert_renewal_window_days")
+    except ValueError:
+        logger.warning(
+            "cert_renewal_window_days is corrupt; reporting cert_not_expiring as "
+            "failing until it is fixed",
+            exc_info=True,
+        )
+        return False
+    return _check_cert_not_expiring(service, certs_dir, window)
 
 
 def _check_caddy_config(service: Service, generated_dir: str | Path) -> bool:
@@ -331,7 +326,6 @@ def _log_https_probe_failure(
 def _check_https_probe(
     service: Service,
     tailscale_ip: str | None,
-    certs_dir: str | Path,
     client: docker.DockerClient | None = None,
 ) -> bool:
     """Verify that Caddy inside the edge container is serving HTTPS.
@@ -360,7 +354,7 @@ def _check_https_probe(
         return False
 
     try:
-        container = _find_edge_container_for_health(client, service)
+        container = find_edge_container(client, service.id, service.edge_container_name)
         if container is None:
             _log_https_probe_failure(
                 service,
@@ -401,7 +395,7 @@ def _check_https_probe(
 
         raw = (output or b"").decode("utf-8", errors="replace").strip()
         http_code = raw[-3:] if len(raw) >= 3 else raw
-        if not http_code.isdigit():
+        if len(http_code) != 3 or not http_code.isdigit():
             _log_https_probe_failure(
                 service,
                 "curl did not return a valid HTTP status",

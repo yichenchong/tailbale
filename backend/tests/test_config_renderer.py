@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock
 
+import pytest
+
 
 def _make_service(**overrides):
     """Create a mock Service object with sensible defaults."""
@@ -26,7 +28,8 @@ class TestRenderCaddyfile:
 
         assert "auto_https off" in result
         assert "https://nextcloud.example.com" in result
-        assert "tls /certs/fullchain.pem /certs/privkey.pem" in result
+        assert "tls /certs/current/fullchain.pem /certs/current/privkey.pem" in result
+        assert "tls /certs/fullchain.pem" not in result
         assert "reverse_proxy nextcloud:80" in result
         assert "header_up X-Forwarded-Proto https" in result
         assert "header_up X-Real-IP {remote_host}" in result
@@ -67,6 +70,20 @@ class TestRenderCaddyfile:
 
         assert "header X-Custom true" in result
         assert "log { output stdout }" in result
+
+    def test_whitespace_only_custom_snippet(self):
+        """Document current behavior: a whitespace-only snippet is still truthy,
+        so render_snippet_block runs but yields only a newline — no directives
+        are emitted. The output gains blank padding but still closes correctly."""
+        from app.edge.config_renderer import render_caddyfile
+
+        none = render_caddyfile(_make_service(custom_caddy_snippet=None))
+        ws = render_caddyfile(_make_service(custom_caddy_snippet="   \n  \t "))
+
+        # No snippet content leaks; only blank padding distinguishes the two.
+        assert ws.endswith("\t}\n\n\n}\n")
+        assert none.endswith("\t}\n}\n")
+        assert ws == none[:-2] + "\n\n}\n"
 
     def test_no_custom_snippet(self):
         from app.edge.config_renderer import render_caddyfile
@@ -132,7 +149,7 @@ class TestRenderCaddyfile:
 
         # Should use tabs, not spaces, for indentation
         assert "\tauto_https off" in result
-        assert "\ttls /certs/fullchain.pem" in result
+        assert "\ttls /certs/current/fullchain.pem" in result
         assert "\treverse_proxy " in result
         assert "\t\theader_up X-Forwarded-Proto https" in result
         # No leading-space indentation
@@ -149,6 +166,39 @@ class TestRenderCaddyfile:
         result = render_caddyfile(svc)
 
         assert "reverse_proxy https://nextcloud:8443" in result
+
+    def test_https_scheme_port_80_uses_tls_transport(self):
+        """Caddy rejects ``https://host:80`` (scheme/port conflict, mirroring
+        ``http://host:443``). For an HTTPS upstream on port 80 the renderer must
+        dial the bare address and force TLS via the transport directive instead
+        of emitting the rejected scheme prefix."""
+        from app.edge.config_renderer import render_caddyfile
+
+        svc = _make_service(upstream_scheme="https", upstream_port=80)
+        result = render_caddyfile(svc)
+
+        # The conflicting scheme prefix must NOT be emitted.
+        assert "https://nextcloud:80" not in result
+        # Dial the bare upstream address and force TLS via transport.
+        assert "reverse_proxy nextcloud:80 {" in result
+        assert "\t\ttransport http {" in result
+        assert "\t\t\ttls" in result
+
+    def test_transport_tls_block_scoped_to_https_port_80(self):
+        """The ``transport http { tls }`` block must appear ONLY for an HTTPS
+        upstream on port 80. Broadening it to all HTTPS upstreams (or to HTTP)
+        would re-break the conventional ``https://host:443`` case and emit an
+        invalid Caddyfile — the exact regression the port-80 special-case fixed."""
+        from app.edge.config_renderer import render_caddyfile
+
+        https_443 = render_caddyfile(_make_service(upstream_scheme="https", upstream_port=443))
+        assert "transport http {" not in https_443
+
+        http_80 = render_caddyfile(_make_service(upstream_scheme="http", upstream_port=80))
+        assert "transport http {" not in http_80
+
+        https_80 = render_caddyfile(_make_service(upstream_scheme="https", upstream_port=80))
+        assert "transport http {" in https_80
 
 
 class TestWriteCaddyfile:
@@ -203,3 +253,116 @@ class TestWriteCaddyfile:
         assert files[0].name == "Caddyfile"
         # No .tmp files left behind
         assert not any(f.suffix == ".tmp" for f in files)
+
+    def test_uses_unique_temp_name(self, tmp_path, monkeypatch):
+        """The temp file must be uniquely named (pid+thread+uuid), not a fixed
+        'Caddyfile.tmp', so concurrent writers to one service dir cannot collide
+        on the same temp path."""
+        import os
+        from pathlib import Path
+
+        from app.edge import config_renderer
+
+        recorded = []
+        original = Path.write_text
+
+        def record(self, *args, **kwargs):
+            recorded.append(self.name)
+            return original(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "write_text", record)
+
+        svc = _make_service(id="svc_unique")
+        config_renderer.write_caddyfile(svc, tmp_path)
+
+        temp_names = [n for n in recorded if n != "Caddyfile"]
+        assert len(temp_names) == 1
+        tmp_name = temp_names[0]
+        assert tmp_name != "Caddyfile.tmp"
+        assert tmp_name.startswith(".Caddyfile.")
+        assert tmp_name.endswith(".tmp")
+        assert str(os.getpid()) in tmp_name
+        # No stray temp remains after a successful write.
+        leftovers = [p.name for p in (tmp_path / "svc_unique").iterdir() if p.name != "Caddyfile"]
+        assert leftovers == []
+
+    def test_accepts_str_generated_dir(self, tmp_path):
+        """generated_dir may arrive as a str (e.g. from settings); it is coerced
+        to Path so ``generated_dir / service.id`` doesn't TypeError."""
+        from app.edge.config_renderer import write_caddyfile
+
+        svc = _make_service(id="svc_strpath")
+        path = write_caddyfile(svc, str(tmp_path))
+
+        assert path.exists()
+        assert path.parent.name == "svc_strpath"
+        assert path.name == "Caddyfile"
+
+    def test_cleans_up_temp_on_write_failure(self, tmp_path, monkeypatch):
+        """If a step AFTER the temp file is created fails (here the fsync), the
+        partial temp file must be removed and the error re-raised — a failed
+        render leaves neither a stray .tmp nor a half-written Caddyfile."""
+        from app.edge import config_renderer
+
+        def boom(_path):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(config_renderer, "fsync_file", boom)
+
+        svc = _make_service(id="svc_failclean")
+        with pytest.raises(OSError, match="disk full"):
+            config_renderer.write_caddyfile(svc, tmp_path)
+
+        service_dir = tmp_path / "svc_failclean"
+        leftovers = [p.name for p in service_dir.iterdir()]
+        assert leftovers == [], f"expected no files left behind, found {leftovers}"
+
+    def test_sweeps_stale_temp_files_from_prior_crash(self, tmp_path):
+        """A previous writer hard-killed (SIGKILL / power loss) between creating
+        its temp and the atomic rename leaves a ``.Caddyfile.*.tmp`` orphan. The
+        next write must reclaim those crash orphans (it runs under the per-service
+        reconcile lock, so no concurrent writer owns an in-flight temp here)."""
+        from app.edge.config_renderer import write_caddyfile
+
+        svc = _make_service(id="svc_staletmp")
+        service_dir = tmp_path / "svc_staletmp"
+        service_dir.mkdir(parents=True)
+        # Simulate orphans left by crashed prior runs (different pid/thread/uuid).
+        orphan_a = service_dir / ".Caddyfile.111.222.deadbeef.tmp"
+        orphan_b = service_dir / ".Caddyfile.333.444.cafef00d.tmp"
+        orphan_a.write_text("half-written", encoding="utf-8")
+        orphan_b.write_text("half-written", encoding="utf-8")
+
+        write_caddyfile(svc, tmp_path)
+
+        leftovers = sorted(p.name for p in service_dir.iterdir())
+        # Only the published Caddyfile survives; both crash orphans are gone.
+        assert leftovers == ["Caddyfile"], f"stale temps not reclaimed: {leftovers}"
+        assert not orphan_a.exists()
+        assert not orphan_b.exists()
+
+    def test_sweep_failure_does_not_block_write(self, tmp_path, monkeypatch):
+        """The stale-temp sweep is best-effort: an unlink error (e.g. a temp
+        vanishing or a permission glitch) must not abort the actual write."""
+        from pathlib import Path
+
+        from app.edge.config_renderer import write_caddyfile
+
+        svc = _make_service(id="svc_sweepfail")
+        service_dir = tmp_path / "svc_sweepfail"
+        service_dir.mkdir(parents=True)
+        (service_dir / ".Caddyfile.9.9.abc.tmp").write_text("x", encoding="utf-8")
+
+        original_unlink = Path.unlink
+
+        def flaky_unlink(self, *args, **kwargs):
+            if self.name.endswith(".tmp") and ".Caddyfile.9.9" in self.name:
+                raise OSError("transient unlink failure")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+        # Must not raise despite the sweep unlink failing.
+        path = write_caddyfile(svc, tmp_path)
+        assert path.exists()
+        assert path.read_text(encoding="utf-8").startswith("{")

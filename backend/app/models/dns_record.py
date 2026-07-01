@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import ForeignKey, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+from app.models.types import NaiveUTCDateTime
 
 
 class DnsRecord(Base):
@@ -17,5 +18,5 @@ class DnsRecord(Base):
     record_type: Mapped[str] = mapped_column(String, default="A")
     value: Mapped[str | None] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now(), nullable=False
+        NaiveUTCDateTime, server_default=func.now(), onupdate=func.now(), nullable=False
     )

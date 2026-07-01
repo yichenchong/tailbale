@@ -1,8 +1,25 @@
 """Certificate management via lego ACME client.
 
 Handles issuing, renewing, and inspecting TLS certificates using
-DNS-01 challenge via Cloudflare. Cert files are written atomically
-to per-service directories.
+DNS-01 challenge via Cloudflare. Each issuance is published into a fresh
+per-service generation directory and made live by atomically swapping a
+single ``current`` symlink, so the served fullchain/privkey pair always
+comes from one issuance.
+
+Error-signaling convention
+--------------------------
+HARD failures a caller must not silently continue past PROPAGATE as exceptions:
+``issue_cert`` and the lego subprocess raise ``RuntimeError`` (lego exited
+non-zero, or produced no cert/key files), so a caller never publishes a
+missing/partial certificate.
+
+DATA/decisions use return values by design: ``renew_cert`` returns
+``(cert_dir, fresh_issued)`` where the bool is True when the renewal fell
+back to a fresh issue (a normal outcome, not a failure) and False on a
+successful in-place renewal, and ``get_cert_expiry``
+returns ``Optional`` (``None`` == "couldn't determine expiry"). The
+renew→fresh-issue fallback is deliberate best-effort recovery from lost lego
+state, not error suppression.
 """
 
 from __future__ import annotations
@@ -15,10 +32,13 @@ import signal
 import subprocess
 import threading
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
+
+from app.fsutil import fsync_directory_strict, fsync_file
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +53,17 @@ LEGO_TIMEOUT_SECONDS = 300
 # low so a burst of renewals cannot trip Let's Encrypt's overall rate limit.
 # The long LEGO_TIMEOUT_SECONDS leaves a single issuance ample room at this rate.
 LEGO_OVERALL_REQUEST_LIMIT = 1
+
+# A forced renewal must re-issue regardless of how far the cert is from expiry.
+# lego's `renew` only acts when the cert expires within `--days` days, so a
+# forced renewal passes a value larger than any cert lifetime to guarantee lego
+# actually re-issues instead of silently no-opping. See renew_cert(force=...).
+LEGO_FORCE_RENEW_DAYS = 36500  # ~100 years
+
+# Every lego invocation shares one ACME account + cert store under the certs
+# root (.lego/). Serialize them process-wide so concurrent per-service
+# issuances cannot clobber the shared account file; see _run_lego.
+_LEGO_MUTEX = threading.Lock()
 
 
 def _format_lego_output(output: str | None, limit: int = 500) -> str:
@@ -66,6 +97,26 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
 
 
 def _run_lego(
+    args: list[str],
+    cloudflare_token: str,
+    lego_dir: Path,
+) -> subprocess.CompletedProcess:
+    """Serialize every lego invocation across the whole process.
+
+    All services share one ACME account + cert store under ``lego_dir`` (the
+    ``.lego/`` tree). Since reconcile locking went per-service, two services can
+    issue/renew at once; concurrent first-issuance would have each lego register
+    its own account key and clobber the shared account file. The mutex is held
+    ONLY around the subprocess, so a fast steady-state reconcile (no lego call)
+    never waits on it - only simultaneous issuances serialize, which is required
+    for ``.lego`` safety regardless. Innermost lock: nothing acquires a
+    per-service/lifecycle lock while holding it, so the order graph stays acyclic.
+    """
+    with _LEGO_MUTEX:
+        return _exec_lego(args, cloudflare_token, lego_dir)
+
+
+def _exec_lego(
     args: list[str],
     cloudflare_token: str,
     lego_dir: Path,
@@ -135,8 +186,13 @@ def _run_lego(
             + (f": {output}" if output else "")
         ) from exc
 
-    reader.join()
-    output = "".join(collected)
+    # Bound the join like the timeout path above: if a descendant inherited the
+    # stdout pipe and outlived lego, the reader's `for line in stdout` loop would
+    # never see EOF and an unbounded join would hang the caller (the renewal
+    # thread) forever. The process has already exited, so a clean drain is near
+    # instant; the bound only matters in that pathological orphaned-pipe case.
+    reader.join(timeout=10)
+    output = "".join(collected[:])
 
     if proc.returncode != 0:
         formatted = _format_lego_output(output)
@@ -205,7 +261,9 @@ def renew_cert(
     cert_dir: Path,
     lego_dir: Path | None = None,
     days: int = 30,
-) -> Path:
+    *,
+    force: bool = False,
+) -> tuple[Path, bool]:
     """Renew an existing certificate.
 
     Args:
@@ -215,35 +273,72 @@ def renew_cert(
         cert_dir: Target directory for cert files
         lego_dir: lego working directory
         days: Renew if expiry is within this many days
+        force: Force an actual re-issue regardless of expiry (manual renew).
+            Background scans pass False and renew only within ``days`` of expiry.
 
     Returns:
-        Path to the cert directory
+        Tuple of (cert_dir, fresh_issued). fresh_issued is True when the renewal
+        fell back to a fresh issue (missing lego state or a failed renew), and
+        False on a successful in-place renewal.
     """
     if lego_dir is None:
         lego_dir = cert_dir.parent / ".lego"
 
-    _run_lego(
-        [
-            "--domains", hostname,
-            "--email", email,
-            "--accept-tos",
-            "renew",
-            "--days", str(days),
-        ],
-        cloudflare_token=cloudflare_token,
-        lego_dir=lego_dir,
-    )
-
     lego_cert_dir = lego_dir / "certificates"
     lego_cert = lego_cert_dir / f"{hostname}.crt"
     lego_key = lego_cert_dir / f"{hostname}.key"
+
+    # lego's `renew` needs its own prior state — the ACME account and the
+    # previously-issued cert under lego_dir. If that state is gone (e.g. the
+    # .lego directory was wiped) while the served cert dir survived, `renew`
+    # can never succeed: it fails every scan and the caller retries on a fixed
+    # backoff forever, never recovering. Fall back to a fresh issue, which
+    # recreates the account+cert and breaks the loop.
+    if not lego_cert.exists() or not lego_key.exists():
+        logger.warning(
+            "lego state missing for %s; issuing a fresh certificate instead of renewing",
+            hostname,
+        )
+        return issue_cert(hostname, email, cloudflare_token, cert_dir, lego_dir), True
+
+    # A forced renewal must happen regardless of expiry. lego's `renew` only
+    # acts when the cert expires within `--days`, so force passes a value far
+    # larger than any cert lifetime to guarantee an actual re-issue; otherwise
+    # `lego renew` silently no-ops and the "forced" renewal would republish the
+    # same cert with an unchanged expiry.
+    renew_days = LEGO_FORCE_RENEW_DAYS if force else days
+
+    try:
+        _run_lego(
+            [
+                "--domains", hostname,
+                "--email", email,
+                "--accept-tos",
+                "renew",
+                "--days", str(renew_days),
+            ],
+            cloudflare_token=cloudflare_token,
+            lego_dir=lego_dir,
+        )
+    except RuntimeError:
+        # The cert files exist but `lego renew` still failed — most often the
+        # ACME account state under lego_dir is gone (a partial .lego wipe), so
+        # the file check above never fired yet every renew fails the same way
+        # and the caller loops on its fixed backoff, never recovering. Fall
+        # back to a fresh issue, which re-registers the account and re-issues.
+        # A merely transient failure (DNS/rate limit) makes the issue fail the
+        # same way and is retried on the normal backoff, so this is always safe.
+        logger.warning(
+            "lego renew failed for %s; falling back to a fresh issue", hostname
+        )
+        return issue_cert(hostname, email, cloudflare_token, cert_dir, lego_dir), True
 
     if not lego_cert.exists() or not lego_key.exists():
         raise RuntimeError("lego renew did not produce expected cert files")
 
     _atomic_copy_certs(lego_cert, lego_key, cert_dir)
 
-    return cert_dir
+    return cert_dir, False
 
 
 def _atomic_copy_certs(
@@ -251,56 +346,151 @@ def _atomic_copy_certs(
     src_key: Path,
     dest_dir: Path,
 ) -> None:
-    """Atomically copy cert and key files to the destination directory.
+    """Publish a cert/key pair into *dest_dir* atomically via a generation swap.
 
-    Writes to temp files first, then renames both only after both writes succeed.
+    Each issuance is written into a fresh generation directory
+    ``dest_dir/gen-<UTC-timestamp>-<uuid4hex>/{fullchain.pem,privkey.pem}`` and
+    only published by atomically swapping a single relative ``current`` symlink
+    to point at it. Because publication is one ``os.replace`` of one symlink,
+    Caddy always reads ``current/fullchain.pem`` and ``current/privkey.pem``
+    from the SAME generation: a crash (power loss/SIGKILL) can leave an extra,
+    unreferenced generation dir behind but can NEVER expose a cert from one
+    issuance beside a key from another. A failure BEFORE the swap discards the
+    new generation and leaves the existing ``current`` symlink (if any)
+    untouched; once the swap commits, the new generation is live and a failure
+    in a trailing best-effort step never tears it back down.
     """
     dest_dir.mkdir(parents=True, exist_ok=True)
 
-    fullchain_dest = dest_dir / "fullchain.pem"
-    privkey_dest = dest_dir / "privkey.pem"
-    suffix = f".{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
-    fullchain_tmp = dest_dir / f"fullchain.pem{suffix}"
-    privkey_tmp = dest_dir / f"privkey.pem{suffix}"
-    fullchain_backup = dest_dir / f"fullchain.pem{suffix}.bak"
-    privkey_backup = dest_dir / f"privkey.pem{suffix}.bak"
-    fullchain_replaced = False
-    privkey_replaced = False
+    gen_name = (
+        f"gen-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}-{uuid.uuid4().hex}"
+    )
+    gen_dir = dest_dir / gen_name
+    gen_dir.mkdir()
 
+    fullchain_dest = gen_dir / "fullchain.pem"
+    privkey_dest = gen_dir / "privkey.pem"
+    current_link = dest_dir / "current"
+    tmp_link = dest_dir / (
+        f".current.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
+
+    published = False
     try:
-        shutil.copy2(src_cert, fullchain_tmp)
-        shutil.copy2(src_key, privkey_tmp)
-        if fullchain_dest.exists():
-            shutil.copy2(fullchain_dest, fullchain_backup)
-        if privkey_dest.exists():
-            shutil.copy2(privkey_dest, privkey_backup)
+        shutil.copy2(src_cert, fullchain_dest)
+        shutil.copy2(src_key, privkey_dest)
+        # The private key must never be group/world readable regardless of the
+        # mode lego (the copy source) happened to write or the active umask.
+        os.chmod(privkey_dest, 0o600)
+        fsync_file(fullchain_dest)
+        fsync_file(privkey_dest)
+        fsync_directory_strict(gen_dir)
 
-        fullchain_tmp.replace(fullchain_dest)
-        fullchain_replaced = True
-        privkey_tmp.replace(privkey_dest)
-        privkey_replaced = True
+        # Refuse to publish a corrupt or mismatched pair. Discarding the new
+        # generation leaves any existing ``current`` symlink pointing at the last
+        # good pair, so a corrupt copy never replaces a working cert with a
+        # broken one. ``cert_key_pair_matches`` treats an UNPARSEABLE cert as
+        # "nothing to verify" (it returns True so a genuinely absent/unreadable
+        # served cert drives a re-issue instead of a redundant mismatch report);
+        # that lenient contract is wrong at publish time, where an unparseable
+        # fullchain is exactly the corruption this guard must reject. If it were
+        # published, the swap would point ``current`` at a cert Caddy cannot load
+        # AND the success-path prune would delete the last-good generation,
+        # taking TLS down with no fallback. So verify the cert actually parses
+        # (expiry readable) AND the key matches before committing the swap.
+        if get_cert_expiry(fullchain_dest) is None:
+            raise RuntimeError(
+                f"Refusing to publish unparseable certificate in {gen_dir}"
+            )
+        if not cert_key_pair_matches(fullchain_dest, privkey_dest):
+            raise RuntimeError(
+                f"Refusing to publish mismatched cert/key pair in {gen_dir}"
+            )
 
-        logger.info("Cert files written atomically to %s", dest_dir)
+        # Publish atomically. Create the new symlink under a unique temp name
+        # then os.replace it onto ``current`` — atomic on POSIX whether or not
+        # ``current`` already exists. The target is the BARE generation name so
+        # the link is RELATIVE and resolves inside the edge container's
+        # read-only /certs bind mount (read_only blocks writes, not traversal).
+        os.symlink(gen_name, tmp_link)
+        os.replace(tmp_link, current_link)
+        # os.replace is the commit point: ``current`` now resolves to this new
+        # generation and the previous one (if any) is unreferenced. Everything
+        # past here is best-effort durability/logging that must NEVER tear the
+        # freshly-published pair back down.
+        published = True
+        fsync_directory_strict(dest_dir)
+
+        logger.info("Cert generation %s published via %s", gen_name, current_link)
     except Exception:
-        if fullchain_replaced:
-            if fullchain_backup.exists():
-                with contextlib.suppress(Exception):
-                    fullchain_backup.replace(fullchain_dest)
-            else:
-                with contextlib.suppress(Exception):
-                    fullchain_dest.unlink(missing_ok=True)
-        if privkey_replaced:
-            if privkey_backup.exists():
-                with contextlib.suppress(Exception):
-                    privkey_backup.replace(privkey_dest)
-            else:
-                with contextlib.suppress(Exception):
-                    privkey_dest.unlink(missing_ok=True)
-        raise
-    finally:
-        for path in (fullchain_tmp, privkey_tmp, fullchain_backup, privkey_backup):
+        if published:
+            # The swap already succeeded, so the new generation is LIVE. A
+            # failure in the trailing best-effort fsync/logging must not delete
+            # the served pair - rmtree-ing it here would leave ``current``
+            # dangling and take TLS down. The publish stands.
+            #
+            # Crucially we ALSO skip the prune below: the failing step is the
+            # dest-dir fsync that makes the ``current`` rename durable, so the
+            # rename may still be only in page cache. Reaping the previous
+            # generation now would let a crash that reverts the un-synced rename
+            # land on a deleted ``gen-*`` -> dangling ``current`` -> TLS down.
+            # Leaving the old generation in place means a revert lands on the
+            # last good matching pair instead (seamless, no re-issue); the
+            # leftover is reaped by the next successful publish.
+            logger.warning(
+                "Cert generation %s published but a post-publish step failed; "
+                "leaving prior generations in place",
+                gen_name,
+                exc_info=True,
+            )
+            return
+        else:
+            # Pre-publish failure: discard the half-built generation; the old
+            # ``current`` symlink (if any) still resolves to the last good pair.
             with contextlib.suppress(Exception):
-                path.unlink(missing_ok=True)
+                os.unlink(tmp_link)
+            with contextlib.suppress(Exception):
+                shutil.rmtree(gen_dir)
+            raise
+
+    # Best-effort: reclaim superseded generations and any stale staging symlinks.
+    # Reached only on a fully durable publish (the dest-dir fsync above succeeded),
+    # so the ``current`` rename is on disk before any old generation is reaped.
+    _prune_old_generations(dest_dir, keep=gen_name)
+
+
+def _prune_old_generations(dest_dir: Path, keep: str) -> None:
+    """Reclaim superseded artifacts in *dest_dir* (best-effort).
+
+    Runs only after a successful symlink swap, while the per-service reconcile
+    lock serializes every write to this directory, so nothing here can race a
+    live publish. Removes two kinds of leftovers:
+
+    * sibling ``gen-*`` generation directories other than *keep* (the one the
+      freshly-swapped ``current`` symlink now points at), and
+    * stale ``.current.*.tmp`` staging symlinks that a hard crash (power
+      loss/SIGKILL) could have left between the ``os.symlink``/``os.replace``
+      pair in ``_atomic_copy_certs`` - otherwise they accumulate forever.
+
+    The live ``current`` symlink, the kept generation, and any unrelated
+    entries are never touched; every error is suppressed.
+    """
+    try:
+        entries = list(dest_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        name = entry.name
+        if name == keep:
+            continue
+        if name.startswith("gen-"):
+            with contextlib.suppress(Exception):
+                shutil.rmtree(entry)
+        elif name.startswith(".current.") and name.endswith(".tmp"):
+            # A staging symlink (never a directory); unlink removes the link
+            # itself without following it.
+            with contextlib.suppress(Exception):
+                entry.unlink()
 
 
 def get_cert_expiry(cert_path: Path) -> datetime | None:
@@ -318,3 +508,43 @@ def get_cert_expiry(cert_path: Path) -> datetime | None:
     except Exception:
         logger.warning("Failed to parse cert at %s", cert_path, exc_info=True)
         return None
+
+
+def cert_key_pair_matches(cert_path: Path, key_path: Path) -> bool:
+    """Return True if *cert_path*'s public key matches *key_path*'s private key.
+
+    Defense-in-depth against a mismatched fullchain/privkey pair on disk.
+    ``_atomic_copy_certs`` verifies the pair and publishes it via a single
+    atomic ``current`` symlink swap, so a served pair is normally consistent;
+    a mismatch detected here therefore signals on-disk corruption or external
+    tampering. Caddy would otherwise serve a certificate whose key does not
+    match and every TLS handshake would fail, with the expiry-based checks
+    noticing nothing.
+
+    Returns ``True`` when the pair matches OR when there is nothing to verify: the
+    cert file is absent, or it is unreadable (in which case ``get_cert_expiry``
+    already returns None and drives a re-issue, so reporting a mismatch too would
+    be redundant). Returns ``False`` only when the cert is present and readable
+    but the key is missing, unreadable, or carries a different public key.
+    """
+    if not cert_path.exists():
+        return True
+    try:
+        cert = x509.load_pem_x509_certificate(cert_path.read_bytes())
+        cert_pub = cert.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except Exception:
+        return True
+    if not key_path.exists():
+        return False
+    try:
+        key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+        key_pub = key.public_key().public_bytes(
+            serialization.Encoding.DER,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    except Exception:
+        return False
+    return cert_pub == key_pub

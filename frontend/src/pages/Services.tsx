@@ -1,80 +1,66 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { api, type ServiceItem, type ServiceListResponse } from "@/lib/api"
+import { api, type ServiceItem } from "@/lib/api"
 import { useTimezone } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
 import { formatCertExpiry } from "@/lib/certStatus"
+import { phaseStyle } from "@/lib/statusStyles"
+import { useResource } from "@/lib/useResource"
 import { Loader2, Plus, ExternalLink, MoreVertical } from "lucide-react"
-
-const PHASE_STYLES: Record<string, string> = {
-  healthy: "bg-green-100 text-green-700",
-  pending: "bg-yellow-100 text-yellow-700",
-  warning: "bg-yellow-100 text-yellow-700",
-  error: "bg-red-100 text-red-700",
-  failed: "bg-red-100 text-red-700",
-}
-
-function servicePath(svcId: string, path = ""): string {
-  return `/services/${encodeURIComponent(svcId)}${path}`
-}
 
 export default function Services() {
   const navigate = useNavigate()
   const tz = useTimezone()
-  const [services, setServices] = useState<ServiceItem[]>([])
-  const [loading, setLoading] = useState(true)
   const [openMenuId, setOpenMenuId] = useState<string | null>(null)
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
+  const actionMsgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const load = async () => {
-    setLoading(true)
-    setError(null)
-    try {
-      const data = await api.get<ServiceListResponse>("/services")
-      setServices(data.services)
-    } catch (e) {
-      setServices([])
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      setLoading(false)
+  const fetcher = useCallback(() => api.services.list(), [])
+  const { data, loading, error, refresh } = useResource(fetcher)
+  const services = data?.services ?? []
+
+  const showActionMsg = useCallback((msg: string) => {
+    if (actionMsgTimerRef.current !== null) clearTimeout(actionMsgTimerRef.current)
+    setActionMsg(msg)
+    actionMsgTimerRef.current = setTimeout(() => {
+      setActionMsg(null)
+      actionMsgTimerRef.current = null
+    }, 3000)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (actionMsgTimerRef.current !== null) clearTimeout(actionMsgTimerRef.current)
     }
-  }
+  }, [])
 
-  useEffect(() => { void load() }, [])
-
-  const doAction = async (svcId: string, path: string, method: "post" | "put" = "post", body?: unknown) => {
+  const runAction = async (action: () => Promise<unknown>) => {
     setOpenMenuId(null)
     setMenuPos(null)
     try {
-      if (method === "put") {
-        await api.put(servicePath(svcId, path), body)
-      } else {
-        await api.post(servicePath(svcId, path))
-      }
-      void load()
+      await action()
+      void refresh()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setActionMsg(msg)
-      setTimeout(() => setActionMsg(null), 3000)
+      showActionMsg(e instanceof Error ? e.message : String(e))
     }
   }
 
   const handleDelete = async (svc: ServiceItem) => {
     setOpenMenuId(null)
     setMenuPos(null)
-    if (!window.confirm(`Delete service "${svc.name}"? This cannot be undone.`)) return
+    if (!window.confirm(`Delete service "${svc.name}"? This also removes its DNS record and cannot be undone.`)) return
     try {
-      await api.delete(servicePath(svc.id))
-      void load()
+      // Match the detail page's default: clean up the Cloudflare DNS record so a
+      // list-delete doesn't silently orphan a record pointing at a now-dead IP.
+      await api.services.remove(svc.id, { cleanupDns: true })
+      void refresh()
     } catch (e) {
-      setActionMsg(e instanceof Error ? e.message : String(e))
-      setTimeout(() => setActionMsg(null), 3000)
+      showActionMsg(e instanceof Error ? e.message : String(e))
     }
   }
 
-  if (loading) {
+  if (loading && services.length === 0) {
     return (
       <div className="flex items-center gap-2 p-8 text-zinc-500">
         <Loader2 className="h-4 w-4 animate-spin" /> Loading services...
@@ -102,7 +88,13 @@ export default function Services() {
         <div className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{actionMsg}</div>
       )}
 
-      {error ? (
+      {error && services.length > 0 && (
+        <div className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800">
+          Unable to refresh services: {error}
+        </div>
+      )}
+
+      {error && services.length === 0 ? (
         <div className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
           Unable to load services: {error}
         </div>
@@ -138,7 +130,7 @@ export default function Services() {
                 return (
                   <tr key={svc.id} className="hover:bg-zinc-50">
                     <td className="whitespace-nowrap px-4 py-3">
-                      <Link to={`/services/${svc.id}`} className="text-sm font-medium text-zinc-900 hover:underline">
+                      <Link to={`/services/${encodeURIComponent(svc.id)}`} className="text-sm font-medium text-zinc-900 hover:underline">
                         {svc.name}
                       </Link>
                     </td>
@@ -154,7 +146,7 @@ export default function Services() {
                     <td className="px-4 py-3">
                       <span className={cn(
                         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                        PHASE_STYLES[phase] || "bg-zinc-100 text-zinc-600"
+                        phaseStyle(phase)
                       )}>
                         {phase}
                       </span>
@@ -190,28 +182,28 @@ export default function Services() {
                               className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
                               style={{ top: menuPos.top, left: menuPos.left }}
                             >
-                              <Link to={`/services/${svc.id}`} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                              <Link to={`/services/${encodeURIComponent(svc.id)}`} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                 View Details
                               </Link>
                               {svc.enabled && (
                                 <>
-                                  <button onClick={() => doAction(svc.id, "/reload")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                  <button onClick={() => runAction(() => api.services.reload(svc.id))} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                     Reload Caddy
                                   </button>
-                                  <button onClick={() => doAction(svc.id, "/restart-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                  <button onClick={() => runAction(() => api.services.restartEdge(svc.id))} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                     Restart Edge
                                   </button>
-                                  <button onClick={() => doAction(svc.id, "/recreate-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                  <button onClick={() => runAction(() => api.services.recreateEdge(svc.id))} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                     Recreate Edge
                                   </button>
                                 </>
                               )}
                               {svc.enabled ? (
-                                <button onClick={() => doAction(svc.id, "/disable")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                <button onClick={() => runAction(() => api.services.disable(svc.id))} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                   Disable
                                 </button>
                               ) : (
-                                <button onClick={() => doAction(svc.id, "", "put", { enabled: true })} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
+                                <button onClick={() => runAction(() => api.services.update(svc.id, { enabled: true }))} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
                                   Enable
                                 </button>
                               )}

@@ -1,77 +1,56 @@
-import { useCallback, useEffect, useRef, useState } from "react"
-import { api } from "@/lib/api"
+import { useCallback, useState } from "react"
+import { api, type OrphanJob, type JobsResponse } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-react"
 import { cn } from "@/lib/utils"
-
-interface JobDetails {
-  record_id: string
-  hostname: string
-  zone_id: string
-  value: string | null
-  service_name: string
-}
-
-interface OrphanJob {
-  id: string
-  service_id: string | null
-  kind: string
-  status: string
-  progress: number
-  message: string | null
-  details: JobDetails | null
-  created_at: string | null
-  updated_at: string | null
-}
-
-interface JobsResponse {
-  jobs: OrphanJob[]
-  total: number
-}
+import { jobStatusStyle } from "@/lib/statusStyles"
+import { useResource } from "@/lib/useResource"
+import { usePagination } from "@/lib/usePagination"
+import { Pagination } from "@/components/Pagination"
 
 export default function OrphanDns() {
   const tz = useTimezone()
-  const [jobs, setJobs] = useState<OrphanJob[]>([])
-  const [total, setTotal] = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
   const [actionLoading, setActionLoading] = useState<Record<string, string>>({})
   const [successMessage, setSuccessMessage] = useState("")
-  const requestIdRef = useRef(0)
+  const { offset, limit, total, page, pageCount, setOffset, setTotal, prev, next, goToPage, clampToContent } =
+    usePagination()
 
-  const load = useCallback(async () => {
-    const requestId = ++requestIdRef.current
-    setLoading(true)
-    setError("")
-    try {
-      const data = await api.get<JobsResponse>("/jobs?kind=dns_orphan_cleanup")
-      if (requestId !== requestIdRef.current) return
-      setJobs(data.jobs)
+  const fetcher = useCallback(
+    () => api.jobs.list({ kind: "dns_orphan_cleanup", limit, offset }),
+    [limit, offset],
+  )
+  // Post-process each fetch: sync `total` for the pager, then clamp the offset
+  // when the current page fell off the end (the last record on a later page was
+  // dismissed/retried away and `total` shrank). Returning `true` makes
+  // useResource keep the spinner up and skip storing the empty page, so the
+  // offset change retriggers the load instead of flashing "All clean!" over
+  // still-reachable records.
+  const onData = useCallback(
+    (data: JobsResponse): boolean => {
       setTotal(data.total)
-    } catch (e: unknown) {
-      if (requestId !== requestIdRef.current) return
-      setError(e instanceof Error ? e.message : "Failed to load orphan records")
-    } finally {
-      if (requestId === requestIdRef.current) setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    load()
-    return () => {
-      requestIdRef.current += 1
-    }
-  }, [load])
+      const clamped = clampToContent(data.total, data.jobs.length)
+      if (clamped !== null) {
+        setOffset(clamped)
+        return true
+      }
+      return false
+    },
+    [setTotal, clampToContent, setOffset],
+  )
+  const { data, loading, error, refresh, setError } = useResource(fetcher, {
+    onData,
+    mapError: (e) => (e instanceof Error ? e.message : "Failed to load orphan records"),
+  })
+  const jobs = data?.jobs ?? []
 
   async function handleRetry(job: OrphanJob) {
     setActionLoading((prev) => ({ ...prev, [job.id]: "retry" }))
     setSuccessMessage("")
+    setError(null)
     try {
-      const result = await api.post<{ success: boolean; message: string }>(
-        `/jobs/${job.id}/retry`
-      )
+      const result = await api.jobs.retry(job.id)
       setSuccessMessage(result.message)
-      await load()
+      await refresh({ background: true })
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Retry failed")
     } finally {
@@ -90,10 +69,11 @@ export default function OrphanDns() {
     }
     setActionLoading((prev) => ({ ...prev, [job.id]: "dismiss" }))
     setSuccessMessage("")
+    setError(null)
     try {
-      await api.delete(`/jobs/${job.id}`)
+      await api.jobs.dismiss(job.id)
       setSuccessMessage(`Orphan record for '${hostname}' dismissed`)
-      await load()
+      await refresh({ background: true })
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Dismiss failed")
     } finally {
@@ -108,13 +88,6 @@ export default function OrphanDns() {
   function fmtTime(iso: string | null) {
     if (!iso) return "\u2014"
     return formatDateTime(iso, tz)
-  }
-
-  const STATUS_STYLES: Record<string, string> = {
-    pending: "bg-yellow-100 text-yellow-800",
-    running: "bg-blue-100 text-blue-700",
-    failed: "bg-red-100 text-red-700",
-    completed: "bg-green-100 text-green-700",
   }
 
   return (
@@ -144,12 +117,18 @@ export default function OrphanDns() {
           <Loader2 className="h-5 w-5 animate-spin" /> Loading...
         </div>
       ) : jobs.length === 0 ? (
-        <div className="mt-8 rounded-lg border border-dashed border-zinc-300 p-8 text-center text-zinc-500">
-          No orphaned DNS records. All clean!
-        </div>
+        // Don't claim "All clean!" when the list is empty only because the load
+        // failed — the error banner above already explains what happened.
+        error ? null : (
+          <div className="mt-8 rounded-lg border border-dashed border-zinc-300 p-8 text-center text-zinc-500">
+            No orphaned DNS records. All clean!
+          </div>
+        )
       ) : (
         <>
-          <div className="mt-4 text-sm text-zinc-500">{total} orphaned record{total !== 1 ? "s" : ""}</div>
+          <div className="mt-4 text-sm text-zinc-500">
+            {total} orphaned record{total !== 1 ? "s" : ""}
+          </div>
           <div className="mt-2 space-y-3">
             {jobs.map((job) => {
               const d = job.details
@@ -168,7 +147,7 @@ export default function OrphanDns() {
                         <span
                           className={cn(
                             "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                            STATUS_STYLES[job.status] ?? "bg-zinc-100 text-zinc-600"
+                            jobStatusStyle(job.status)
                           )}
                         >
                           {job.status}
@@ -222,6 +201,17 @@ export default function OrphanDns() {
               )
             })}
           </div>
+
+          <Pagination
+            offset={offset}
+            limit={limit}
+            total={total}
+            page={page}
+            pageCount={pageCount}
+            onPrev={prev}
+            onNext={next}
+            onGoToPage={goToPage}
+          />
         </>
       )}
     </div>

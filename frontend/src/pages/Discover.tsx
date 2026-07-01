@@ -1,74 +1,57 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { api, type DiscoveredContainer, type DiscoveryResponse, type ServiceListResponse } from "@/lib/api"
+import { api, type DiscoveredContainer } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { Loader2, Search, Globe, RefreshCw } from "lucide-react"
 import { useTimezone, formatTime } from "@/lib/useTimezone"
+import { useResource } from "@/lib/useResource"
 
 const POLL_INTERVAL = 30_000 // 30 seconds
+
+interface DiscoverData {
+  containers: DiscoveredContainer[]
+  // How many exposures (services) each container already has, keyed by container id.
+  exposureCounts: Record<string, number>
+}
 
 export default function Discover() {
   const navigate = useNavigate()
   const tz = useTimezone()
-  const [containers, setContainers] = useState<DiscoveredContainer[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
   const [appliedSearch, setAppliedSearch] = useState("")
   const [runningOnly, setRunningOnly] = useState(true)
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
-  // Track how many exposures each container already has
-  const [exposureCounts, setExposureCounts] = useState<Record<string, number>>({})
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const requestIdRef = useRef(0)
 
-  const load = useCallback(async (showSpinner = false) => {
-    const requestId = ++requestIdRef.current
-    if (showSpinner) setLoading(true)
-    setError(null)
-    try {
-      const [discovery, services] = await Promise.all([
-        api.get<DiscoveryResponse>(`/discovery/containers?${new URLSearchParams({
-          running_only: String(runningOnly),
-          hide_managed: "true",
-          ...(appliedSearch ? { search: appliedSearch } : {}),
-        })}`),
-        api.get<ServiceListResponse>("/services"),
-      ])
-      if (requestId !== requestIdRef.current) return
-      setContainers(discovery.containers)
-      const counts: Record<string, number> = {}
-      for (const svc of services.services) {
-        if (svc.upstream_container_id) {
-          counts[svc.upstream_container_id] = (counts[svc.upstream_container_id] || 0) + 1
-        }
+  // Composite fetcher: merge the discovery + services endpoints and derive each
+  // container's exposure count. Memoized over its inputs so a filter/search
+  // change re-runs the load (mirrors the old useEffect(load, [load]) pattern).
+  const fetcher = useCallback(async (): Promise<DiscoverData> => {
+    const [discovery, services] = await Promise.all([
+      api.discovery.containers({ runningOnly, search: appliedSearch }),
+      api.services.list(),
+    ])
+    const exposureCounts: Record<string, number> = {}
+    for (const svc of services.services) {
+      if (svc.upstream_container_id) {
+        exposureCounts[svc.upstream_container_id] = (exposureCounts[svc.upstream_container_id] || 0) + 1
       }
-      setExposureCounts(counts)
-      setLastRefresh(new Date())
-    } catch (e) {
-      if (requestId !== requestIdRef.current) return
-      setError(e instanceof Error ? e.message : String(e))
-    } finally {
-      if (requestId === requestIdRef.current) setLoading(false)
     }
+    return { containers: discovery.containers, exposureCounts }
   }, [runningOnly, appliedSearch])
 
-  // Load on mount and when runningOnly changes
-  useEffect(() => {
-    load(true)
-  }, [load])
-
-  // Auto-refresh every 30s
-  useEffect(() => {
-    timerRef.current = setInterval(() => load(false), POLL_INTERVAL)
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }, [load])
+  // Shared fetch/loading/error/race-guard/poll machine. The background poll keeps
+  // the current list visible and clears the error only on success (no flicker);
+  // the 30s cadence matches the old hand-rolled setInterval.
+  const { data, loading, error, refresh } = useResource(fetcher, {
+    pollMs: POLL_INTERVAL,
+    onData: () => setLastRefresh(new Date()),
+  })
+  const containers = data?.containers ?? []
+  const exposureCounts = data?.exposureCounts ?? {}
 
   const handleSearch = () => {
     if (search === appliedSearch) {
-      load(true)
+      void refresh()
     } else {
       setAppliedSearch(search)
     }
@@ -98,7 +81,7 @@ export default function Discover() {
             </span>
           )}
           <button
-            onClick={() => load(true)}
+            onClick={() => void refresh()}
             disabled={loading}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
           >
@@ -144,11 +127,11 @@ export default function Discover() {
 
       {/* Content */}
       <div className="mt-4">
-        {loading ? (
+        {loading && containers.length === 0 ? (
           <div className="flex items-center gap-2 py-8 text-zinc-500">
             <Loader2 className="h-4 w-4 animate-spin" /> Loading containers...
           </div>
-        ) : error ? (
+        ) : error && containers.length === 0 ? (
           <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
             {error}
           </div>
@@ -157,60 +140,69 @@ export default function Discover() {
             No containers found. Make sure Docker is accessible and containers are running.
           </div>
         ) : (
-          <div className="overflow-x-auto rounded-md border border-zinc-200">
-            <table className="min-w-full divide-y divide-zinc-200">
-              <thead className="bg-zinc-50">
-                <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-100 bg-white">
-                {containers.map((c) => (
-                  <tr key={c.id} className="hover:bg-zinc-50">
-                    <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-zinc-900">{c.name}</td>
-                    <td className="px-4 py-3 text-sm text-zinc-500 max-w-[200px] truncate" title={c.image}>{c.image}</td>
-                    <td className="px-4 py-3">
-                      <span className={cn(
-                        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                        c.state === "running" ? "bg-green-100 text-green-700" : "bg-zinc-100 text-zinc-600"
-                      )}>
-                        {c.state}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-sm text-zinc-500">
-                      {c.ports.length > 0
-                        ? c.ports.map((p) => `${p.container_port}/${p.protocol}`).join(", ")
-                        : "\u2014"}
-                    </td>
-                    <td className="px-4 py-3 text-sm text-zinc-500">
-                      {c.networks.length > 0 ? c.networks.join(", ") : "\u2014"}
-                    </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right">
-                      <div className="inline-flex items-center gap-2">
-                        {exposureCounts[c.id] ? (
-                          <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
-                            {exposureCounts[c.id]} svc
-                          </span>
-                        ) : null}
-                        <button
-                          onClick={() => handleExpose(c)}
-                          className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
-                        >
-                          <Globe className="hidden h-3 w-3 sm:inline" />
-                          Expose
-                        </button>
-                      </div>
-                    </td>
+          <>
+            {error && (
+              <div className="mb-3 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800">
+                {lastRefresh
+                  ? `Couldn't refresh \u2014 showing data from ${formatTime(lastRefresh, tz)}`
+                  : "Couldn't refresh \u2014 showing cached data"}
+              </div>
+            )}
+            <div className="overflow-x-auto rounded-md border border-zinc-200">
+              <table className="min-w-full divide-y divide-zinc-200">
+                <thead className="bg-zinc-50">
+                  <tr>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody className="divide-y divide-zinc-100 bg-white">
+                  {containers.map((c) => (
+                    <tr key={c.id} className="hover:bg-zinc-50">
+                      <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-zinc-900">{c.name}</td>
+                      <td className="px-4 py-3 text-sm text-zinc-500 max-w-[200px] truncate" title={c.image}>{c.image}</td>
+                      <td className="px-4 py-3">
+                        <span className={cn(
+                          "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+                          c.state === "running" ? "bg-green-100 text-green-700" : "bg-zinc-100 text-zinc-600"
+                        )}>
+                          {c.state}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-sm text-zinc-500">
+                        {c.ports.length > 0
+                          ? c.ports.map((p) => `${p.container_port}/${p.protocol}`).join(", ")
+                          : "\u2014"}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-zinc-500">
+                        {c.networks.length > 0 ? c.networks.join(", ") : "\u2014"}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-right">
+                        <div className="inline-flex items-center gap-2">
+                          {exposureCounts[c.id] ? (
+                            <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                              {exposureCounts[c.id]} svc
+                            </span>
+                          ) : null}
+                          <button
+                            onClick={() => handleExpose(c)}
+                            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
+                          >
+                            <Globe className="hidden h-3 w-3 sm:inline" />
+                            Expose
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
     </div>

@@ -4,13 +4,14 @@ Secrets are stored as individual files under data/secrets/.
 The API never returns secret values — only whether they are configured.
 """
 
-import contextlib
-import os
+import logging
 import stat
-import tempfile
 from pathlib import Path
 
 from app.config import settings
+from app.fsutil import atomic_write_text
+
+logger = logging.getLogger(__name__)
 
 # Known secret names
 CLOUDFLARE_TOKEN = "cloudflare_token"
@@ -20,9 +21,24 @@ TAILSCALE_API_KEY = "tailscale_api_key"
 ALL_SECRETS = [CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, TAILSCALE_API_KEY]
 
 
+# Tailscale key prefixes — single source of truth for validation and messages.
+TS_AUTHKEY_PREFIX = "tskey-auth-"
+TS_APIKEY_PREFIX = "tskey-api-"
+
+
+def is_valid_ts_auth_key(value: str | None) -> bool:
+    """True if ``value`` is a non-empty Tailscale auth key (``tskey-auth-…``)."""
+    return bool(value and value.startswith(TS_AUTHKEY_PREFIX))
+
+
+def is_valid_ts_api_key(value: str | None) -> bool:
+    """True if ``value`` is a non-empty Tailscale API key (``tskey-api-…``)."""
+    return bool(value and value.startswith(TS_APIKEY_PREFIX))
+
+
 def _secret_path(name: str) -> Path:
-    if not name or name in {".", ".."} or "/" in name or "\\" in name:
-        raise ValueError("Secret name must be a single path component")
+    if not name or name.startswith(".") or "/" in name or "\\" in name:
+        raise ValueError("Secret name must be a single, non-hidden path component")
     path = settings.secrets_dir / name
     try:
         path.resolve().relative_to(settings.secrets_dir.resolve())
@@ -33,20 +49,7 @@ def _secret_path(name: str) -> Path:
 
 def _write_private_atomic(path: Path, value: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(value)
-            f.flush()
-            os.fsync(f.fileno())
-        with contextlib.suppress(OSError):
-            os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
-        tmp_path.replace(path)
-    except Exception:
-        with contextlib.suppress(OSError):
-            tmp_path.unlink()
-        raise
+    atomic_write_text(path, value, mode=stat.S_IRUSR | stat.S_IWUSR)
 
 
 def write_secret(name: str, value: str) -> None:
@@ -55,27 +58,31 @@ def write_secret(name: str, value: str) -> None:
 
 
 def read_secret(name: str) -> str | None:
-    """Read a secret value from file. Returns None if not set."""
+    """Read a secret value from file. Returns None if not set.
+
+    Mirrors delete_secret: reading directly and catching FileNotFoundError
+    avoids the TOCTOU window an ``is_file()`` pre-check would open against a
+    concurrent/multi-process delete, which would otherwise surface as an
+    uncaught FileNotFoundError to the caller.
+    """
     path = _secret_path(name)
-    if not path.is_file():
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
         return None
-    return path.read_text(encoding="utf-8").strip()
-
-
-def secret_exists(name: str) -> bool:
-    """Check if a secret file exists (without reading it)."""
-    return _secret_path(name).is_file()
 
 
 def delete_secret(name: str) -> bool:
-    """Delete a secret file. Returns True if it existed."""
+    """Delete a secret file. Returns True if it existed.
+
+    unlink() is itself atomic, so the prior is_file() pre-check only added a
+    TOCTOU window against a concurrent (or multi-process) delete. A vanished
+    file simply yields False.
+    """
     path = _secret_path(name)
-    if path.is_file():
+    try:
         path.unlink()
         return True
-    return False
-
-
-def get_secret_presence() -> dict[str, bool]:
-    """Return a dict of secret name -> whether it's configured."""
-    return {name: secret_exists(name) for name in ALL_SECRETS}
+    except FileNotFoundError:
+        logger.debug("Secret %s already absent on delete", name)
+        return False

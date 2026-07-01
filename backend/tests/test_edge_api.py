@@ -180,3 +180,13 @@ class TestEdgeLogsEndpoint:
 
         resp = client.get("/api/services/svc_nonexistent/logs/edge?tail=1001")
         assert resp.status_code == 422
+
+    @patch("app.edge.container_manager.get_edge_logs")
+    def test_logs_docker_unavailable_returns_503(self, mock_logs, client):
+        import docker
+
+        svc_id = _create_service(client).json()["id"]
+        mock_logs.side_effect = docker.errors.DockerException("daemon down")
+        resp = client.get(f"/api/services/{svc_id}/logs/edge")
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Docker is unavailable"

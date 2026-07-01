@@ -36,7 +36,14 @@ export function useTimezone(): string {
       fetch("/api/settings", { credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
-          if (data?.general?.timezone) setConfiguredTimezone(data.general.timezone)
+          // Ignore a late settings response if a timezone has since been
+          // established — by an explicit setConfiguredTimezone (e.g. saving
+          // the General settings) or a sibling consumer's fetch. Applying it
+          // here would clobber the newer value back to a stale one and
+          // re-render every mounted consumer with the wrong zone.
+          if (!cachedTimezone && data?.general?.timezone) {
+            setConfiguredTimezone(data.general.timezone)
+          }
         })
         .catch(() => {})
     }
@@ -80,7 +87,20 @@ export function formatDateTime(
   if (!date) return ""
   const d = typeof date === "string" ? parseBackendDate(date) : date
   if (isNaN(d.getTime())) return ""
-  return d.toLocaleString(undefined, { timeZone: timezone, ...options })
+  try {
+    return d.toLocaleString(undefined, { ...options, timeZone: timezone })
+  } catch {
+    // An invalid IANA timezone makes toLocaleString throw a RangeError, which
+    // would white-screen every timestamp during render. Fall back to UTC
+    // (always valid); if even that fails, use the raw ISO string. timeZone is
+    // applied last so neither the configured zone nor this UTC safety net can
+    // be silently overridden by a caller-supplied options.timeZone.
+    try {
+      return d.toLocaleString(undefined, { ...options, timeZone: "UTC" })
+    } catch {
+      return d.toISOString()
+    }
+  }
 }
 
 /** Format a date (no time) using the configured timezone. */

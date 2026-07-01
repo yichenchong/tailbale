@@ -1,8 +1,5 @@
 import { useEffect, useRef } from "react"
-
-interface DashboardSummary {
-  services: { error: number }
-}
+import { api, UnauthorizedError, type DashboardSummary } from "@/lib/api"
 
 /**
  * Sets the document favicon to `href`, creating the <link rel="icon"> if needed.
@@ -26,10 +23,19 @@ export function setFavicon(href: string) {
 
 /**
  * Polls the dashboard summary and updates the favicon to reflect overall health.
- * Green monitor = all healthy, red monitor = at least one error.
+ * Green monitor = no errors, red monitor = at least one error (warnings stay green).
  *
- * Self-guarding: if the fetch returns 401 (unauthenticated), polling stops
+ * Self-guarding: if the request returns 401 (unauthenticated), polling stops
  * immediately so it can never cause a redirect loop.
+ *
+ * Deliberately NOT built on `useResource` (proposal F1). It fetches via
+ * `api.getSafe` — the non-redirecting variant of the shared client — precisely
+ * so a 401 does NOT redirect to /login; instead `getSafe` throws
+ * `UnauthorizedError`, and this poller then stops the interval *permanently* —
+ * two behaviors the generic hook intentionally doesn't model (its 401s redirect
+ * via `api`, and its polling is unconditional). The `stoppedRef` guard below
+ * plays the same role as useResource's monotonic request-id guard: it discards
+ * any response (and its favicon write) that resolves after unmount or a 401.
  */
 export function useDynamicFavicon(intervalMs = 30_000) {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -40,7 +46,7 @@ export function useDynamicFavicon(intervalMs = 30_000) {
 
     function stop() {
       stoppedRef.current = true
-      if (timerRef.current) {
+      if (timerRef.current !== null) {
         clearInterval(timerRef.current)
         timerRef.current = null
       }
@@ -48,21 +54,19 @@ export function useDynamicFavicon(intervalMs = 30_000) {
 
     function update() {
       if (stoppedRef.current) return
-      fetch("/api/dashboard/summary", { credentials: "same-origin" })
-        .then((r) => {
-          if (r.status === 401) {
-            // Not authenticated — stop polling permanently
-            stop()
-            return null
-          }
-          return r.ok ? r.json() : null
-        })
-        .then((data: DashboardSummary | null) => {
-          if (!data) return
+      api
+        .getSafe<DashboardSummary>("/dashboard/summary")
+        .then((data) => {
+          if (stoppedRef.current || !data) return
           const hasError = data.services.error > 0
           setFavicon(hasError ? "/favicon-error.svg" : "/favicon-healthy.svg")
         })
-        .catch(() => {})
+        .catch((err) => {
+          // A 401 means we're unauthenticated — stop polling permanently so we
+          // can never cause a redirect loop. Any other error (network blip,
+          // non-2xx, parse failure) is transient: swallow it and keep polling.
+          if (err instanceof UnauthorizedError) stop()
+        })
     }
 
     update()
@@ -75,7 +79,7 @@ export function useDynamicFavicon(intervalMs = 30_000) {
 /**
  * Sets a static favicon — use on the login page where there's no health to poll.
  */
-export function useStaticFavicon(href = "/favicon.svg") {
+export function useStaticFavicon(href = "/favicon-healthy.svg") {
   useEffect(() => {
     setFavicon(href)
   }, [href])

@@ -6,28 +6,14 @@ import logging
 
 import docker
 
+from app.edge.docker_client import docker_client
+
 logger = logging.getLogger(__name__)
-
-
-def _get_client(socket_path: str | None = None) -> docker.DockerClient:
-    if socket_path:
-        return docker.DockerClient(base_url=socket_path)
-    return docker.DockerClient.from_env()
-
-
-def _close_client(client: docker.DockerClient) -> None:
-    close = getattr(client, "close", None)
-    if close is not None:
-        try:
-            close()
-        except Exception:
-            logger.debug("Failed to close Docker client", exc_info=True)
 
 
 def create_network(network_name: str, socket_path: str | None = None) -> str:
     """Create a bridge network for an edge container. Returns the network ID."""
-    client = _get_client(socket_path)
-    try:
+    with docker_client(socket_path) as client:
         try:
             existing = client.networks.get(network_name)
             logger.info("Network %s already exists (id=%s)", network_name, existing.id)
@@ -35,11 +21,23 @@ def create_network(network_name: str, socket_path: str | None = None) -> str:
         except docker.errors.NotFound:
             pass
 
-        network = client.networks.create(network_name, driver="bridge")
+        try:
+            network = client.networks.create(network_name, driver="bridge")
+        except docker.errors.APIError as create_exc:
+            # Lost a create race: another caller created the network between our
+            # get above and this create (modern daemons reject duplicate names
+            # with a 409). Recover by returning the existing one; re-raise the
+            # original error if the network genuinely was not created.
+            try:
+                existing = client.networks.get(network_name)
+            except docker.errors.NotFound:
+                raise create_exc from None
+            logger.info(
+                "Network %s was created concurrently (id=%s)", network_name, existing.id
+            )
+            return existing.id
         logger.info("Created network %s (id=%s)", network_name, network.id)
         return network.id
-    finally:
-        _close_client(client)
 
 
 def _disconnect_all_endpoints(network: docker.models.networks.Network) -> None:
@@ -75,8 +73,7 @@ def remove_network(network_name: str, socket_path: str | None = None) -> None:
     ``ensure_network``) are disconnected first so Docker does not refuse the
     removal with "has active endpoints" and leak the per-service network.
     """
-    client = _get_client(socket_path)
-    try:
+    with docker_client(socket_path) as client:
         try:
             network = client.networks.get(network_name)
         except docker.errors.NotFound:
@@ -110,10 +107,6 @@ def remove_network(network_name: str, socket_path: str | None = None) -> None:
                 network_name,
                 exc_info=True,
             )
-    finally:
-        _close_client(client)
-
-
 
 
 def _resolve_container(
@@ -143,8 +136,7 @@ def connect_container(
     container_name: str | None = None,
 ) -> str:
     """Connect a container to a network (idempotent). Returns the resolved container ID."""
-    client = _get_client(socket_path)
-    try:
+    with docker_client(socket_path) as client:
         network = client.networks.get(network_name)
         container = _resolve_container(client, container_id, container_name)
 
@@ -155,11 +147,23 @@ def connect_container(
             logger.info("Container %s already on network %s", container.id, network_name)
             return container.id
 
-        network.connect(container)
+        try:
+            network.connect(container)
+        except docker.errors.APIError as exc:
+            message = str(exc).lower()
+            if "already exists" not in message and "already connected" not in message:
+                raise
+            container.reload()
+            connected_networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
+            if network_name not in connected_networks:
+                raise
+            logger.info(
+                "Container %s became connected to network %s during connect",
+                container.id, network_name,
+            )
+            return container.id
         logger.info("Connected container %s to network %s", container.id, network_name)
         return container.id
-    finally:
-        _close_client(client)
 
 
 def ensure_network(

@@ -1,8 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useState } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/api"
-import { useTimezone, formatDateTime, formatTime as fmtTime, parseBackendDate } from "@/lib/useTimezone"
+import { useTimezone, formatDateTime, formatTime as fmtTime } from "@/lib/useTimezone"
 import { cn } from "@/lib/utils"
+import { certStatus } from "@/lib/certStatus"
+import { eventLevelStyle } from "@/lib/statusStyles"
+import { useResource } from "@/lib/useResource"
 import {
   Loader2,
   Activity,
@@ -16,76 +19,16 @@ import {
 
 const POLL_INTERVAL = 30_000
 
-interface DashboardSummary {
-  services: {
-    total: number
-    healthy: number
-    warning: number
-    error: number
-  }
-  expiring_certs: {
-    service_id: string
-    service_name: string
-    hostname: string
-    expires_at: string | null
-  }[]
-  recent_errors: {
-    id: string
-    service_id: string | null
-    kind: string
-    message: string
-    created_at: string | null
-  }[]
-  recent_events: {
-    id: string
-    service_id: string | null
-    kind: string
-    level: string
-    message: string
-    created_at: string | null
-  }[]
-}
-
 export default function Dashboard() {
   const tz = useTimezone()
-  const [data, setData] = useState<DashboardSummary | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const requestIdRef = useRef(0)
 
-  const load = useCallback(async (showSpinner = false) => {
-    const requestId = ++requestIdRef.current
-    if (showSpinner) setLoading(true)
-    try {
-      const result = await api.get<DashboardSummary>("/dashboard/summary")
-      if (requestId !== requestIdRef.current) return
-      setData(result)
-      setError("")
-      setLastRefresh(new Date())
-    } catch (e) {
-      if (requestId !== requestIdRef.current) return
-      setError(e instanceof Error ? e.message : "Failed to load")
-    } finally {
-      if (requestId === requestIdRef.current) setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    load(true)
-    return () => {
-      requestIdRef.current += 1
-    }
-  }, [load])
-
-  // Auto-refresh every 30s
-  useEffect(() => {
-    timerRef.current = setInterval(() => load(false), POLL_INTERVAL)
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }, [load])
+  const fetcher = useCallback(() => api.dashboard.summary(), [])
+  const { data, loading, error, refresh } = useResource(fetcher, {
+    pollMs: POLL_INTERVAL,
+    mapError: (e) => (e instanceof Error ? e.message : "Failed to load"),
+    onData: () => setLastRefresh(new Date()),
+  })
 
   if (loading && !data) {
     return (
@@ -96,7 +39,7 @@ export default function Dashboard() {
   }
 
   if (error && !data) {
-    return <div className="rounded-md bg-red-50 p-4 text-red-700">{error}</div>
+    return <div role="alert" className="rounded-md bg-red-50 p-4 text-red-700">{error}</div>
   }
 
   if (!data) return null
@@ -117,7 +60,7 @@ export default function Dashboard() {
             </span>
           )}
           <button
-            onClick={() => load(true)}
+            onClick={() => refresh()}
             disabled={loading}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
           >
@@ -150,19 +93,14 @@ export default function Dashboard() {
           ) : (
             <ul className="mt-3 space-y-2">
               {data.expiring_certs.map((c) => {
-                const days = c.expires_at
-                  ? Math.ceil((parseBackendDate(c.expires_at).getTime() - Date.now()) / 86400000)
-                  : null
+                const cert = certStatus(c.expires_at)
                 return (
                   <li key={c.service_id} className="flex items-center justify-between text-sm">
                     <Link to={`/services/${c.service_id}`} className="text-zinc-700 hover:underline">
                       {c.service_name} <span className="text-zinc-400">({c.hostname})</span>
                     </Link>
-                    <span className={cn(
-                      "font-medium",
-                      days !== null && days < 0 ? "text-red-600" : days !== null && days <= 7 ? "text-yellow-600" : "text-zinc-500"
-                    )}>
-                      {days !== null ? (days < 0 ? "Expired" : `${days}d left`) : "\u2014"}
+                    <span className={cn("font-medium", cert.color)}>
+                      {cert.label}
                     </span>
                   </li>
                 )
@@ -190,6 +128,11 @@ export default function Dashboard() {
               ))}
             </ul>
           )}
+          {data.recent_errors.length > 8 && (
+            <Link to="/events" className="mt-3 inline-block text-sm text-zinc-500 hover:text-zinc-700 hover:underline">
+              View all events
+            </Link>
+          )}
         </section>
       </div>
 
@@ -209,7 +152,7 @@ export default function Dashboard() {
                 </span>
                 <span className={cn(
                   "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                  e.level === "error" ? "bg-red-100 text-red-700" : e.level === "warning" ? "bg-yellow-100 text-yellow-700" : "bg-blue-100 text-blue-700"
+                  eventLevelStyle(e.level)
                 )}>
                   {e.level}
                 </span>

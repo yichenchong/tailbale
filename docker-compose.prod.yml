@@ -3,8 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Publish on loopback only by default: the admin UI controls Docker (host-root),
+    # so it must not be reachable in cleartext on the LAN. Reach it over your tailnet
+    # via `tailscale serve` (HTTPS), or set BIND_ADDR to your tailnet IP for ip:port.
     ports:
-      - "${HOST_PORT:-6780}:${PORT:-8080}"
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-6780}:${PORT:-8080}"
     volumes:
       - ${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}:/data
       - /var/run/docker.sock:/var/run/docker.sock
@@ -13,7 +16,7 @@ services:
       - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
       - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-24}
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - CORS_ORIGINS=${CORS_ORIGINS-}
       - PORT=${PORT:-8080}
       - HOST=${HOST:-0.0.0.0}
       - DOCKER_SOCKET=unix:///var/run/docker.sock

@@ -1,5 +1,5 @@
 #!/bin/sh
-set -e
+set -eu
 
 # Tell the tailscale CLI where to find the tailscaled socket.
 # Newer Tailscale versions (≥1.96) removed the --socket flag from most
@@ -42,10 +42,12 @@ done
 
 if [ ! -S "$TS_SOCKET" ]; then
     echo "[edge] ERROR: tailscaled socket not ready after 15s"
-    exit 1
+    cleanup 1
 fi
 
-# 2. Authenticate with TS_AUTHKEY if state is fresh
+# 2. Bring Tailscale up. With TS_AUTHKEY set we always pass it to `tailscale up`
+# (idempotent: a no-op refresh when the persisted state is already authed);
+# without it we rely on existing state in the statedir.
 TS_AUTH_FAILED=false
 if [ -n "${TS_AUTHKEY:-}" ]; then
     echo "[edge] Authenticating with Tailscale (hostname: ${TS_HOSTNAME:-edge})..."

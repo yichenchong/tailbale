@@ -1,40 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { Link, MemoryRouter, Route, Routes } from "react-router-dom"
+import { renderRoute } from "./testkit"
+import { makeService } from "./factories"
 
-const mockService = {
-  id: "svc_abc123",
-  name: "Nextcloud",
-  enabled: true,
-  upstream_container_id: "c123",
-  upstream_container_name: "nextcloud",
-  upstream_scheme: "http",
-  upstream_port: 80,
-  healthcheck_path: "/status.php",
-  hostname: "nextcloud.example.com",
-  base_domain: "example.com",
-  edge_container_name: "edge_nextcloud",
-  network_name: "edge_net_nextcloud",
-  ts_hostname: "edge-nextcloud",
-  preserve_host_header: true,
-  custom_caddy_snippet: null,
-  app_profile: "nextcloud",
-  status: {
-    phase: "pending",
-    message: "Awaiting first reconciliation",
-    tailscale_ip: null,
-    edge_container_id: null,
-    last_reconciled_at: null,
-    health_checks: {
-      upstream_container_present: true,
-      edge_container_running: false,
-      cert_present: true,
-    },
-    cert_expires_at: "2026-08-01T00:00:00",
-  },
-  created_at: "2026-04-05T00:00:00",
-  updated_at: "2026-04-05T00:00:00",
-}
+const mockService = makeService()
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -42,13 +12,7 @@ beforeEach(() => {
 
 function renderWithRoute(path: string) {
   return import("@/pages/ServiceDetail").then(({ default: ServiceDetail }) => {
-    render(
-      <MemoryRouter initialEntries={[path]}>
-        <Routes>
-          <Route path="/services/:id" element={<ServiceDetail />} />
-        </Routes>
-      </MemoryRouter>
-    )
+    renderRoute(<ServiceDetail />, { path: "/services/:id", initialEntries: [path] })
   })
 }
 
@@ -114,6 +78,65 @@ describe("ServiceDetail page", () => {
     expect(screen.getByText("Certificate")).toBeInTheDocument()
   })
 
+  // The Health Checks grid maps each backend check key to a human label via
+  // CHECK_LABELS. The backend emits exactly these 12 keys (CRITICAL_CHECKS ∪
+  // WARNING_CHECKS in backend/app/health/health_checker.py). If a label is ever
+  // dropped/renamed, the page silently falls back to rendering the raw
+  // snake_case key — this pins the full mapping so that drift fails loudly.
+  it("renders a human label for every backend health-check key (no raw snake_case leaks)", async () => {
+    const KEY_TO_LABEL: Record<string, string> = {
+      upstream_container_present: "Upstream Container",
+      upstream_network_connected: "Network Connected",
+      edge_container_present: "Edge Container",
+      edge_container_running: "Edge Running",
+      tailscale_ready: "Tailscale Ready",
+      tailscale_ip_present: "Tailscale IP",
+      cert_present: "Certificate",
+      cert_not_expiring: "Cert Valid",
+      dns_record_present: "DNS Record",
+      dns_matches_ip: "DNS Matches IP",
+      caddy_config_present: "Caddy Config",
+      https_probe_ok: "HTTPS Probe",
+    }
+    // All checks pass: each label renders exactly once (no failing-suggestions
+    // box), so a leaked raw key would be unambiguous.
+    const allPass = Object.fromEntries(Object.keys(KEY_TO_LABEL).map((k) => [k, true]))
+    const svc = { ...mockService, status: { ...mockService.status, health_checks: allPass } }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(svc),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => {
+      expect(screen.getByText("Health Checks")).toBeInTheDocument()
+    })
+    // Scope label lookups to the Health Checks card: a few labels ("Edge
+    // Container", "Tailscale IP") also appear verbatim as Runtime-section rows.
+    const section = screen.getByText("Health Checks").closest("div") as HTMLElement
+    for (const [key, label] of Object.entries(KEY_TO_LABEL)) {
+      expect(within(section).getByText(label)).toBeInTheDocument()
+      // The raw key must never reach the user anywhere when a label exists for it.
+      expect(screen.queryByText(key)).not.toBeInTheDocument()
+    }
+  })
+
+  it("falls back to the raw key for an unrecognized health check", async () => {
+    // Graceful degradation: a key with no CHECK_LABELS entry renders verbatim
+    // rather than blanking out, so a newly-added backend check is still visible.
+    const svc = {
+      ...mockService,
+      status: { ...mockService.status, health_checks: { future_unknown_check: true } },
+    }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(svc),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => {
+      expect(screen.getByText("future_unknown_check")).toBeInTheDocument()
+    })
+  })
+
   it("shows placeholder when no health checks", async () => {
     const svc = { ...mockService, status: { ...mockService.status, health_checks: null } }
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
@@ -140,7 +163,7 @@ describe("ServiceDetail page", () => {
     expect(screen.getByText("Reload Caddy")).toBeInTheDocument()
     expect(screen.getByText("Restart Edge")).toBeInTheDocument()
     expect(screen.getByText("Recreate Edge")).toBeInTheDocument()
-    expect(screen.getByText("Force Renew Cert")).toBeInTheDocument()
+    expect(screen.getByText("Renew certificate")).toBeInTheDocument()
     expect(screen.getByText("Re-run Reconcile")).toBeInTheDocument()
   })
 
@@ -163,7 +186,7 @@ describe("ServiceDetail page", () => {
     expect(screen.queryByText("Restart Edge")).not.toBeInTheDocument()
     expect(screen.queryByText("Recreate Edge")).not.toBeInTheDocument()
     expect(screen.queryByText("Update Edge")).not.toBeInTheDocument()
-    expect(screen.getByText("Force Renew Cert")).toBeInTheDocument()
+    expect(screen.getByText("Renew certificate")).toBeInTheDocument()
     expect(screen.getByText("Re-run Reconcile")).toBeInTheDocument()
   })
 
@@ -282,6 +305,65 @@ describe("ServiceDetail page", () => {
     await Promise.resolve()
     expect(screen.queryByText("Oldcloud")).not.toBeInTheDocument()
     expect(screen.getByText("Newcloud")).toBeInTheDocument()
+  })
+
+  it("keeps newer detail action errors visible when an older clear timer expires", async () => {
+    const edgeVersion = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (!init?.method || init.method === "GET") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(url.endsWith("/edge-version") ? edgeVersion : mockService),
+        } as Response)
+      }
+      return Promise.resolve({
+        ok: false,
+        status: 500,
+        json: () => Promise.resolve({
+          detail: String(url).includes("/reload") ? "first detail failure" : "second detail failure",
+        }),
+      } as Response)
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => {
+      expect(screen.getByText("Reload Caddy")).toBeInTheDocument()
+    })
+    const timers: Array<{ handler: () => void; cleared: boolean }> = []
+    vi.spyOn(globalThis, "setTimeout").mockImplementation((handler: TimerHandler) => {
+      timers.push({ handler: handler as () => void, cleared: false })
+      return (timers.length - 1) as unknown as ReturnType<typeof setTimeout>
+    })
+    vi.spyOn(globalThis, "clearTimeout").mockImplementation((id) => {
+      const timer = timers[Number(id)]
+      if (timer) timer.cleared = true
+    })
+    const flushAction = async () => {
+      await act(async () => {
+        for (let i = 0; i < 6; i++) await Promise.resolve()
+      })
+    }
+
+    fireEvent.click(screen.getByText("Reload Caddy"))
+    await flushAction()
+    expect(screen.getByText("first detail failure")).toBeInTheDocument()
+    const firstActionTimer = timers.at(-1)!
+
+    fireEvent.click(screen.getByText("Restart Edge"))
+    await flushAction()
+    expect(screen.getByText("second detail failure")).toBeInTheDocument()
+
+    const secondActionTimer = timers.at(-1)!
+    expect(firstActionTimer.cleared).toBe(true)
+    await act(async () => {
+      if (!firstActionTimer.cleared) firstActionTimer.handler()
+    })
+    expect(screen.getByText("second detail failure")).toBeInTheDocument()
+
+    await act(async () => {
+      secondActionTimer.handler()
+    })
+    expect(screen.queryByText("second detail failure")).not.toBeInTheDocument()
   })
 
   it("closes confirmation dialogs when navigating between services", async () => {
@@ -407,5 +489,438 @@ describe("ServiceDetail page", () => {
     expect(await screen.findByText(expected)).toBeInTheDocument()
     // The raw, un-localized ISO string must never reach the user.
     expect(screen.queryByText(naive)).not.toBeInTheDocument()
+  })
+
+  it("color-codes the Cert Expiry row by urgency via formatCertExpiry", async () => {
+    // The Runtime "Cert Expiry" row now flows through lib/certStatus'
+    // formatCertExpiry instead of a bare formatDate, so a cert expiring within
+    // the 14-day "soon" band renders yellow/emphasized rather than plain.
+    const soon = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000)
+      .toISOString()
+      .replace("Z", "")
+    const svc = {
+      ...mockService,
+      status: { ...mockService.status, cert_expires_at: soon },
+    }
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(svc),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => {
+      expect(screen.getByText("Cert Expiry")).toBeInTheDocument()
+    })
+    const value = screen.getByText("Cert Expiry").closest("div")!.querySelector("dd")!
+    expect(value.className).toBe("text-yellow-600 font-medium")
+  })
+
+  it("discards an in-flight reload from a prior action so it cannot clobber a save", async () => {
+    // Repro of the last-writer race: a slow reload kicked off by a prior action
+    // (e.g. "Re-run Reconcile") must not overwrite the fresh service returned by
+    // a save that resolves first.
+    let resolveReload!: (value: { ok: boolean; json: () => Promise<unknown> }) => void
+    let resolvePut!: (value: { ok: boolean; json: () => Promise<unknown> }) => void
+    const fresh = { ...mockService, name: "Freshname" }
+    const stale = { ...mockService, name: "Stalename" }
+    const edgeVersion = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    // The reconcile action sets this so the detail GET it triggers is held
+    // open; every mount / earlier detail GET resolves immediately. Keyed on the
+    // action rather than call-count so it's robust to how many loads mount fires.
+    let holdReload = false
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVersion) })
+      }
+      if (init?.method === "PUT") {
+        return new Promise((resolve) => { resolvePut = resolve })
+      }
+      if (init?.method === "POST" && url.endsWith("/reconcile")) {
+        holdReload = true
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      // GET of the detail endpoint: hold open only the reload the reconcile
+      // action kicks off; the mount load(s) resolve immediately.
+      if (holdReload) {
+        return new Promise((resolve) => { resolveReload = resolve })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    // Begin a save (PUT left in flight).
+    fireEvent.click(screen.getByText("Edit"))
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Freshname" } })
+    fireEvent.click(screen.getByText("Save"))
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true)
+    )
+
+    // While the save is pending, a prior-style action kicks off a reload.
+    fireEvent.click(screen.getByText("Re-run Reconcile"))
+    await waitFor(() => expect(resolveReload).toBeDefined())
+
+    // The save resolves first with fresh data...
+    await act(async () => {
+      resolvePut({ ok: true, json: () => Promise.resolve(fresh) })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    // ...then the stale reload resolves last and must be ignored.
+    await act(async () => {
+      resolveReload({ ok: true, json: () => Promise.resolve(stale) })
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(screen.getByText("Freshname")).toBeInTheDocument()
+    expect(screen.queryByText("Stalename")).not.toBeInTheDocument()
+  })
+
+  it("keeps the page and an open edit form intact across a background post-action refresh", async () => {
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "POST") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Edit"))
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "WorkInProgress" } })
+
+    // A post-action refresh (Re-run Reconcile -> POST then a background reload)
+    // must not blank the page to the spinner nor reseed the open edit form.
+    await act(async () => {
+      fireEvent.click(screen.getByText("Re-run Reconcile"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(screen.queryByText("Loading...")).not.toBeInTheDocument()
+    expect(screen.getByLabelText("Name")).toHaveValue("WorkInProgress")
+  })
+
+  it("disables Save and shows inline feedback when the edited name exceeds 128 chars", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockService),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Edit"))
+    const save = screen.getByText("Save")
+    expect(save).toBeEnabled()
+
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "a".repeat(129) } })
+    expect(save).toBeDisabled()
+    expect(screen.getByText("Service name must be 128 characters or fewer.")).toBeInTheDocument()
+  })
+
+  it("deletes with DNS cleanup and navigates to the services list on success", async () => {
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "DELETE") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: ServiceDetail } = await import("@/pages/ServiceDetail")
+    render(
+      <MemoryRouter initialEntries={["/services/svc_abc123"]}>
+        <Routes>
+          <Route path="/services/:id" element={<ServiceDetail />} />
+          <Route path="/services" element={<div>Services List</div>} />
+        </Routes>
+      </MemoryRouter>
+    )
+    await waitFor(() => expect(screen.getByText("Delete")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Delete")) // open confirm (cleanup checked by default)
+    await act(async () => {
+      fireEvent.click(screen.getByText("Delete Service"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    await waitFor(() => expect(screen.getByText("Services List")).toBeInTheDocument())
+    const delCall = fetchMock.mock.calls.find(([, init]) => init?.method === "DELETE")
+    expect(delCall?.[0]).toBe("/api/services/svc_abc123?cleanup_dns=true")
+  })
+
+  it("disables an enabled service via POST /disable", async () => {
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "POST" && url.endsWith("/disable")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...mockService, enabled: false }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Disable")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Disable")) // open confirm
+    await act(async () => {
+      fireEvent.click(screen.getByText("Disable")) // confirm -> handleToggleEnabled
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/services/svc_abc123/disable",
+      expect.objectContaining({ method: "POST" })
+    )
+  })
+
+  it("enables a disabled service via PUT { enabled: true }", async () => {
+    const disabledService = { ...mockService, enabled: false }
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "PUT") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...disabledService, enabled: true }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(disabledService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Enable")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Enable")) // no confirm when enabling
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/services/svc_abc123",
+      expect.objectContaining({ method: "PUT" })
+    )
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")
+    expect(JSON.parse(String(putCall?.[1]?.body))).toMatchObject({ enabled: true })
+  })
+
+  it("requires confirmation before recreating the edge (no immediate POST)", async () => {
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "POST" && url.endsWith("/recreate-edge")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Recreate Edge")).toBeInTheDocument())
+
+    const recreatePosts = () =>
+      fetchMock.mock.calls.filter(
+        ([url, init]) =>
+          String(url).endsWith("/recreate-edge") && (init as RequestInit | undefined)?.method === "POST"
+      )
+
+    // Recreate causes downtime, so the first click only opens the confirm and
+    // must NOT fire the destructive POST (unlike the Services row menu, which
+    // intentionally fires immediately).
+    fireEvent.click(screen.getByText("Recreate Edge"))
+    expect(screen.getByText(/Recreate edge\? This will cause brief downtime\./)).toBeInTheDocument()
+    expect(recreatePosts()).toHaveLength(0)
+
+    // Confirming fires exactly one POST and closes the prompt.
+    await act(async () => {
+      fireEvent.click(screen.getByText("Recreate"))
+    })
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/services/svc_abc123/recreate-edge",
+        expect.objectContaining({ method: "POST" })
+      )
+    )
+    expect(recreatePosts()).toHaveLength(1)
+    expect(screen.queryByText(/Recreate edge\? This will cause brief downtime\./)).not.toBeInTheDocument()
+  })
+
+  // Renew cert: shared fetch mock that answers the renew endpoint based on the
+  // `force` query param, mirroring the backend contract.
+  function renewFetchMock(messages: { refused: string; forced: string }) {
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    return vi.fn((url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "POST" && String(url).includes("/renew-cert")) {
+        const forced = String(url).includes("force=true")
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              performed: forced,
+              needs_force: !forced,
+              message: forced ? messages.forced : messages.refused,
+              expires_at: forced ? "2026-09-01T00:00:00" : null,
+              last_failure: null,
+            }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+  }
+
+  const renewPosts = (mock: ReturnType<typeof vi.fn>) =>
+    mock.mock.calls.filter(
+      ([url, init]) => String(url).includes("/renew-cert") && (init as RequestInit | undefined)?.method === "POST"
+    )
+
+  it("opens the force-renew modal (without forcing) when a healthy cert refuses renewal", async () => {
+    const fetchMock = renewFetchMock({ refused: "Certificate is healthy; not renewed.", forced: "Renewal triggered." })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Renew certificate"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // Exactly one renew POST so far, and it carried no force flag.
+    const posts = renewPosts(fetchMock)
+    expect(posts).toHaveLength(1)
+    expect(String(posts[0][0])).toBe("/api/services/svc_abc123/renew-cert")
+    // The scary modal is shown instead of silently forcing.
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+    expect(screen.getByText(/Let's Encrypt/)).toBeInTheDocument()
+  })
+
+  it("posts force=true and closes the modal when the user confirms a force renew", async () => {
+    const fetchMock = renewFetchMock({ refused: "Certificate is healthy; not renewed.", forced: "Renewal triggered." })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Renew certificate"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Force renew"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    const forced = fetchMock.mock.calls.filter(
+      ([url, init]) => String(url).includes("/renew-cert?force=true") && (init as RequestInit | undefined)?.method === "POST"
+    )
+    expect(forced).toHaveLength(1)
+    expect(renewPosts(fetchMock)).toHaveLength(2) // initial refused + forced
+    await waitFor(() => expect(screen.queryByText("Force certificate renewal?")).not.toBeInTheDocument())
+    expect(screen.getByText("Renewal triggered.")).toBeInTheDocument()
+  })
+
+  it("does not post force=true when the force-renew modal is cancelled", async () => {
+    const fetchMock = renewFetchMock({ refused: "Certificate is healthy; not renewed.", forced: "Renewal triggered." })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Renew certificate"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+
+    fireEvent.click(screen.getByText("Cancel"))
+    expect(screen.queryByText("Force certificate renewal?")).not.toBeInTheDocument()
+
+    // Still just the single non-force POST; cancelling fired nothing further.
+    const posts = renewPosts(fetchMock)
+    expect(posts).toHaveLength(1)
+    expect(posts.some(([url]) => String(url).includes("force=true"))).toBe(false)
+  })
+
+  it("renews immediately with no modal when the cert is near expiry (performed)", async () => {
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "POST" && String(url).includes("/renew-cert")) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              success: true,
+              performed: true,
+              needs_force: false,
+              message: "Certificate renewal started.",
+              expires_at: "2026-09-01T00:00:00",
+              last_failure: null,
+            }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Renew certificate"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    // No modal, success message shown, exactly one (non-force) POST.
+    expect(screen.queryByText("Force certificate renewal?")).not.toBeInTheDocument()
+    expect(screen.getByText("Certificate renewal started.")).toBeInTheDocument()
+    const posts = renewPosts(fetchMock)
+    expect(posts).toHaveLength(1)
+    expect(String(posts[0][0])).toBe("/api/services/svc_abc123/renew-cert")
+  })
+
+  it("shows the outdated-edge banner and updates the edge container", async () => {
+    const outdated = { orchestrator_version: "2.0.0", edge_version: "1.0.0", up_to_date: false }
+    const updated = { orchestrator_version: "2.0.0", edge_version: "2.0.0", up_to_date: true }
+    let edgeCalls = 0
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/edge-version")) {
+        edgeCalls += 1
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeCalls === 1 ? outdated : updated) })
+      }
+      if (init?.method === "POST" && String(url).endsWith("/update-edge")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Update Edge")).toBeInTheDocument())
+    expect(screen.getByText(/Edge container is outdated/)).toBeInTheDocument()
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Update Edge"))
+      await new Promise((r) => setTimeout(r, 0))
+    })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/services/svc_abc123/update-edge",
+      expect.objectContaining({ method: "POST" })
+    )
+    // After updating, the edge reports up-to-date and the button/banner clear.
+    await waitFor(() => expect(screen.queryByText("Update Edge")).not.toBeInTheDocument())
   })
 })

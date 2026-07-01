@@ -48,6 +48,30 @@ class TestDashboardSummary:
         assert data["services"]["warning"] == 1
         assert data["services"]["error"] == 1
 
+    def test_service_without_status_counted_in_total_only(self, client, db_session):
+        # A never-reconciled service (no ServiceStatus row) must still count
+        # toward `total` but contribute to none of the phase tallies. Exercises
+        # the `if not status: continue` guard in dashboard_summary, which is
+        # otherwise unreachable in tests because _create_service always adds a
+        # status row.
+        svc = Service(
+            name="NoStatus", upstream_container_id="abc123",
+            upstream_container_name="nostatus", upstream_scheme="http",
+            upstream_port=80, hostname="nostatus.example.com",
+            base_domain="example.com", edge_container_name="edge_nostatus",
+            network_name="edge_net_nostatus", ts_hostname="edge-nostatus",
+        )
+        db_session.add(svc)
+        db_session.commit()
+        assert db_session.get(ServiceStatus, svc.id) is None
+
+        resp = client.get("/api/dashboard/summary")
+        data = resp.json()
+        assert data["services"]["total"] == 1
+        assert data["services"]["healthy"] == 0
+        assert data["services"]["warning"] == 0
+        assert data["services"]["error"] == 0
+
     def test_expiring_certs(self, client, db_session):
         svc = _create_service(db_session, "Expiring")
         cert = Certificate(
@@ -76,6 +100,66 @@ class TestDashboardSummary:
         resp = client.get("/api/dashboard/summary")
         data = resp.json()
         assert len(data["expiring_certs"]) == 0
+
+    def test_attention_window_follows_configured_setting(self, client, db_session):
+        # AR3: the dashboard attention threshold must track the operator's
+        # cert_renewal_window_days, not a hard-coded 30. With the window widened
+        # to 45, a cert 40 days out (excluded under the old 30-day literal) is
+        # now flagged for attention.
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session, "Wide")
+        db_session.add(Certificate(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            expires_at=datetime.now(UTC) + timedelta(days=40),
+        ))
+        set_setting(db_session, "cert_renewal_window_days", "45")
+        db_session.commit()
+
+        resp = client.get("/api/dashboard/summary")
+        data = resp.json()
+        assert len(data["expiring_certs"]) == 1
+        assert data["expiring_certs"][0]["service_name"] == "Wide"
+
+    def test_attention_window_narrowed_excludes_cert(self, client, db_session):
+        # AR3, other direction: narrowing the window to 7 days drops a cert
+        # 20 days out that the old 30-day literal would have flagged.
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session, "Narrow")
+        db_session.add(Certificate(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            expires_at=datetime.now(UTC) + timedelta(days=20),
+        ))
+        set_setting(db_session, "cert_renewal_window_days", "7")
+        db_session.commit()
+
+        resp = client.get("/api/dashboard/summary")
+        data = resp.json()
+        assert len(data["expiring_certs"]) == 0
+
+    def test_expiring_certs_ordered_most_urgent_first(self, client, db_session):
+        # The dashboard surfaces certs needing attention; the most urgent
+        # (soonest-to-expire, including already-expired) MUST head the list.
+        # Insert out of urgency order to prove the query orders, not insert order.
+        now = datetime.now(UTC)
+        specs = [
+            ("Later", now + timedelta(days=25)),
+            ("Expired", now - timedelta(days=3)),
+            ("Soon", now + timedelta(days=5)),
+        ]
+        for name, expires in specs:
+            svc = _create_service(db_session, name)
+            db_session.add(Certificate(
+                service_id=svc.id, hostname=svc.hostname, expires_at=expires,
+            ))
+        db_session.commit()
+
+        resp = client.get("/api/dashboard/summary")
+        names = [c["service_name"] for c in resp.json()["expiring_certs"]]
+        assert names == ["Expired", "Soon", "Later"]
 
     def test_recent_errors(self, client, db_session):
         db_session.add(Event(kind="reconcile_failed", level="error", message="Failed!"))

@@ -1,15 +1,15 @@
 # ruff: noqa: E402
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from app.logging_config import configure_logging
 
 configure_logging()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import app.models
@@ -23,6 +23,7 @@ from app.routers.jobs import router as jobs_router
 from app.routers.profiles import router as profiles_router
 from app.routers.services import router as services_router
 from app.routers.settings import router as settings_router
+from app.services.errors import ServiceError
 from app.version import __version__
 
 
@@ -57,25 +58,47 @@ async def lifespan(app: FastAPI):
 
     # Start background tasks
     from app.certs.renewal_task import cert_renewal_loop
-    from app.reconciler.reconcile_loop import reconcile_loop
+    from app.events.retention_task import retention_loop
+    from app.reconciler.reconcile_loop import health_check_loop, reconcile_loop
 
     image_task = asyncio.create_task(_build_edge_image_bg())
     renewal_task = asyncio.create_task(cert_renewal_loop())
     reconcile_task = asyncio.create_task(reconcile_loop())
+    health_task = asyncio.create_task(health_check_loop())
+    retention_task = asyncio.create_task(retention_loop())
     yield
-    # Shutdown: cancel background tasks
-    for task in (image_task, renewal_task, reconcile_task):
+    # Shutdown: cancel every background task, then await them all so none leak.
+    # Cancel ALL first, then gather with return_exceptions so a task that already
+    # exited with an error (or is mid-cancellation) can't short-circuit awaiting
+    # the rest — every task is cancelled and reaped regardless of its state.
+    background_tasks = (image_task, renewal_task, reconcile_task, health_task, retention_task)
+    for task in background_tasks:
         task.cancel()
-        with suppress(asyncio.CancelledError):
-            await task
+    await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 app = FastAPI(
     title="tailBale",
-    description="UnRAID + Tailscale + Cloudflare edge orchestrator",
+    description="Tailscale + Cloudflare edge orchestrator for Docker hosts",
     version=__version__,
     lifespan=lifespan,
 )
+
+
+@app.exception_handler(ServiceError)
+async def _service_error_handler(request, exc: ServiceError) -> JSONResponse:
+    """Map every service-layer domain exception to its canonical HTTP response.
+
+    The service layer (:mod:`app.services`) raises transport-agnostic
+    :class:`~app.services.errors.ServiceError` subclasses instead of FastAPI
+    ``HTTPException`` (AR7). This single handler translates them to the EXACT same
+    status code + ``{"detail": ...}`` body the routers used to raise inline —
+    404 'Service not found', 409 hostname-in-use / disabled, 422 hostname-suffix,
+    400 missing Tailscale key, 502 hostname-change DNS failure — so the observable
+    HTTP behavior is unchanged. Each exception carries its own ``status_code`` +
+    ``detail``, so no per-type branching is needed here.
+    """
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 def _cors_middleware_options(cors_origins: str) -> dict[str, object] | None:
     origins = [o.strip() for o in cors_origins.split(",") if o.strip()]
@@ -121,13 +144,28 @@ async def version():
 
 # --- Static file serving for production (frontend SPA) ---
 _static_dir = Path(__file__).resolve().parent.parent / "static"
+
+
+def _spa_response(static_dir: Path, full_path: str) -> FileResponse:
+    """Resolve a non-API request to a static file or the SPA index shell.
+
+    Raises ``HTTPException(404)`` for the API namespace: an unmatched ``/api/*``
+    path must 404, never fall through to the SPA shell (which would hand API
+    clients a 200 + HTML body that fails to parse as JSON). The resolved-path
+    containment check rejects ``..`` traversal out of ``static_dir``.
+    """
+    if full_path == "api" or full_path.startswith("api/"):
+        raise HTTPException(status_code=404, detail="Not Found")
+    file_path = (static_dir / full_path).resolve()
+    if full_path and file_path.is_relative_to(static_dir.resolve()) and file_path.is_file():
+        return FileResponse(file_path)
+    return FileResponse(static_dir / "index.html")
+
+
 if _static_dir.is_dir():
     app.mount("/assets", StaticFiles(directory=_static_dir / "assets"), name="assets")
 
     @app.get("/{full_path:path}")
-    async def serve_spa(request: Request, full_path: str):
+    async def serve_spa(full_path: str) -> FileResponse:
         """Serve the React SPA for any non-API route."""
-        file_path = (_static_dir / full_path).resolve()
-        if full_path and file_path.is_relative_to(_static_dir.resolve()) and file_path.is_file():
-            return FileResponse(file_path)
-        return FileResponse(_static_dir / "index.html")
+        return _spa_response(_static_dir, full_path)

@@ -1,7 +1,5 @@
 """Tests for the Events API endpoints."""
 
-import json
-
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -148,7 +146,7 @@ class TestListEvents:
 
     def test_event_details_parsed(self, client, db_session):
         evt = Event(kind="dns_created", level="info", message="DNS created",
-                    details=json.dumps({"hostname": "app.example.com"}))
+                    details={"hostname": "app.example.com"})
         db_session.add(evt)
         db_session.commit()
 
@@ -157,8 +155,16 @@ class TestListEvents:
         assert data["events"][0]["details"]["hostname"] == "app.example.com"
 
     def test_invalid_event_details_do_not_break_listing(self, client, db_session):
-        evt = Event(kind="legacy_event", level="info", message="Legacy", details="{not json")
+        from sqlalchemy import text
+
+        evt = Event(kind="legacy_event", level="info", message="Legacy", details={"ok": True})
         db_session.add(evt)
+        db_session.commit()
+        # A corrupt/legacy row holding raw non-JSON text must not break the listing.
+        db_session.execute(
+            text("UPDATE events SET details = :d WHERE id = :id"),
+            {"d": "{not json", "id": evt.id},
+        )
         db_session.commit()
 
         resp = client.get("/api/events")
@@ -199,3 +205,41 @@ class TestServiceEvents:
         resp = client.get(f"/api/events/services/{svc.id}?level=error")
         data = resp.json()
         assert data["total"] == 1
+
+    def test_filter_by_search(self, client, db_session):
+        # Parity with GET /api/events: the per-service feed must also support
+        # case-insensitive message search with LIKE wildcards treated literally.
+        svc = _create_service(db_session)
+        _add_event(db_session, service_id=svc.id, message="DNS record created for app.example.com")
+        _add_event(db_session, service_id=svc.id, message="Edge container started")
+        _add_event(db_session, service_id=svc.id, message="Backup 100% complete")
+
+        resp = client.get(f"/api/events/services/{svc.id}?search=dns")
+        data = resp.json()
+        assert data["total"] == 1
+        assert "DNS" in data["events"][0]["message"]
+
+        # '%' is matched literally, not as a wildcard.
+        resp = client.get(f"/api/events/services/{svc.id}?search=100%25")
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["message"] == "Backup 100% complete"
+
+
+class TestEventKinds:
+    def test_returns_full_sorted_registry(self, client):
+        from app.events.event_emitter import EVENT_KINDS
+
+        resp = client.get("/api/events/kinds")
+        assert resp.status_code == 200
+        kinds = resp.json()["kinds"]
+        # Exposes the entire registry, sorted — the single source the frontend
+        # kind filter is built from.
+        assert kinds == sorted(EVENT_KINDS)
+        assert set(kinds) == set(EVENT_KINDS)
+
+    def test_includes_representative_kinds(self, client):
+        resp = client.get("/api/events/kinds")
+        kinds = resp.json()["kinds"]
+        for kind in ("reconcile_completed", "cert_issued", "dns_orphan_dismissed"):
+            assert kind in kinds

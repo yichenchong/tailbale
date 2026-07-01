@@ -4,6 +4,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import docker.errors
+import pytest
 
 
 def _make_service(**overrides):
@@ -21,6 +22,21 @@ def _make_service(**overrides):
     svc.network_name = overrides.get("network_name", "edge_net_nextcloud")
     svc.ts_hostname = overrides.get("ts_hostname", "edge-nextcloud")
     return svc
+
+
+class _ConnectStubMixin:
+    """Stub the under-test-blocked ``connect`` with a throwaway client.
+
+    These lifecycle helpers route through ``_find_edge_container_for_use``, which
+    opens a Docker client via ``connect`` directly (the masking fallback is gone).
+    The conftest blocks real Docker access and the tests mock the container
+    *lookup*, so a stand-in client is all that's needed to flow through and close.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _stub_connect(self):
+        with patch("app.edge.container_manager.connect", return_value=MagicMock()):
+            yield
 
 
 class TestFindEdgeContainer:
@@ -82,6 +98,119 @@ class TestFindEdgeContainer:
 
         result = _find_edge_container("svc_123", "edge_test")
         assert result is None
+
+
+class TestContainerServiceId:
+    """Direct coverage of the now-public label helpers (consumed by the health
+    checker) and the EDG3 guard against a non-dict ``labels`` attribute."""
+
+    def test_returns_label_value(self):
+        from app.edge.container_manager import container_service_id
+
+        container = MagicMock()
+        container.labels = {"tailbale.service_id": "svc_123"}
+        assert container_service_id(container) == "svc_123"
+
+    def test_returns_none_when_label_absent(self):
+        from app.edge.container_manager import container_service_id
+
+        container = MagicMock()
+        container.labels = {"tailbale.managed": "true"}
+        assert container_service_id(container) is None
+
+    def test_returns_none_when_labels_not_dict(self):
+        """EDG3: a container whose ``labels`` is not a dict (e.g. None) must not
+        blow up ``.get`` — the guard returns None."""
+        from app.edge.container_manager import container_service_id
+
+        container = MagicMock()
+        container.labels = None
+        assert container_service_id(container) is None
+
+    def test_is_container_for_service_matrix(self):
+        from app.edge.container_manager import is_container_for_service
+
+        match = MagicMock()
+        match.labels = {"tailbale.service_id": "svc_123"}
+        assert is_container_for_service(match, "svc_123") is True
+
+        other = MagicMock()
+        other.labels = {"tailbale.service_id": "svc_other"}
+        assert is_container_for_service(other, "svc_123") is False
+
+        # An unlabelled (legacy) container is tolerated as a match.
+        legacy = MagicMock()
+        legacy.labels = {}
+        assert is_container_for_service(legacy, "svc_123") is True
+
+        # Non-dict labels fall through the guard and are treated as a match.
+        broken = MagicMock()
+        broken.labels = None
+        assert is_container_for_service(broken, "svc_123") is True
+
+
+class TestFindEdgeContainerPublic:
+    """``find_edge_container`` operates on an already-open client (the health
+    checker's usage pattern), distinct from the client-owning ``_find_*`` wrapper."""
+
+    def test_returns_named_container_for_service(self):
+        from app.edge.container_manager import find_edge_container
+
+        client = MagicMock()
+        container = MagicMock()
+        container.labels = {"tailbale.service_id": "svc_123"}
+        client.containers.get.return_value = container
+
+        assert find_edge_container(client, "svc_123", "edge_test") is container
+        client.containers.list.assert_not_called()
+
+    def test_ignores_named_container_of_other_service_and_label_searches(self):
+        from app.edge.container_manager import find_edge_container
+
+        client = MagicMock()
+        wrong = MagicMock()
+        wrong.labels = {"tailbale.service_id": "svc_other"}
+        client.containers.get.return_value = wrong
+        labelled = MagicMock()
+        client.containers.list.return_value = [labelled]
+
+        result = find_edge_container(client, "svc_123", "edge_test")
+
+        assert result is labelled
+        client.containers.list.assert_called_once_with(
+            all=True, filters={"label": "tailbale.service_id=svc_123"}
+        )
+
+
+class TestFindEdgeContainerForUse:
+    """Connection failures must propagate, not be masked by a fallback re-search."""
+
+    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_manager.connect")
+    def test_socket_failure_propagates(self, mock_connect, mock_find):
+        from app.edge.container_manager import _find_edge_container_for_use
+
+        mock_connect.side_effect = docker.errors.DockerException("cannot connect to socket")
+
+        with pytest.raises(docker.errors.DockerException, match="cannot connect"):
+            _find_edge_container_for_use("svc_123", "edge_test", "unix:///nonexistent.sock")
+
+        # The masking fallback re-search is gone: the connect error surfaces
+        # directly instead of being swallowed and retried against the same socket.
+        mock_find.assert_not_called()
+
+    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_manager.connect")
+    def test_caller_surfaces_socket_failure(self, mock_connect, mock_find):
+        from app.edge.container_manager import stop_edge
+
+        mock_connect.side_effect = docker.errors.DockerException("socket unreachable")
+        # A fallback lookup would report "nothing to stop"; a connect failure must
+        # surface instead of degrading to a silent best-effort no-op.
+        mock_find.return_value = None
+
+        with pytest.raises(docker.errors.DockerException, match="socket unreachable"):
+            stop_edge("svc_123", "edge_test", "unix:///nonexistent.sock")
 
 
 class TestCreateEdgeContainer:
@@ -156,7 +285,7 @@ class TestCreateEdgeContainer:
         assert str(tmp_path / "tailscale" / "edge_nextcloud") in sources
 
 
-class TestStartEdge:
+class TestStartEdge(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_starts_container(self, mock_find):
         from app.edge.container_manager import start_edge
@@ -178,7 +307,7 @@ class TestStartEdge:
             start_edge("svc_123", "edge_test")
 
 
-class TestStopEdge:
+class TestStopEdge(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_stops_container(self, mock_find):
         from app.edge.container_manager import stop_edge
@@ -198,7 +327,7 @@ class TestStopEdge:
         stop_edge("svc_123", "edge_test")
 
 
-class TestRestartEdge:
+class TestRestartEdge(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_restarts_container(self, mock_find):
         from app.edge.container_manager import restart_edge
@@ -220,7 +349,7 @@ class TestRestartEdge:
             restart_edge("svc_123", "edge_test")
 
 
-class TestRemoveEdge:
+class TestRemoveEdge(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_removes_container(self, mock_find):
         from app.edge.container_manager import remove_edge
@@ -286,8 +415,72 @@ class TestRemoveEdge:
 
         remove_edge("svc_123", "edge_test")
 
+    @patch("app.edge.container_manager._delete_tailscale_device")
+    @patch("app.secrets.read_secret")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_delete_device_false_skips_device_deletion(
+        self, mock_find, mock_read_secret, mock_delete
+    ):
+        from app.edge.container_manager import remove_edge
 
-class TestRecreateEdge:
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        status_json = json.dumps({"Self": {"ID": "node123abc"}}).encode()
+        mock_container.exec_run.return_value = (0, status_json)
+        mock_find.return_value = mock_container
+        mock_read_secret.return_value = "tskey-api-mykey"
+
+        remove_edge("svc_123", "edge_test", delete_device=False)
+
+        # Identity-preserving swap: the tailnet device must NOT be deleted.
+        mock_delete.assert_not_called()
+        mock_container.remove.assert_called_once_with(force=True)
+
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_raise_on_error_reraises_api_error(self, mock_find):
+        from app.edge.container_manager import remove_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_container.remove.side_effect = docker.errors.APIError("boom")
+        mock_find.return_value = mock_container
+
+        with pytest.raises(docker.errors.APIError):
+            remove_edge("svc_123", "edge_test", raise_on_error=True)
+
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_default_swallows_api_error(self, mock_find):
+        from app.edge.container_manager import remove_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_container.remove.side_effect = docker.errors.APIError("boom")
+        mock_find.return_value = mock_container
+
+        # Default is best-effort: the APIError is logged and swallowed.
+        remove_edge("svc_123", "edge_test")
+        mock_container.remove.assert_called_once_with(force=True)
+
+    @patch("app.edge.container_manager._delete_tailscale_device")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_skips_device_deletion_when_not_running(self, mock_find, mock_delete):
+        """A non-running container can't be exec'd for its node id, so device
+        deletion is skipped entirely (no exec, no API call) — but the container
+        is still removed."""
+        from app.edge.container_manager import remove_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_find.return_value = mock_container
+
+        remove_edge("svc_123", "edge_test")
+
+        mock_container.exec_run.assert_not_called()
+        mock_delete.assert_not_called()
+        mock_container.remove.assert_called_once_with(force=True)
+
+
+class TestRecreateEdge(_ConnectStubMixin):
     @patch("app.edge.container_manager.start_edge")
     @patch("app.edge.container_manager.create_edge_container")
     @patch("app.edge.container_manager.remove_edge")
@@ -306,12 +499,68 @@ class TestRecreateEdge:
         )
 
         assert result == "new_id"
-        mock_remove.assert_called_once_with(svc.id, svc.edge_container_name, None)
+        mock_remove.assert_called_once_with(
+            svc.id, svc.edge_container_name, None, delete_device=False, raise_on_error=True
+        )
         mock_create.assert_called_once()
         mock_start.assert_called_once_with(svc.id, svc.edge_container_name, None)
 
+    @patch("app.edge.container_manager.start_edge")
+    @patch("app.edge.container_manager.create_edge_container")
+    @patch("app.edge.container_manager._delete_tailscale_device")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_recreate_preserves_tailscale_device(
+        self, mock_find, mock_delete, mock_create, mock_start, tmp_path
+    ):
+        """recreate_edge swaps the container but keeps the tailnet identity, so
+        the Tailscale device must not be deleted even for a running container."""
+        from app.edge.container_manager import recreate_edge
 
-class TestGetEdgeLogs:
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_find.return_value = mock_container
+        mock_create.return_value = "new_id"
+
+        recreate_edge(
+            _make_service(),
+            ts_authkey="tskey-auth-test",
+            generated_dir=tmp_path / "generated",
+            certs_dir=tmp_path / "certs",
+            tailscale_state_dir=tmp_path / "tailscale",
+        )
+
+        mock_delete.assert_not_called()
+        mock_container.remove.assert_called_once_with(force=True)
+
+    @patch("app.edge.container_manager.start_edge")
+    @patch("app.edge.container_manager.create_edge_container")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_recreate_propagates_removal_failure(
+        self, mock_find, mock_create, mock_start, tmp_path
+    ):
+        """A docker APIError during removal aborts recreate (raise_on_error=True)
+        so we never create a new container over a stale name (opaque 409)."""
+        from app.edge.container_manager import recreate_edge
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_container.remove.side_effect = docker.errors.APIError("name conflict")
+        mock_find.return_value = mock_container
+
+        with pytest.raises(docker.errors.APIError):
+            recreate_edge(
+                _make_service(),
+                ts_authkey="tskey-auth-test",
+                generated_dir=tmp_path / "generated",
+                certs_dir=tmp_path / "certs",
+                tailscale_state_dir=tmp_path / "tailscale",
+            )
+
+        mock_create.assert_not_called()
+        mock_start.assert_not_called()
+
+
+class TestGetEdgeLogs(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_logs(self, mock_find):
         from app.edge.container_manager import get_edge_logs
@@ -334,7 +583,46 @@ class TestGetEdgeLogs:
         assert result == ""
 
 
-class TestReloadCaddy:
+class TestGetEdgeVersion:
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_returns_version_label(self, mock_find):
+        from app.edge.container_manager import get_edge_version
+
+        mock_container = MagicMock()
+        mock_container.labels = {"tailbale.version": "1.2.3"}
+        mock_find.return_value = mock_container
+
+        assert get_edge_version("svc_123", "edge_test") == "1.2.3"
+
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_returns_none_if_not_found(self, mock_find):
+        from app.edge.container_manager import get_edge_version
+
+        mock_find.return_value = None
+        assert get_edge_version("svc_123", "edge_test") is None
+
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_returns_none_when_label_absent(self, mock_find):
+        from app.edge.container_manager import get_edge_version
+
+        mock_container = MagicMock()
+        mock_container.labels = {"tailbale.managed": "true"}
+        mock_find.return_value = mock_container
+
+        assert get_edge_version("svc_123", "edge_test") is None
+
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_returns_none_when_labels_not_dict(self, mock_find):
+        from app.edge.container_manager import get_edge_version
+
+        mock_container = MagicMock()
+        mock_container.labels = None
+        mock_find.return_value = mock_container
+
+        assert get_edge_version("svc_123", "edge_test") is None
+
+
+class TestReloadCaddy(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_reloads_caddy(self, mock_find):
         from app.edge.container_manager import reload_caddy
@@ -348,7 +636,7 @@ class TestReloadCaddy:
 
         assert "reloaded" in result
         mock_container.exec_run.assert_called_once_with(
-            "caddy reload --config /etc/caddy/Caddyfile"
+            "caddy reload --config /etc/caddy/Caddyfile --force"
         )
 
     @patch("app.edge.container_manager._find_edge_container")
@@ -374,6 +662,22 @@ class TestReloadCaddy:
         mock_find.return_value = None
         with pytest.raises(RuntimeError, match="Edge container not found"):
             reload_caddy("svc_123", "edge_test")
+
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_raises_when_container_not_running(self, mock_find):
+        """A non-running edge container can't be exec'd, so reload refuses early
+        with a clear error instead of attempting (and failing) the exec."""
+        from app.edge.container_manager import reload_caddy
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        # Would succeed if the guard were bypassed — proves the guard, not luck.
+        mock_container.exec_run.return_value = (0, b"config reloaded")
+        mock_find.return_value = mock_container
+
+        with pytest.raises(RuntimeError, match="cannot reload Caddy"):
+            reload_caddy("svc_123", "edge_test")
+        mock_container.exec_run.assert_not_called()
 
     @patch("app.edge.container_manager.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
@@ -445,8 +749,31 @@ class TestReloadCaddy:
         assert "invalid directive" in message
         assert "never reached a stable running container" not in message
 
+    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_retries_when_admin_api_connection_refused(self, mock_find, mock_sleep):
+        """Caddy's admin API (:2019) may not be up immediately after the
+        container starts: the reload exec returns non-zero with "connection
+        refused". This is the documented reason reload_caddy retries, so it must
+        retry and succeed once the API is ready instead of surfacing the
+        transient error as a hard failure."""
+        from app.edge.container_manager import reload_caddy
 
-class TestDetectTailscaleIp:
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.side_effect = [
+            (1, b"Error: dial tcp 127.0.0.1:2019: connect: connection refused"),
+            (0, b"config reloaded"),
+        ]
+        mock_find.return_value = mock_container
+
+        result = reload_caddy("svc_123", "edge_test", max_retries=3, retry_delay=0)
+
+        assert "reloaded" in result
+        assert mock_container.exec_run.call_count == 2
+
+
+class TestDetectTailscaleIp(_ConnectStubMixin):
     @patch("app.edge.container_manager.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_detects_ip_via_tailscale_ip(self, mock_find, mock_sleep):
@@ -658,8 +985,8 @@ class TestDockerSocketConsistency:
         assert mock_reconcile.call_args.kwargs.get("socket_path") == "unix:///custom/docker.sock"
 
     def test_default_socket_returns_default_value(self, db_session):
-        from app.routers.services import _get_docker_socket
-        result = _get_docker_socket(db_session)
+        from app.edge.docker_client import resolve_socket
+        result = resolve_socket(db_session)
         assert result == "unix:///var/run/docker.sock"
 
     @patch("app.secrets.read_secret")
@@ -710,12 +1037,12 @@ class TestStringPathAcceptance:
     """create_edge_container and recreate_edge should accept both str and Path."""
 
     @patch("app.edge.container_manager.ensure_edge_image")
-    @patch("app.edge.container_manager._get_client")
-    def test_create_accepts_strings(self, mock_get_client, mock_ensure, tmp_path):
+    @patch("app.edge.container_manager.docker.DockerClient")
+    def test_create_accepts_strings(self, mock_cls, mock_ensure, tmp_path):
         from app.edge.container_manager import create_edge_container
 
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_cls.from_env.return_value = mock_client
         mock_client.containers.create.return_value = MagicMock(id="c1")
 
         svc = MagicMock()
@@ -733,12 +1060,12 @@ class TestStringPathAcceptance:
         mock_client.containers.create.assert_called_once()
 
     @patch("app.edge.container_manager.ensure_edge_image")
-    @patch("app.edge.container_manager._get_client")
-    def test_create_accepts_paths(self, mock_get_client, mock_ensure, tmp_path):
+    @patch("app.edge.container_manager.docker.DockerClient")
+    def test_create_accepts_paths(self, mock_cls, mock_ensure, tmp_path):
         from app.edge.container_manager import create_edge_container
 
         mock_client = MagicMock()
-        mock_get_client.return_value = mock_client
+        mock_cls.from_env.return_value = mock_client
         mock_client.containers.create.return_value = MagicMock(id="c2")
 
         svc = MagicMock()

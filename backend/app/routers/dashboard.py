@@ -3,6 +3,7 @@
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
@@ -11,6 +12,7 @@ from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
+from app.settings_store import get_positive_int_setting
 
 router = APIRouter(
     prefix="/api/dashboard",
@@ -20,35 +22,52 @@ router = APIRouter(
 
 
 @router.get("/summary")
-async def dashboard_summary(db: Session = Depends(get_db)):
+def dashboard_summary(db: Session = Depends(get_db)):
     """Return at-a-glance summary data for the dashboard."""
-    services = db.query(Service).all()
-    total = len(services)
+    total = db.query(Service).count()
 
-    healthy = 0
-    warning = 0
-    error = 0
-    for svc in services:
-        status = db.get(ServiceStatus, svc.id)
-        if not status:
-            continue
-        phase = status.phase
-        if phase == "healthy":
-            healthy += 1
-        elif phase == "warning":
-            warning += 1
-        elif phase in ("error", "failed"):
-            error += 1
+    # Count phases with a single GROUP BY (uses ix_service_status_phase) instead
+    # of loading every status row and tallying in Python. The inner join keeps
+    # this identical to the previous per-service lookup: only statuses attached
+    # to an existing service count, and a service with no status contributes to
+    # `total` alone.
+    phase_counts = dict(
+        db.query(ServiceStatus.phase, func.count())
+        .join(Service, Service.id == ServiceStatus.service_id)
+        .group_by(ServiceStatus.phase)
+        .all()
+    )
+    healthy = phase_counts.get("healthy", 0)
+    warning = phase_counts.get("warning", 0)
+    error = phase_counts.get("error", 0) + phase_counts.get("failed", 0)
 
-    # Upcoming cert expiries (within 30 days)
-    threshold = datetime.now(UTC) + timedelta(days=30)
-    certs = db.query(Certificate).filter(
-        Certificate.expires_at.isnot(None),
-        Certificate.expires_at < threshold,
-    ).all()
+    # Cert expiries needing attention: expiring within the operator-configured
+    # renewal window (or already expired). Reads the same
+    # ``cert_renewal_window_days`` setting the reconciler/renewal/health paths
+    # use, so the dashboard attention list tracks the actual renewal policy
+    # instead of a hard-coded 30 days.
+    window_days = get_positive_int_setting(db, "cert_renewal_window_days")
+    threshold = datetime.now(UTC) + timedelta(days=window_days)
+    certs = (
+        db.query(Certificate)
+        .filter(
+            Certificate.expires_at.isnot(None),
+            Certificate.expires_at < threshold,
+        )
+        # Soonest-to-expire (and already-expired) first so the most urgent cert
+        # heads the list; service_id breaks ties for deterministic ordering.
+        .order_by(Certificate.expires_at.asc(), Certificate.service_id.asc())
+        .all()
+    )
+    cert_services = {
+        s.id: s
+        for s in db.query(Service)
+        .filter(Service.id.in_([cert.service_id for cert in certs]))
+        .all()
+    }
     expiring_certs = []
     for cert in certs:
-        svc = db.get(Service, cert.service_id)
+        svc = cert_services.get(cert.service_id)
         expiring_certs.append({
             "service_id": cert.service_id,
             "service_name": svc.name if svc else "Unknown",

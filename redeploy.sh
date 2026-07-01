@@ -7,6 +7,10 @@ set -euo pipefail
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 HOST_DATA_INPUT="${HOST_DATA_DIR:-${SCRIPT_DIR}/data}"
 HOST_PORT="${HOST_PORT:-6780}"
+# Host interface the published port binds to. Loopback by default so the
+# Docker-root admin UI isn't exposed in cleartext on the LAN; set to your
+# tailnet IP for direct ip:port over the tailnet, or 0.0.0.0 to publish everywhere.
+BIND_ADDR="${BIND_ADDR:-127.0.0.1}"
 PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
 JWT_EXPIRY_HOURS="${JWT_EXPIRY_HOURS:-24}"
@@ -31,7 +35,7 @@ docker run -d \
   --name tailbale \
   --label tailbale.main=true \
   --restart unless-stopped \
-  -p "${HOST_PORT}:${PORT}" \
+  -p "${BIND_ADDR}:${HOST_PORT}:${PORT}" \
   -v "${HOST_DATA}":/data \
   "${DOCKER_SOCKET_MOUNT_ARGS[@]}" \
   -e DATA_DIR=/data \

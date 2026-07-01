@@ -252,14 +252,15 @@ class TestEventModel:
         evt = Event(
             id="evt_test2", service_id="svc_evt",
             kind="dns_updated", level="info",
-            message="DNS updated", details='{"old": "1.2.3.4", "new": "5.6.7.8"}',
+            message="DNS updated", details={"old": "1.2.3.4", "new": "5.6.7.8"},
         )
         db_session.add(evt)
         db_session.commit()
+        db_session.expire_all()
 
         row = db_session.get(Event, "evt_test2")
         assert row.service_id == "svc_evt"
-        assert row.details is not None
+        assert row.details == {"old": "1.2.3.4", "new": "5.6.7.8"}
 
 
 class TestDnsRecordModel:
@@ -417,7 +418,181 @@ class TestSqliteForeignKeyCascade:
     def test_production_engine_has_pragma_listener(self):
         from sqlalchemy import event as sa_event
 
-        from app.database import engine
-        sa_event.contains(engine, "connect", None)
-        from app.database import _set_sqlite_pragma
-        assert callable(_set_sqlite_pragma)
+        from app.database import _set_sqlite_pragma, engine
+
+        assert sa_event.contains(engine, "connect", _set_sqlite_pragma)
+
+# ---------------------------------------------------------------------------
+# Service delete: history rows (Event/Job) are preserved, not orphaned
+# ---------------------------------------------------------------------------
+
+
+class TestServiceDeleteSetNull:
+    """Deleting a Service must SET NULL (not dangle / not delete) Event & Job rows.
+
+    Event/Job carry ``ondelete="SET NULL"`` so the audit history outlives the
+    service. A dangling FK (PRAGMA off) or an accidental CASCADE would both be
+    bugs: the former leaves a row pointing at a non-existent service, the latter
+    silently destroys history.
+    """
+
+    def _make_service(self, db, svc_id="svc_hist"):
+        svc = Service(
+            id=svc_id, name="Hist", upstream_container_id="c1",
+            upstream_container_name="hist", upstream_port=80,
+            hostname=f"{svc_id}.example.com", base_domain="example.com",
+            edge_container_name=f"edge_{svc_id}", network_name=f"net_{svc_id}",
+            ts_hostname=f"edge-{svc_id}",
+        )
+        db.add(svc)
+        db.commit()
+        return svc
+
+    def test_delete_service_nulls_event_service_id(self, db_session):
+        svc = self._make_service(db_session, "svc_evt_del")
+        db_session.add(Event(
+            id="evt_keep", service_id=svc.id, kind="service_created",
+            message="created",
+        ))
+        db_session.commit()
+
+        db_session.delete(svc)
+        db_session.commit()
+        db_session.expire_all()
+
+        evt = db_session.get(Event, "evt_keep")
+        assert evt is not None, "Event history must survive service deletion"
+        assert evt.service_id is None, "service_id must be SET NULL, not dangling"
+
+    def test_delete_service_nulls_job_service_id(self, db_session):
+        svc = self._make_service(db_session, "svc_job_del")
+        db_session.add(Job(id="job_keep", service_id=svc.id, kind="create_edge"))
+        db_session.commit()
+
+        db_session.delete(svc)
+        db_session.commit()
+        db_session.expire_all()
+
+        job = db_session.get(Job, "job_keep")
+        assert job is not None, "Job history must survive service deletion"
+        assert job.service_id is None, "service_id must be SET NULL, not dangling"
+
+
+# ---------------------------------------------------------------------------
+# NaiveUTCDateTime: tz-aware writes are normalized to naive UTC
+# ---------------------------------------------------------------------------
+
+
+class TestNaiveUTCDateTime:
+    """A tz-aware datetime written to a model timestamp column must read back as
+    the equivalent naive UTC value, so later comparisons against the naive
+    stored values never raise."""
+
+    def test_aware_datetime_persists_as_naive_utc(self, db_session):
+        from datetime import UTC, datetime, timedelta, timezone
+
+        svc = Service(
+            id="svc_tz", name="Tz", upstream_container_id="c1",
+            upstream_container_name="tz", upstream_port=443,
+            hostname="tz.example.com", base_domain="example.com",
+            edge_container_name="edge_tz", network_name="net_tz",
+            ts_hostname="edge-tz",
+        )
+        db_session.add(svc)
+        db_session.commit()
+
+        # 17:30 at UTC+5 == 12:30 UTC.
+        aware = datetime(2030, 1, 1, 17, 30, tzinfo=timezone(timedelta(hours=5)))
+        db_session.add(
+            Certificate(service_id="svc_tz", hostname="tz.example.com", expires_at=aware)
+        )
+        db_session.commit()
+        db_session.expire_all()  # force a fresh load from the DB, not the identity map
+
+        row = db_session.get(Certificate, "svc_tz")
+        assert row.expires_at.tzinfo is None
+        assert row.expires_at == aware.astimezone(UTC).replace(tzinfo=None)
+        assert row.expires_at == datetime(2030, 1, 1, 12, 30)
+
+
+# ---------------------------------------------------------------------------
+# JSONEncodedDict: dicts round-trip; a corrupt legacy row decodes to None
+# ---------------------------------------------------------------------------
+
+
+class TestJSONEncodedDict:
+    """The JSON payload columns transparently encode/decode Python values and
+    never raise on a corrupt row already in the database — a bad value reads
+    back as ``None`` instead of blowing up a listing."""
+
+    def test_dict_round_trips(self, db_session):
+        db_session.add(
+            Event(id="evt_json1", kind="dns_created", message="m",
+                  details={"hostname": "a.example.com", "count": 3})
+        )
+        db_session.commit()
+        db_session.expire_all()
+
+        assert db_session.get(Event, "evt_json1").details == {
+            "hostname": "a.example.com",
+            "count": 3,
+        }
+
+    def test_none_round_trips(self, db_session):
+        db_session.add(Event(id="evt_json2", kind="dns_created", message="m", details=None))
+        db_session.commit()
+        db_session.expire_all()
+
+        assert db_session.get(Event, "evt_json2").details is None
+
+    def test_empty_dict_round_trips(self, db_session):
+        db_session.add(Event(id="evt_json3", kind="dns_created", message="m", details={}))
+        db_session.commit()
+        db_session.expire_all()
+
+        assert db_session.get(Event, "evt_json3").details == {}
+
+    def test_corrupt_json_in_db_decodes_to_none(self, db_session):
+        from sqlalchemy import text
+
+        db_session.add(
+            Event(id="evt_json4", kind="dns_created", message="m", details={"ok": True})
+        )
+        db_session.commit()
+
+        # Simulate a legacy/corrupt row by writing raw non-JSON text straight to
+        # the column, bypassing the bind-param encoder.
+        db_session.execute(
+            text("UPDATE events SET details = :d WHERE id = :id"),
+            {"d": "{not valid json", "id": "evt_json4"},
+        )
+        db_session.commit()
+        db_session.expire_all()
+
+        assert db_session.get(Event, "evt_json4").details is None
+
+# ---------------------------------------------------------------------------
+# AR13: hot dashboard query columns must be indexed on the models
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardHotPathIndexes:
+    """The dashboard scans certificate.expires_at, orders events by created_at,
+    and counts service_status.phase; those columns must declare ``index=True``
+    so a fresh DB gets the index and run_migrations back-fills legacy DBs."""
+
+    def _indexed_columns(self, model):
+        return {
+            col.name
+            for index in model.__table__.indexes
+            for col in index.columns
+        }
+
+    def test_certificate_expires_at_indexed(self):
+        assert "expires_at" in self._indexed_columns(Certificate)
+
+    def test_service_status_phase_indexed(self):
+        assert "phase" in self._indexed_columns(ServiceStatus)
+
+    def test_event_created_at_indexed(self):
+        assert "created_at" in self._indexed_columns(Event)

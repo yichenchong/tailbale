@@ -25,6 +25,9 @@ class TestDetectProfile:
     def test_detection_ignores_registry_host(self):
         assert detect_profile("registry.nextcloud.example.com/team/nginx:latest") is None
 
+    def test_detection_does_not_substring_match_unrelated_component(self):
+        assert detect_profile("ghcr.io/notnextcloud/postgres:latest") is None
+
     def test_detection_handles_digest_reference(self):
         assert detect_profile("ghcr.io/immich-app/immich-server@sha256:abc123") == "immich"
 
@@ -33,6 +36,13 @@ class TestDetectProfile:
 
     def test_no_match_empty(self):
         assert detect_profile("") is None
+
+    def test_detection_matches_hyphenated_suffix_component(self):
+        # A '-<pattern>' suffix component matches (e.g. a forked/customized
+        # image like "<vendor>/custom-nextcloud"). This exercises the
+        # endswith("-<pattern>") arm of _repository_component_matches, distinct
+        # from the exact-match and startswith("<pattern>-") arms above.
+        assert detect_profile("myorg/custom-nextcloud:latest") == "nextcloud"
 
 
 class TestProfilesAPI:

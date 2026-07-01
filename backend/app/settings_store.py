@@ -3,14 +3,17 @@ from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app.config import settings as app_settings
 from app.models.setting import Setting
 
 # Default values for all settings keys
 DEFAULTS = {
     "base_domain": "example.com",
     "acme_email": "you@example.com",
-    "reconcile_interval_seconds": "60",
+    "reconcile_interval_seconds": "3600",
+    "health_check_interval_seconds": "60",
     "cert_renewal_window_days": "30",
+    "event_retention_days": "30",
     "cf_zone_id": "",
     "ts_control_url": "https://controlplane.tailscale.com",
     "ts_default_hostname_prefix": "edge",
@@ -32,13 +35,27 @@ def get_setting(db: Session, key: str) -> str:
     return DEFAULTS.get(key, "")
 
 def get_positive_int_setting(db: Session, key: str) -> int:
-    """Get a positive integer setting, falling back to the key's default."""
-    fallback = int(DEFAULTS[key])
+    """Get a positive integer setting, raising on a corrupt stored value.
+
+    Writes go through ``ge=1`` validation, so a stored value is normally a clean
+    positive-integer string, and an unset key resolves to the key's
+    positive-integer default. A stored value that is not a valid integer, or
+    that parses to a non-positive integer (``< 1``), could never have passed
+    write validation: it is data corruption. Rather than silently masking it
+    with a fallback, this fails loud.
+
+    Raises:
+        ValueError: when the stored value is not an integer, or parses to a
+            non-positive integer (``< 1``).
+    """
+    raw = get_setting(db, key)
     try:
-        value = int(get_setting(db, key))
-    except (TypeError, ValueError):
-        return fallback
-    return value if value > 0 else fallback
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Setting {key!r} has a non-integer value {raw!r}") from exc
+    if value < 1:
+        raise ValueError(f"Setting {key!r} has a non-positive value {value}")
+    return value
 
 
 def set_setting(db: Session, key: str, value: str) -> None:
@@ -58,12 +75,9 @@ def get_runtime_paths(db: Session) -> dict[str, str]:
     Docker daemon on the host).  When ``HOST_DATA_DIR`` is configured the
     host paths will differ from the internal ones; otherwise they are the same.
     """
-    from app.config import settings as app_settings
-
     generated = get_setting(db, "generated_root")
     certs = get_setting(db, "cert_root")
     ts_state = get_setting(db, "tailscale_state_root")
-    docker = get_setting(db, "docker_socket_path")
 
     # Paths as seen by this process (inside the container, if containerised).
     internal_generated = generated or str(app_settings.generated_dir)
@@ -74,7 +88,6 @@ def get_runtime_paths(db: Session) -> dict[str, str]:
         "generated_dir": internal_generated,
         "certs_dir": internal_certs,
         "tailscale_state_dir": internal_ts_state,
-        "docker_socket": docker or app_settings.docker_socket,
     }
 
     # Host-side equivalents for Docker bind mounts. Only paths under DATA_DIR can
@@ -83,9 +96,12 @@ def get_runtime_paths(db: Session) -> dict[str, str]:
     host_data = app_settings.host_data_dir
 
     def _host_path(path_str: str) -> str:
-        internal_path = Path(path_str).resolve()
+        # Without HOST_DATA_DIR the host path IS the internal path; return it
+        # verbatim so the two stay byte-for-byte equal (resolve() would diverge
+        # them for relative roots or paths containing symlinks / '..').
         if host_data is None:
-            return str(internal_path)
+            return path_str
+        internal_path = Path(path_str).resolve()
         try:
             relative = internal_path.relative_to(app_settings.data_dir.resolve())
         except ValueError:

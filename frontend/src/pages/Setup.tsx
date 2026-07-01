@@ -1,7 +1,8 @@
-import { useEffect, useState, type KeyboardEvent } from "react"
+import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 import { useNavigate } from "react-router-dom"
-import { api, type ConnectionTestResult, type LoginResponse } from "@/lib/api"
+import { api, type ConnectionTestResult, type SetupProgress } from "@/lib/api"
 import { cn } from "@/lib/utils"
+import { isEmailLike } from "@/lib/validation"
 import { Loader2, CheckCircle, XCircle, ArrowRight, ArrowLeft } from "lucide-react"
 
 const STEPS = [
@@ -12,16 +13,6 @@ const STEPS = [
   { key: "tailscale", label: "Tailscale" },
   { key: "docker", label: "Docker" },
 ]
-
-interface SetupProgress {
-  user_exists: boolean
-  base_domain_set: boolean
-  cloudflare_configured: boolean
-  cloudflare_token_set?: boolean
-  acme_email_set: boolean
-  tailscale_configured: boolean
-  docker_configured: boolean
-}
 
 function firstIncompleteStep(progress: SetupProgress): number {
   if (!progress.user_exists) return 0
@@ -38,6 +29,15 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
   const [step, setStep] = useState(0)
   const [initializing, setInitializing] = useState(true)
   const [saving, setSaving] = useState(false)
+  // Synchronous in-flight guard for the per-step save. A ref (not the `saving`
+  // state) because two submit events can fire within one React batch (a
+  // same-batch double-Enter on the last field, or assistive tech) before the
+  // `saving=true` re-render commits; both would close over the stale
+  // `saving=false` and slip past a state check, firing the step's POST/PUT
+  // twice — e.g. a duplicate setup-user that 409s with a confusing "user
+  // already exists" even though the account was just created. The ref flips
+  // immediately so the second call bails; `saving` still drives the UI.
+  const submittingRef = useRef(false)
   const [error, setError] = useState("")
   const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null)
   const [completedSteps, setCompletedSteps] = useState<Set<number>>(new Set())
@@ -53,10 +53,11 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
   const [tsAuthKey, setTsAuthKey] = useState("")
   const [tsApiKey, setTsApiKey] = useState("")
   const [dockerSocket, setDockerSocket] = useState("unix:///var/run/docker.sock")
+  const [dockerSocketEdited, setDockerSocketEdited] = useState(false)
 
   useEffect(() => {
-    api
-      .get<SetupProgress>("/auth/setup-progress")
+    api.auth
+      .setupProgress()
       .then((progress) => {
         const done = new Set<number>()
         if (progress.user_exists) done.add(0)
@@ -76,6 +77,8 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
   }, [])
 
   const saveAndNext = async () => {
+    if (submittingRef.current) return
+    submittingRef.current = true
     setSaving(true)
     setError("")
     setTestResult(null)
@@ -84,23 +87,23 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
 
       if (step === 0) {
         if (!alreadyDone) {
-          await api.post<LoginResponse>("/auth/setup-user", {
-            username: adminUsername,
+          await api.auth.setupUser({
+            username: adminUsername.trim(),
             password: adminPassword,
           })
         }
       } else if (step === 1) {
         if (!alreadyDone || baseDomain) {
-          await api.put("/settings/general", { base_domain: baseDomain })
+          await api.settings.update("general", { base_domain: baseDomain })
         }
       } else if (step === 2) {
         if (!alreadyDone || cfZoneId || cfToken) {
-          await api.put("/settings/cloudflare", {
+          await api.settings.update("cloudflare", {
             ...(cfZoneId ? { zone_id: cfZoneId } : {}),
             ...(cfToken ? { token: cfToken } : {}),
           })
           if (cfToken && cfZoneId) {
-            const result = await api.post<ConnectionTestResult>("/settings/test/cloudflare")
+            const result = await api.settings.test("cloudflare")
             setTestResult(result)
             if (!result.success) {
               setSaving(false)
@@ -110,16 +113,16 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         }
       } else if (step === 3) {
         if (!alreadyDone || acmeEmail) {
-          await api.put("/settings/general", { acme_email: acmeEmail })
+          await api.settings.update("general", { acme_email: acmeEmail })
         }
       } else if (step === 4) {
         if (!alreadyDone || tsAuthKey || tsApiKey) {
-          await api.put("/settings/tailscale", {
+          await api.settings.update("tailscale", {
             ...(tsAuthKey ? { auth_key: tsAuthKey } : {}),
             ...(tsApiKey ? { api_key: tsApiKey } : {}),
           })
           if (tsAuthKey && tsApiKey) {
-            const result = await api.post<ConnectionTestResult>("/settings/test/tailscale")
+            const result = await api.settings.test("tailscale")
             setTestResult(result)
             if (!result.success) {
               setSaving(false)
@@ -128,8 +131,10 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
           }
         }
       } else if (step === 5) {
-        await api.put("/settings/docker", { socket_path: dockerSocket })
-        const result = await api.post<ConnectionTestResult>("/settings/test/docker")
+        if (!alreadyDone || dockerSocketEdited) {
+          await api.settings.update("docker", { socket_path: dockerSocket })
+        }
+        const result = await api.settings.test("docker")
         setTestResult(result)
         if (!result.success) {
           setSaving(false)
@@ -143,30 +148,41 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         setStep(step + 1)
         setTestResult(null)
       } else {
-        await api.put("/settings/setup-complete", {})
+        await api.settings.update("setup-complete", {})
         onSetupComplete?.()
         navigate("/", { replace: true })
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
+      submittingRef.current = false
       setSaving(false)
     }
   }
 
   const canProceed = () => {
-    if (completedSteps.has(step)) return true
+    if (completedSteps.has(step)) {
+      // A resumed setup loads only progress flags (not the secret/value fields),
+      // so a completed step normally has empty inputs -> "keep existing" -> allow.
+      // Step 3 (ACME email) is the one completed step with a client-side FORMAT
+      // validator, so if the user actively re-edits it to a non-empty malformed
+      // value we still block Next rather than fire an obviously-doomed PUT (keeps
+      // the no-doomed-submit invariant on re-edit). Other steps have no client
+      // format check, so their backend-only rules surface gracefully via save().
+      if (step === 3) return acmeEmail.trim().length === 0 || isEmailLike(acmeEmail)
+      return true
+    }
     if (step === 0) {
       return (
-        adminUsername.length > 0 &&
+        adminUsername.trim().length > 0 &&
         adminPassword.length >= 8 &&
         adminPassword === adminPasswordConfirm
       )
     }
-    if (step === 1) return baseDomain.length > 0
-    if (step === 2) return cfZoneId.length > 0 && (cfToken.length > 0 || cfTokenConfigured)
-    if (step === 3) return acmeEmail.includes("@")
-    if (step === 4) return tsAuthKey.length > 0 && tsApiKey.length > 0
+    if (step === 1) return baseDomain.trim().length > 0
+    if (step === 2) return cfZoneId.trim().length > 0 && (cfToken.length > 0 || cfTokenConfigured)
+    if (step === 3) return isEmailLike(acmeEmail)
+    if (step === 4) return tsAuthKey.trim().length > 0 && tsApiKey.trim().length > 0
     return true
   }
 
@@ -319,6 +335,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
                 type="password"
                 value={cfToken}
                 onChange={(e) => setCfToken(e.target.value)}
+                autoComplete="off"
                 placeholder="API token..."
                 className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
               />
@@ -344,11 +361,12 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
           <>
             <label className="block">
               <span className="text-sm font-medium text-zinc-700">Tailscale Auth Key</span>
-              <p className="text-xs text-zinc-400 mt-0.5">Reusable auth key from the Tailscale admin console. Must start with tskey-auth- or tskey-reusable-.</p>
+              <p className="text-xs text-zinc-400 mt-0.5">Reusable auth key from the Tailscale admin console. Must start with tskey-auth-.</p>
               <input
                 type="password"
                 value={tsAuthKey}
                 onChange={(e) => setTsAuthKey(e.target.value)}
+                autoComplete="off"
                 placeholder="tskey-auth-..."
                 className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
               />
@@ -360,6 +378,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
                 type="password"
                 value={tsApiKey}
                 onChange={(e) => setTsApiKey(e.target.value)}
+                autoComplete="off"
                 placeholder="tskey-api-..."
                 className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
               />
@@ -370,11 +389,11 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         {step === 5 && (
           <label className="block">
             <span className="text-sm font-medium text-zinc-700">Docker Socket Path</span>
-            <p className="text-xs text-zinc-400 mt-0.5">Usually unix:///var/run/docker.sock on Linux/Unraid.</p>
+            <p className="text-xs text-zinc-400 mt-0.5">Usually unix:///var/run/docker.sock on Linux.</p>
             <input
               type="text"
               value={dockerSocket}
-              onChange={(e) => setDockerSocket(e.target.value)}
+              onChange={(e) => { setDockerSocket(e.target.value); setDockerSocketEdited(true) }}
               className="mt-1 block w-full rounded-md border border-zinc-300 px-3 py-2 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
             />
           </label>

@@ -1,19 +1,18 @@
 """Docker container discovery API."""
 
-import contextlib
-
 import docker
+import requests
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
+from app.edge.docker_client import docker_client, resolve_socket
 from app.schemas.services import (
     ContainerPortInfo,
     DiscoveredContainer,
     DiscoveryResponse,
 )
-from app.settings_store import get_setting
 
 router = APIRouter(
     prefix="/api/discovery",
@@ -21,8 +20,11 @@ router = APIRouter(
     dependencies=[Depends(get_current_user)],
 )
 
-# Labels used to identify orchestrator-managed containers
-MANAGED_LABELS = {"tailbale.managed": "true"}
+# Labels marking a container the orchestrator owns and that must never be offered
+# as an upstream to expose: edge containers carry ``tailbale.managed=true`` and
+# the orchestrator's own (main) container carries ``tailbale.main=true``
+# (docker-compose.*.yml). A container matching ANY of these is hidden.
+MANAGED_LABELS = {"tailbale.managed": "true", "tailbale.main": "true"}
 
 
 def _parse_ports(container) -> list[ContainerPortInfo]:
@@ -55,52 +57,46 @@ def _parse_networks(container) -> list[str]:
 
 
 def _is_managed(container) -> bool:
-    """Check if a container is managed by the orchestrator."""
+    """True if the container is one the orchestrator owns — an edge container
+    (``tailbale.managed``) or the orchestrator/main container itself
+    (``tailbale.main``). Such containers must not appear as exposure candidates."""
     labels = container.labels or {}
-    return labels.get("tailbale.managed") == "true"
+    return any(labels.get(key) == value for key, value in MANAGED_LABELS.items())
 
 
 @router.get("/containers", response_model=DiscoveryResponse)
-async def list_containers(
+def list_containers(
     running_only: bool = Query(default=True),
     hide_managed: bool = Query(default=True),
     search: str = Query(default=""),
     db: Session = Depends(get_db),
 ):
     """List Docker containers available for exposure."""
-    socket_path = get_setting(db, "docker_socket_path")
     search_lower = search.strip().lower()
-    client = None
     try:
-        client = docker.DockerClient(base_url=socket_path)
-        containers = client.containers.list(all=not running_only)
-        result: list[DiscoveredContainer] = []
-        for c in containers:
-            if hide_managed and _is_managed(c):
-                continue
+        with docker_client(resolve_socket(db)) as client:
+            containers = client.containers.list(all=not running_only)
+            result: list[DiscoveredContainer] = []
+            for c in containers:
+                if hide_managed and _is_managed(c):
+                    continue
 
-            name = c.name or ""
-            image = c.attrs.get("Config", {}).get("Image") or "unknown"
+                name = c.name or ""
+                image = c.attrs.get("Config", {}).get("Image") or "unknown"
 
-            if search_lower and search_lower not in name.lower() and search_lower not in image.lower():
-                continue
+                if search_lower and search_lower not in name.lower() and search_lower not in image.lower():
+                    continue
 
-            result.append(DiscoveredContainer(
-                id=c.id,
-                name=name,
-                image=image,
-                status=c.status,
-                state=c.attrs.get("State", {}).get("Status", c.status),
-                ports=_parse_ports(c),
-                networks=_parse_networks(c),
-                labels=c.labels or {},
-            ))
-        return DiscoveryResponse(containers=result, total=len(result))
-    except docker.errors.DockerException:
+                result.append(DiscoveredContainer(
+                    id=c.id,
+                    name=name,
+                    image=image,
+                    status=c.status,
+                    state=c.attrs.get("State", {}).get("Status", c.status),
+                    ports=_parse_ports(c),
+                    networks=_parse_networks(c),
+                    labels=c.labels or {},
+                ))
+            return DiscoveryResponse(containers=result, total=len(result))
+    except (docker.errors.DockerException, requests.exceptions.ConnectionError):
         return DiscoveryResponse(containers=[], total=0)
-    finally:
-        if client is not None:
-            close = getattr(client, "close", None)
-            if close is not None:
-                with contextlib.suppress(Exception):
-                    close()

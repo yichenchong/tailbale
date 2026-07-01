@@ -10,16 +10,10 @@ from app.secrets import (
     CLOUDFLARE_TOKEN,
     TAILSCALE_API_KEY,
     TAILSCALE_AUTH_KEY,
+    is_valid_ts_api_key,
+    is_valid_ts_auth_key,
     read_secret,
 )
-
-
-def _valid_tailscale_auth_key(value: str | None) -> bool:
-    return bool(value and (value.startswith("tskey-auth-") or value.startswith("tskey-reusable-")))
-
-
-def _valid_tailscale_api_key(value: str | None) -> bool:
-    return bool(value and value.startswith("tskey-api-"))
 
 
 def compute_setup_progress(db: Session) -> dict[str, bool]:
@@ -39,7 +33,7 @@ def compute_setup_progress(db: Session) -> dict[str, bool]:
         "cloudflare_configured": bool(cf_zone and cf_zone.value) and cf_token_set,
         "cloudflare_token_set": cf_token_set,
         "acme_email_set": bool(acme_email and acme_email.value),
-        "tailscale_configured": _valid_tailscale_auth_key(ts_auth_key) and _valid_tailscale_api_key(ts_api_key),
+        "tailscale_configured": is_valid_ts_auth_key(ts_auth_key) and is_valid_ts_api_key(ts_api_key),
         "docker_configured": bool(docker_socket and docker_socket.value),
     }
 

@@ -1,6 +1,6 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { api, type LoginResponse } from "@/lib/api"
+import { api } from "@/lib/api"
 import { useStaticFavicon } from "@/lib/useFavicon"
 import { Loader2, LogIn } from "lucide-react"
 
@@ -11,18 +11,30 @@ export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
+  // Synchronous in-flight guard for the login POST. A ref (not the `loading`
+  // state) because two submit events can fire within one React batch (a
+  // same-batch double-Enter / programmatic double submit) before the
+  // `loading=true` re-render commits; both would then close over the stale
+  // `loading=false` and slip past a state check, POSTing twice — on wrong
+  // credentials that burns two of the rate limiter's attempts per user action.
+  // The ref flips immediately, so the second handler bails. `loading` still
+  // drives the button/label UI.
+  const submittingRef = useRef(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (submittingRef.current) return
+    submittingRef.current = true
     setLoading(true)
     setError("")
     try {
-      await api.post<LoginResponse>("/auth/login", { username, password })
+      await api.auth.login({ username, password })
       onLogin?.()
       navigate("/")
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed")
     } finally {
+      submittingRef.current = false
       setLoading(false)
     }
   }
@@ -61,7 +73,7 @@ export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
           </label>
 
           {error && (
-            <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+            <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
               {error}
             </div>
           )}

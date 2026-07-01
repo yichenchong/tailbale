@@ -1,11 +1,12 @@
 """Tests for the Settings API endpoints."""
 
+import pytest
+
 from app.secrets import (
     CLOUDFLARE_TOKEN,
     TAILSCALE_API_KEY,
     TAILSCALE_AUTH_KEY,
     read_secret,
-    secret_exists,
 )
 
 
@@ -39,8 +40,10 @@ class TestGetSettings:
 
         assert data["general"]["base_domain"] == "example.com"
         assert data["general"]["acme_email"] == "you@example.com"
-        assert data["general"]["reconcile_interval_seconds"] == 60
+        assert data["general"]["reconcile_interval_seconds"] == 3600
         assert data["general"]["cert_renewal_window_days"] == 30
+        assert data["general"]["health_check_interval_seconds"] == 60
+        assert data["general"]["event_retention_days"] == 30
         assert data["cloudflare"]["zone_id"] == ""
         assert data["cloudflare"]["token_configured"] is False
         assert data["tailscale"]["auth_key_configured"] is False
@@ -50,18 +53,17 @@ class TestGetSettings:
         assert data["general"]["developer_mode"] is False
         assert data["setup_complete"] is False
 
-    def test_stale_invalid_numeric_settings_fall_back_to_defaults(self, client, db_session):
+    def test_stale_invalid_numeric_settings_fail_loud(self, client, db_session):
+        # Writes enforce ge=1, so a corrupt stored interval is data corruption
+        # that could never have been written through the API. The settings
+        # endpoint surfaces it loudly instead of masking it with a default.
         from app.settings_store import set_setting
 
         set_setting(db_session, "reconcile_interval_seconds", "not-an-int")
-        set_setting(db_session, "cert_renewal_window_days", "0")
         db_session.commit()
 
-        resp = client.get("/api/settings")
-        assert resp.status_code == 200
-        data = resp.json()["general"]
-        assert data["reconcile_interval_seconds"] == 60
-        assert data["cert_renewal_window_days"] == 30
+        with pytest.raises(ValueError):
+            client.get("/api/settings")
 
 
 class TestUpdateGeneral:
@@ -69,6 +71,60 @@ class TestUpdateGeneral:
         resp = client.put("/api/settings/general", json={"base_domain": "mysite.com"})
         assert resp.status_code == 200
         assert resp.json()["general"]["base_domain"] == "mysite.com"
+
+    def test_base_domain_normalized_to_lowercase(self, client):
+        resp = client.put("/api/settings/general", json={"base_domain": "Example.COM"})
+        assert resp.status_code == 200
+        assert resp.json()["general"]["base_domain"] == "example.com"
+
+    def test_rejects_invalid_base_domain(self, client):
+        resp = client.put("/api/settings/general", json={"base_domain": "bad domain.com"})
+        assert resp.status_code == 422
+
+        settings = client.get("/api/settings").json()
+        assert settings["general"]["base_domain"] == "example.com"
+
+    def test_rejects_base_domain_change_when_services_exist(self, client):
+        created = client.post("/api/services", json={
+            "name": "Existing",
+            "upstream_container_id": "abc123",
+            "upstream_container_name": "existing",
+            "upstream_scheme": "http",
+            "upstream_port": 80,
+            "hostname": "existing.example.com",
+            "base_domain": "example.com",
+        })
+        assert created.status_code == 201
+
+        resp = client.put("/api/settings/general", json={"base_domain": "new.example.com"})
+
+        assert resp.status_code == 409
+        assert client.get("/api/settings").json()["general"]["base_domain"] == "example.com"
+
+    def test_base_domain_unchanged_is_allowed_when_services_exist(self, client):
+        # The guard blocks only an actual change of base_domain. Re-submitting
+        # the CURRENT value alongside other general edits (as the frontend does
+        # when saving the form) must NOT 409, even with services present.
+        created = client.post("/api/services", json={
+            "name": "Existing",
+            "upstream_container_id": "abc123",
+            "upstream_container_name": "existing",
+            "upstream_scheme": "http",
+            "upstream_port": 80,
+            "hostname": "existing.example.com",
+            "base_domain": "example.com",
+        })
+        assert created.status_code == 201
+
+        resp = client.put("/api/settings/general", json={
+            "base_domain": "example.com",  # unchanged (matches current default)
+            "acme_email": "admin@example.com",
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()["general"]
+        assert data["base_domain"] == "example.com"
+        assert data["acme_email"] == "admin@example.com"
 
     def test_update_multiple_fields(self, client):
         resp = client.put("/api/settings/general", json={
@@ -116,7 +172,7 @@ class TestUpdateGeneral:
         assert resp.status_code == 422
 
         settings = client.get("/api/settings").json()
-        assert settings["general"]["reconcile_interval_seconds"] == 60
+        assert settings["general"]["reconcile_interval_seconds"] == 3600
         assert settings["general"]["cert_renewal_window_days"] == 30
 
     def test_rejects_empty_general_strings(self, client):
@@ -130,6 +186,72 @@ class TestUpdateGeneral:
         assert settings["general"]["base_domain"] == "example.com"
         assert settings["general"]["timezone"] == "UTC"
 
+    def test_update_new_int_settings(self, client):
+        resp = client.put(
+            "/api/settings/general",
+            json={
+                "reconcile_interval_seconds": 7200,
+                "health_check_interval_seconds": 30,
+                "event_retention_days": 14,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()["general"]
+        assert data["reconcile_interval_seconds"] == 7200
+        assert data["health_check_interval_seconds"] == 30
+        assert data["event_retention_days"] == 14
+
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "reconcile_interval_seconds",
+            "health_check_interval_seconds",
+            "cert_renewal_window_days",
+            "event_retention_days",
+        ],
+    )
+    @pytest.mark.parametrize("bad", [0, -1, 1.5, "", "   "])
+    def test_rejects_invalid_int_settings_at_write_time(self, client, field, bad):
+        # Pydantic ge=1 + int typing rejects 0/negative/fractional/blank before
+        # the handler runs, so a bad value is never persisted as a string.
+        resp = client.put("/api/settings/general", json={field: bad})
+        assert resp.status_code == 422
+
+    @pytest.mark.parametrize("bad", ["notanemail", "a@b", "a b@c.com"])
+    def test_rejects_invalid_acme_email(self, client, bad):
+        # No '@', no dot/TLD, and embedded whitespace are obvious mistakes.
+        resp = client.put("/api/settings/general", json={"acme_email": bad})
+        assert resp.status_code == 422
+
+        # The bad value is never persisted; the default is preserved.
+        settings = client.get("/api/settings").json()
+        assert settings["general"]["acme_email"] == "you@example.com"
+
+    @pytest.mark.parametrize("good", ["admin@example.com", "a.b+tag@sub.example.co.uk"])
+    def test_accepts_valid_acme_email(self, client, good):
+        resp = client.put("/api/settings/general", json={"acme_email": good})
+        assert resp.status_code == 200
+        assert resp.json()["general"]["acme_email"] == good
+
+    def test_acme_email_whitespace_is_stripped_before_storage(self, client):
+        # The shared before-validator trims surrounding whitespace, so a padded
+        # but otherwise valid address is accepted and persisted in trimmed form
+        # (the lenient email regex would reject the untrimmed value otherwise).
+        resp = client.put(
+            "/api/settings/general", json={"acme_email": "  admin@example.com  "}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["general"]["acme_email"] == "admin@example.com"
+
+        settings = client.get("/api/settings").json()
+        assert settings["general"]["acme_email"] == "admin@example.com"
+
+    def test_acme_email_whitespace_only_is_rejected(self, client):
+        # Trims to empty -> fails the min_length=1 constraint, never persisted.
+        resp = client.put("/api/settings/general", json={"acme_email": "   "})
+        assert resp.status_code == 422
+        assert client.get("/api/settings").json()["general"]["acme_email"] == "you@example.com"
+
 class TestUpdateCloudflare:
     def test_update_zone_id(self, client):
         resp = client.put("/api/settings/cloudflare", json={"zone_id": "zone123"})
@@ -141,7 +263,6 @@ class TestUpdateCloudflare:
         assert resp.status_code == 200
         assert resp.json()["cloudflare"]["token_configured"] is True
         # Verify secret was written
-        assert secret_exists(CLOUDFLARE_TOKEN)
         assert read_secret(CLOUDFLARE_TOKEN) == "cf_token_value"
 
     def test_token_never_returned(self, client, tmp_data_dir):
@@ -157,6 +278,22 @@ class TestUpdateCloudflare:
 
         settings = client.get("/api/settings").json()
         assert settings["cloudflare"]["token_configured"] is False
+
+    def test_failed_db_write_leaves_no_orphaned_secret(self, client, tmp_data_dir, monkeypatch):
+        """The token is persisted only after the DB write commits. A failing DB
+        write must leave no orphaned secret on disk (a retry re-applies both)."""
+        import app.routers.settings as settings_router
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(settings_router, "set_setting", _boom)
+        with pytest.raises(RuntimeError):
+            client.put(
+                "/api/settings/cloudflare",
+                json={"zone_id": "zone123", "token": "cf_token_value"},
+            )
+        assert read_secret(CLOUDFLARE_TOKEN) is None
 
 
 
@@ -190,6 +327,13 @@ class TestUpdateTailscale:
         assert resp.status_code == 400
         assert "auth key" in resp.json()["detail"].lower()
 
+    def test_rejects_dead_reusable_prefix(self, client, tmp_data_dir):
+        # 'tskey-reusable-' is not a real prefix; reusable keys use 'tskey-auth-'.
+        resp = client.put("/api/settings/tailscale", json={"auth_key": "tskey-reusable-abc"})
+        assert resp.status_code == 400
+        assert "auth key" in resp.json()["detail"].lower()
+        assert read_secret(TAILSCALE_AUTH_KEY) is None
+
     def test_rejects_invalid_api_key(self, client, tmp_data_dir):
         resp = client.put("/api/settings/tailscale", json={"api_key": "tskey-auth-wrong"})
         assert resp.status_code == 400
@@ -205,6 +349,25 @@ class TestUpdateTailscale:
         settings = client.get("/api/settings").json()
         assert settings["tailscale"]["auth_key_configured"] is False
         assert settings["tailscale"]["api_key_configured"] is False
+
+    def test_failed_db_write_leaves_no_orphaned_secret(self, client, tmp_data_dir, monkeypatch):
+        """Auth/API keys are persisted only after the DB write commits. A failing
+        DB write must leave no orphaned secret on disk (a retry re-applies both)."""
+        import app.routers.settings as settings_router
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(settings_router, "set_setting", _boom)
+        with pytest.raises(RuntimeError):
+            client.put(
+                "/api/settings/tailscale",
+                json={
+                    "auth_key": "tskey-auth-abc123",
+                    "control_url": "https://headscale.example.com",
+                },
+            )
+        assert read_secret(TAILSCALE_AUTH_KEY) is None
 
 
 class TestUpdateDocker:
@@ -289,6 +452,11 @@ class TestDeveloperActions:
         resp = client.post("/api/settings/developer/reset-setup-complete")
         assert resp.status_code == 403
 
+    def test_reset_all_requires_developer_mode(self, client):
+        # /developer/* must be gated even for the destructive reset-all route.
+        resp = client.post("/api/settings/developer/reset-all")
+        assert resp.status_code == 403
+
     def test_reset_setup_complete_only_flips_setting(self, client):
         _configure_setup_prerequisites(client)
         client.put("/api/settings/general", json={"developer_mode": True})
@@ -340,8 +508,6 @@ class TestDeveloperActions:
 
 
     def test_reset_all_clears_dns_orphan_cleanup_jobs(self, client, db_session):
-        import json
-
         from app.models.job import Job
 
         client.put("/api/settings/general", json={"developer_mode": True})
@@ -350,11 +516,11 @@ class TestDeveloperActions:
                 kind="dns_orphan_cleanup",
                 status="pending",
                 message="Orphaned DNS record",
-                details=json.dumps({
+                details={
                     "record_id": "cf_rec_reset",
                     "hostname": "app.example.com",
                     "zone_id": "zone123",
-                }),
+                },
             )
         )
         db_session.add(Job(kind="old_setup_job", status="pending"))
@@ -523,12 +689,128 @@ class TestConnectionTests:
         assert data == {"success": True, "message": "Connected to Docker 25.0.0"}
         assert state["closed"] is True
 
+    def test_docker_uses_from_env_when_socket_path_blank(self, client, monkeypatch):
+        # When the operator clears docker_socket_path (to rely on DOCKER_HOST),
+        # the client must fall back to from_env() rather than
+        # DockerClient(base_url="") which ignores DOCKER_HOST. Mirrors the
+        # services/discovery socket-resolution convention.
+        import app.edge.docker_client as dc_mod
+
+        orig_get_setting = dc_mod.get_setting
+        monkeypatch.setattr(
+            dc_mod,
+            "get_setting",
+            lambda db, key, *a, **k: ""
+            if key == "docker_socket_path"
+            else orig_get_setting(db, key, *a, **k),
+        )
+
+        calls = {"base_url": False, "from_env": False}
+
+        class FakeDockerClient:
+            def __init__(self, base_url=None):
+                calls["base_url"] = True
+
+            @classmethod
+            def from_env(cls):
+                calls["from_env"] = True
+                return cls.__new__(cls)
+
+            def ping(self):
+                pass
+
+            def info(self):
+                return {"ServerVersion": "27.0.0"}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.routers.settings.docker.DockerClient", FakeDockerClient)
+
+        resp = client.post("/api/settings/test/docker")
+
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert calls["from_env"] is True
+        assert calls["base_url"] is False
+
     def test_docker_connection_failure(self, client):
         # Update to an invalid socket to force failure
         client.put("/api/settings/docker", json={"socket_path": "tcp://invalid:9999"})
         resp = client.post("/api/settings/test/docker")
         data = resp.json()
         assert data["success"] is False
+
+    @staticmethod
+    def _patch_cloudflare(monkeypatch, payload):
+        class _FakeCFResp:
+            def json(self):
+                return payload
+
+        class _FakeCFClient:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, *args, **kwargs):
+                return _FakeCFResp()
+
+        monkeypatch.setattr(
+            "app.routers.settings.httpx2.AsyncClient",
+            lambda *a, **k: _FakeCFClient(),
+        )
+
+    def _configure_cloudflare(self, client):
+        from app.secrets import CLOUDFLARE_TOKEN, write_secret
+
+        write_secret(CLOUDFLARE_TOKEN, "cf-token")
+        client.put("/api/settings/cloudflare", json={"zone_id": "zone123"})
+
+    def test_cloudflare_success_returns_zone_name(self, client, tmp_data_dir, monkeypatch):
+        self._configure_cloudflare(client)
+        self._patch_cloudflare(monkeypatch, {"success": True, "result": {"name": "example.com"}})
+
+        resp = client.post("/api/settings/test/cloudflare")
+        data = resp.json()
+        assert data["success"] is True
+        assert "example.com" in data["message"]
+
+    def test_cloudflare_reports_api_error_message(self, client, tmp_data_dir, monkeypatch):
+        self._configure_cloudflare(client)
+        self._patch_cloudflare(
+            monkeypatch,
+            {"success": False, "errors": [{"code": 9109, "message": "Invalid API token"}]},
+        )
+
+        resp = client.post("/api/settings/test/cloudflare")
+        data = resp.json()
+        assert data["success"] is False
+        assert data["message"] == "Invalid API token"
+
+    def test_cloudflare_success_without_zone_name_is_not_reported_as_failure(
+        self, client, tmp_data_dir, monkeypatch
+    ):
+        # Regression: a successful API response whose `result` lacks `name` used
+        # to raise KeyError, get swallowed, and surface as success=False with the
+        # cryptic message "'name'" — falsely reporting a working connection as broken.
+        self._configure_cloudflare(client)
+        self._patch_cloudflare(monkeypatch, {"success": True, "result": {}})
+
+        resp = client.post("/api/settings/test/cloudflare")
+        data = resp.json()
+        assert data["success"] is True
+        assert data["message"] != "'name'"
+
+    def test_cloudflare_non_dict_response_is_handled(self, client, tmp_data_dir, monkeypatch):
+        self._configure_cloudflare(client)
+        self._patch_cloudflare(monkeypatch, ["unexpected"])
+
+        resp = client.post("/api/settings/test/cloudflare")
+        data = resp.json()
+        assert data["success"] is False
+        assert "Unexpected" in data["message"]
 
 
 class TestHealthEndpoint:

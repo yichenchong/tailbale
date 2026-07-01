@@ -42,7 +42,8 @@ def db_engine():
         cursor.close()
 
     Base.metadata.create_all(bind=engine)
-    return engine
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture()
@@ -73,7 +74,14 @@ def client(tmp_data_dir, db_engine):
         finally:
             session.close()
 
+    import app.main as main_module
     from app.main import app
+
+    # The lifespan runs create_all(bind=engine) against main's import-time engine
+    # binding; point it at the in-memory test engine so startup never opens (and
+    # leaks) a connection on the real file engine.
+    original_main_engine = main_module.engine
+    main_module.engine = db_engine
 
     # Bypass auth for all existing tests — they aren't testing authentication
     dummy_user = User(
@@ -85,11 +93,15 @@ def client(tmp_data_dir, db_engine):
 
     app.dependency_overrides[get_db] = _override_get_db
     app.dependency_overrides[get_current_user] = lambda: dummy_user
-    with TestClient(app) as c:
+    # The lifespan starts a best-effort edge-image build; stub it so tests never
+    # open a real Docker socket (no daemon under test — the SDK leaks its probe
+    # socket on a refused connection).
+    with patch("app.edge.image_builder.ensure_edge_image"), TestClient(app) as c:
         yield c
     app.dependency_overrides.clear()
     database_module.engine = original_engine
     database_module.SessionLocal = original_session_local
+    main_module.engine = original_main_engine
 
 
 def _make_fake_container(name: str = "fakecontainer", exposed_ports=None, **attrs_overrides):
@@ -134,4 +146,24 @@ def _mock_background_reconcile():
     reconcile_one() call that tries to connect to Docker/Tailscale.
     """
     with patch("app.reconciler.reconcile_loop.reconcile_one"):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker():
+    """Guarantee no test ever opens a real Docker connection.
+
+    Without a local mock, ``docker.DockerClient(...)`` / ``.from_env()`` would try
+    to reach the daemon and — with none present under test — leak the SDK's probe
+    socket. Raising DockerException matches the no-daemon outcome tests already
+    rely on, but opens nothing. Tests needing a working client patch it themselves,
+    which overrides this default for their scope.
+    """
+    import docker
+
+    def _refuse(*_args, **_kwargs):
+        raise docker.errors.DockerException("Docker access is disabled under test")
+
+    with patch("docker.DockerClient", side_effect=_refuse) as mock_cls:
+        mock_cls.from_env = MagicMock(side_effect=_refuse)
         yield

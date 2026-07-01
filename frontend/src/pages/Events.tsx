@@ -1,29 +1,14 @@
-import { Fragment, useCallback, useEffect, useRef, useState } from "react"
-import { api } from "@/lib/api"
+import { Fragment, useCallback, useEffect, useState } from "react"
+import { api, type EventItem, type EventsResponse } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
 import { cn } from "@/lib/utils"
+import { eventLevelStyle } from "@/lib/statusStyles"
+import { useResource } from "@/lib/useResource"
+import { usePagination } from "@/lib/usePagination"
+import { Pagination } from "@/components/Pagination"
 
-interface EventItem {
-  id: string
-  service_id: string | null
-  kind: string
-  level: string
-  message: string
-  details: Record<string, unknown> | null
-  created_at: string | null
-}
-
-interface EventsResponse {
-  events: EventItem[]
-  total: number
-}
-
-const LEVEL_STYLES: Record<string, string> = {
-  info: "bg-blue-100 text-blue-700",
-  warning: "bg-yellow-100 text-yellow-800",
-  error: "bg-red-100 text-red-700",
-}
+const SEARCH_DEBOUNCE_MS = 300
 
 const LEVEL_ICONS: Record<string, typeof Info> = {
   info: Info,
@@ -32,43 +17,58 @@ const LEVEL_ICONS: Record<string, typeof Info> = {
 }
 
 export default function Events() {
-  const [events, setEvents] = useState<EventItem[]>([])
-  const [total, setTotal] = useState(0)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
   const [search, setSearch] = useState("")
+  const [searchInput, setSearchInput] = useState("")
   const [levelFilter, setLevelFilter] = useState("")
   const [kindFilter, setKindFilter] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const [offset, setOffset] = useState(0)
-  const requestIdRef = useRef(0)
-  const limit = 50
+  const { offset, limit, total, page, pageCount, setOffset, setTotal, prev, next, goToPage, clampToContent } =
+    usePagination()
 
-  const load = useCallback(async () => {
-    const requestId = ++requestIdRef.current
-    setLoading(true)
-    setError("")
-    try {
-      const params = new URLSearchParams()
-      if (search) params.set("search", search)
-      if (levelFilter) params.set("level", levelFilter)
-      if (kindFilter) params.set("kind", kindFilter)
-      params.set("limit", String(limit))
-      params.set("offset", String(offset))
-      const qs = params.toString()
-      const data = await api.get<EventsResponse>(`/events${qs ? `?${qs}` : ""}`)
-      if (requestId !== requestIdRef.current) return
-      setEvents(data.events)
+  const fetcher = useCallback(
+    () => api.events.list({ search, level: levelFilter, kind: kindFilter, limit, offset }),
+    [search, levelFilter, kindFilter, limit, offset],
+  )
+  // Sync `total` for the pager and clamp the offset when the current page fell
+  // off the end. Events never used to clamp, so the new retention cleanup could
+  // shrink `total` and strand the user on an empty page over still-reachable
+  // rows; the shared helper fixes that. Returning `true` keeps the spinner up
+  // and skips storing the empty page so the offset change retriggers the load.
+  const onData = useCallback(
+    (data: EventsResponse): boolean => {
       setTotal(data.total)
-    } catch (e: unknown) {
-      if (requestId !== requestIdRef.current) return
-      setError(e instanceof Error ? e.message : "Failed to load events")
-    } finally {
-      if (requestId === requestIdRef.current) setLoading(false)
-    }
-  }, [search, levelFilter, kindFilter, offset])
+      const clamped = clampToContent(data.total, data.events.length)
+      if (clamped !== null) {
+        setOffset(clamped)
+        return true
+      }
+      return false
+    },
+    [setTotal, clampToContent, setOffset],
+  )
+  const { data, loading, error } = useResource(fetcher, {
+    onData,
+    mapError: (e) => (e instanceof Error ? e.message : "Failed to load events"),
+  })
+  const events = data?.events ?? []
 
-  useEffect(() => { void load() }, [load])
+  // Kind filter options come from the backend registry (GET /events/kinds) —
+  // the single source of truth — rather than a hardcoded mirror that silently
+  // drifts when a new event kind is added on the backend.
+  const kindsFetcher = useCallback(() => api.events.kinds(), [])
+  const { data: kindsData } = useResource(kindsFetcher)
+  const eventKinds = kindsData?.kinds ?? []
+
+  // Debounce the free-text search so a settled query issues a single request
+  // instead of one per keystroke. Level/kind filters and pagination stay
+  // immediate; useResource's request-id guard still drops stale responses.
+  useEffect(() => {
+    const handle = setTimeout(() => {
+      setSearch(searchInput)
+      setOffset(0)
+    }, SEARCH_DEBOUNCE_MS)
+    return () => clearTimeout(handle)
+  }, [searchInput, setOffset])
 
   const tz = useTimezone()
   function fmtTime(iso: string | null) {
@@ -93,8 +93,8 @@ export default function Events() {
           <input
             type="text"
             placeholder="Search messages..."
-            value={search}
-            onChange={(e) => { setSearch(e.target.value); setOffset(0) }}
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
             className="pl-9 pr-3 py-2 border rounded-md text-sm w-64"
           />
         </div>
@@ -114,24 +114,11 @@ export default function Events() {
           className="border rounded-md px-3 py-2 text-sm"
         >
           <option value="">All kinds</option>
-          <option value="service_created">service_created</option>
-          <option value="service_updated">service_updated</option>
-          <option value="service_deleted">service_deleted</option>
-          <option value="edge_started">edge_started</option>
-          <option value="edge_restarted">edge_restarted</option>
-          <option value="edge_recreated">edge_recreated</option>
-          <option value="caddy_reloaded">caddy_reloaded</option>
-          <option value="tailscale_ip_acquired">tailscale_ip_acquired</option>
-          <option value="cert_issued">cert_issued</option>
-          <option value="cert_renewed">cert_renewed</option>
-          <option value="cert_failed">cert_failed</option>
-          <option value="dns_created">dns_created</option>
-          <option value="dns_updated">dns_updated</option>
-          <option value="dns_removed">dns_removed</option>
-          <option value="reconcile_completed">reconcile_completed</option>
-          <option value="reconcile_failed">reconcile_failed</option>
+          {eventKinds.map((k) => (
+            <option key={k} value={k}>{k}</option>
+          ))}
         </select>
-        <span className="text-sm text-zinc-500">{total} events</span>
+        <span className="text-sm text-zinc-500">{total} event{total !== 1 ? "s" : ""}</span>
       </div>
 
       {/* Content */}
@@ -140,7 +127,7 @@ export default function Events() {
           <Loader2 className="h-5 w-5 animate-spin" /> Loading events...
         </div>
       ) : error ? (
-        <div className="mt-4 rounded-md bg-red-50 p-4 text-red-700">{error}</div>
+        <div role="alert" className="mt-4 rounded-md bg-red-50 p-4 text-red-700">{error}</div>
       ) : events.length === 0 ? (
         <div className="mt-8 text-zinc-500">No events found.</div>
       ) : (
@@ -187,7 +174,7 @@ export default function Events() {
                           {fmtTime(evt.created_at)}
                         </td>
                         <td className="px-3 py-2">
-                          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", LEVEL_STYLES[evt.level] || "bg-zinc-100 text-zinc-600")}>
+                          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", eventLevelStyle(evt.level))}>
                             <Icon className="h-3 w-3" />
                             {evt.level}
                           </span>
@@ -211,28 +198,16 @@ export default function Events() {
             </table>
           </div>
 
-          {/* Pagination */}
-          {total > limit && (
-            <div className="mt-3 flex gap-2 items-center text-sm">
-              <button
-                disabled={offset === 0}
-                onClick={() => setOffset(Math.max(0, offset - limit))}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Previous
-              </button>
-              <span className="text-zinc-500">
-                {offset + 1}–{Math.min(offset + limit, total)} of {total}
-              </span>
-              <button
-                disabled={offset + limit >= total}
-                onClick={() => setOffset(offset + limit)}
-                className="px-3 py-1 border rounded disabled:opacity-50"
-              >
-                Next
-              </button>
-            </div>
-          )}
+          <Pagination
+            offset={offset}
+            limit={limit}
+            total={total}
+            page={page}
+            pageCount={pageCount}
+            onPrev={prev}
+            onNext={next}
+            onGoToPage={goToPage}
+          />
         </>
       )}
     </div>

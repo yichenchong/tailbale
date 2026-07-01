@@ -11,7 +11,7 @@ import OrphanDns from "@/pages/OrphanDns"
 import SettingsPage from "@/pages/SettingsPage"
 import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
-import { api, type AuthStatus } from "@/lib/api"
+import { api } from "@/lib/api"
 import { useDynamicFavicon } from "@/lib/useFavicon"
 
 /** Wrapper that enables favicon polling only for authenticated routes. */
@@ -20,25 +20,21 @@ function AuthenticatedLayout() {
   return <Layout />
 }
 
-interface SetupProgress {
-  user_exists: boolean
-}
-
 function App() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
   const [setupUserExists, setSetupUserExists] = useState<boolean | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
   useEffect(() => {
-    api
-      .get<AuthStatus>("/auth/status")
+    api.auth
+      .status()
       .then(async (s) => {
         setBootError(null)
         setSetupComplete(s.setup_complete)
         setAuthenticated(s.authenticated)
         if (!s.setup_complete) {
           try {
-            const progress = await api.get<SetupProgress>("/auth/setup-progress")
+            const progress = await api.auth.setupProgress()
             setSetupUserExists(progress.user_exists)
           } catch (err) {
             setBootError(err instanceof Error ? err.message : "Unable to load setup progress")
@@ -74,7 +70,7 @@ function App() {
 
   if (bootError) {
     return (
-      <div className="mx-auto max-w-lg p-6">
+      <div role="alert" className="mx-auto max-w-lg p-6">
         <h1 className="text-xl font-semibold">Startup error</h1>
         <p className="mt-2 text-sm text-zinc-500">{bootError}</p>
         <button

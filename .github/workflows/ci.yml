@@ -5,6 +5,9 @@ on:
   push:
     branches: [main]
 
+permissions:
+  contents: read
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -12,7 +15,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.14"
       - name: Install backend dependencies
         run: |
           python -m pip install --upgrade pip
@@ -20,6 +23,9 @@ jobs:
       - name: Compile backend
         working-directory: backend
         run: python -m compileall -q app tests
+      - name: Lint backend (ruff)
+        working-directory: backend
+        run: ruff check app tests
       - name: Run backend tests
         working-directory: backend
         run: python -m pytest

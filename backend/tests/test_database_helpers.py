@@ -150,3 +150,281 @@ def test_db_write_section_serializes_writers_across_threads():
     assert not contender_acquired.is_set(), (
         "a second thread entered a db_write_section while another held it"
     )
+
+
+# ---------------------------------------------------------------------------
+# run_migrations: idempotent index backfill for Event/Job.service_id
+# ---------------------------------------------------------------------------
+
+
+def _index_names(engine, table):
+    from sqlalchemy import inspect as _inspect
+
+    return {ix["name"] for ix in _inspect(engine).get_indexes(table)}
+
+
+def _legacy_engine(tmp_path):
+    """Build an on-disk SQLite engine seeded like a pre-index release.
+
+    The full schema is created, then the indexes newer model revisions added
+    are dropped so the database resembles one created before ``index=True`` was
+    added to the models (Event ``service_id``/``created_at``, the Job
+    ``service_id``/``status``/``kind``/``created_at`` filters/ordering indexes,
+    ``certificate.expires_at`` and ``service_status.phase``).
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as _text
+
+    import app.models  # noqa: F401  -- register every table on Base.metadata
+    from app.database import Base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(_text("DROP INDEX IF EXISTS ix_events_service_id"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_service_id"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_status"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_kind"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_created_at"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_events_created_at"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_certificates_expires_at"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_service_status_phase"))
+    return engine
+
+
+def test_run_migrations_backfills_service_id_indexes(tmp_path):
+    from app.database import run_migrations
+
+    engine = _legacy_engine(tmp_path)
+    try:
+        # Precondition: the legacy DB lacks the indexes the fix introduces.
+        assert "ix_events_service_id" not in _index_names(engine, "events")
+        assert "ix_jobs_service_id" not in _index_names(engine, "jobs")
+
+        run_migrations(engine)
+
+        assert "ix_events_service_id" in _index_names(engine, "events")
+        assert "ix_jobs_service_id" in _index_names(engine, "jobs")
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_backfills_job_status_kind_created_at_indexes(tmp_path):
+    """jobs.py filters on status/kind and orders by created_at; legacy DBs that
+    predate ``index=True`` on those columns must have the indexes backfilled."""
+    from app.database import run_migrations
+
+    engine = _legacy_engine(tmp_path)
+    try:
+        before = _index_names(engine, "jobs")
+        assert "ix_jobs_status" not in before
+        assert "ix_jobs_kind" not in before
+        assert "ix_jobs_created_at" not in before
+
+        run_migrations(engine)
+
+        after = _index_names(engine, "jobs")
+        assert "ix_jobs_status" in after
+        assert "ix_jobs_kind" in after
+        assert "ix_jobs_created_at" in after
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_backfills_dashboard_hot_path_indexes(tmp_path):
+    """dashboard.py orders events by created_at, scans certificates by
+    expires_at, and counts service_status by phase; legacy DBs that predate
+    ``index=True`` on those columns must have the indexes backfilled."""
+    from app.database import run_migrations
+
+    engine = _legacy_engine(tmp_path)
+    try:
+        assert "ix_events_created_at" not in _index_names(engine, "events")
+        assert "ix_certificates_expires_at" not in _index_names(engine, "certificates")
+        assert "ix_service_status_phase" not in _index_names(engine, "service_status")
+
+        run_migrations(engine)
+
+        assert "ix_events_created_at" in _index_names(engine, "events")
+        assert "ix_certificates_expires_at" in _index_names(engine, "certificates")
+        assert "ix_service_status_phase" in _index_names(engine, "service_status")
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_is_idempotent(tmp_path):
+    from app.database import run_migrations
+
+    engine = _legacy_engine(tmp_path)
+    try:
+        # Running repeatedly must never raise (CREATE INDEX IF NOT EXISTS).
+        run_migrations(engine)
+        run_migrations(engine)
+        run_migrations(engine)
+
+        assert "ix_events_service_id" in _index_names(engine, "events")
+        assert "ix_jobs_service_id" in _index_names(engine, "jobs")
+        job_indexes = _index_names(engine, "jobs")
+        assert "ix_jobs_status" in job_indexes
+        assert "ix_jobs_kind" in job_indexes
+        assert "ix_jobs_created_at" in job_indexes
+        assert "ix_events_created_at" in _index_names(engine, "events")
+        assert "ix_certificates_expires_at" in _index_names(engine, "certificates")
+        assert "ix_service_status_phase" in _index_names(engine, "service_status")
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_twice_is_noop_on_current_model_db(tmp_path):
+    """Names in _INDEX_MIGRATIONS must match SQLAlchemy's ``ix_<table>_<column>``
+    exactly, so on a DB freshly created from the current models run_migrations is
+    a pure no-op: the index set (incl. the AR13 dashboard indexes) is identical
+    before and after two runs, with no duplicate CREATE INDEX failures."""
+    from sqlalchemy import create_engine
+
+    import app.models  # noqa: F401  -- register every table on Base.metadata
+    from app.database import Base, run_migrations
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'current.db'}")
+    try:
+        Base.metadata.create_all(engine)
+        tables = ("events", "jobs", "certificates", "service_status")
+        before = {t: _index_names(engine, t) for t in tables}
+
+        run_migrations(engine)
+        run_migrations(engine)
+
+        after = {t: _index_names(engine, t) for t in tables}
+        assert after == before
+        # The AR13 dashboard hot-path indexes are present (from the models).
+        assert "ix_events_created_at" in after["events"]
+        assert "ix_certificates_expires_at" in after["certificates"]
+        assert "ix_service_status_phase" in after["service_status"]
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_no_op_on_empty_database(tmp_path):
+    """Tables absent entirely: the has_table guard keeps it crash-free."""
+    from sqlalchemy import create_engine
+
+    from app.database import run_migrations
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
+    try:
+        run_migrations(engine)  # must not raise on a schema-less DB
+    finally:
+        engine.dispose()
+
+
+def _legacy_engine_missing_columns(tmp_path):
+    """Build an on-disk SQLite engine whose ``service_status`` table predates the
+    probe-retry columns (``probe_retry_at`` / ``probe_retry_attempt`` /
+    ``last_probe_at``) — the original reason ``run_migrations`` exists. The full
+    schema is created, then ``service_status`` is rebuilt without those columns.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy import text as _text
+
+    import app.models  # noqa: F401  -- register every table on Base.metadata
+    from app.database import Base
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy_cols.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(_text("ALTER TABLE service_status RENAME TO _ss_old"))
+        conn.execute(_text(
+            "CREATE TABLE service_status ("
+            "service_id VARCHAR PRIMARY KEY, phase VARCHAR, message VARCHAR, "
+            "tailscale_ip VARCHAR, edge_container_id VARCHAR, health_checks TEXT, "
+            "last_reconciled_at DATETIME, "
+            "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        ))
+        conn.execute(_text("DROP TABLE _ss_old"))
+    return engine
+
+
+def _column_names(engine, table):
+    from sqlalchemy import inspect as _inspect
+
+    return {c["name"] for c in _inspect(engine).get_columns(table)}
+
+
+def test_run_migrations_backfills_missing_probe_columns(tmp_path):
+    """ADD COLUMN backfill (run_migrations' original job) must add every probe
+    column a legacy ``service_status`` table lacks."""
+    from app.database import run_migrations
+
+    engine = _legacy_engine_missing_columns(tmp_path)
+    try:
+        before = _column_names(engine, "service_status")
+        assert "probe_retry_at" not in before
+        assert "probe_retry_attempt" not in before
+        assert "last_probe_at" not in before
+
+        run_migrations(engine)
+
+        after = _column_names(engine, "service_status")
+        assert {"probe_retry_at", "probe_retry_attempt", "last_probe_at"} <= after
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_column_backfill_is_idempotent(tmp_path):
+    """Re-running after a column backfill must not raise (duplicate-column ALTER)
+    nor disturb the already-added columns."""
+    from app.database import run_migrations
+
+    engine = _legacy_engine_missing_columns(tmp_path)
+    try:
+        run_migrations(engine)
+        run_migrations(engine)
+        run_migrations(engine)
+
+        after = _column_names(engine, "service_status")
+        assert {"probe_retry_at", "probe_retry_attempt", "last_probe_at"} <= after
+    finally:
+        engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# PRAGMA listener: applied to EVERY pooled connection, incl. overflow
+# ---------------------------------------------------------------------------
+
+
+def test_set_sqlite_pragma_applies_to_overflow_connections(tmp_path):
+    """The production ``_set_sqlite_pragma`` listener fires on every physical
+    connect, so foreign-key enforcement (which makes CASCADE / SET NULL work)
+    holds on overflow connections beyond ``pool_size`` too. If it ever regressed
+    to e.g. a ``first_connect`` listener, overflow connections would silently
+    drop FK enforcement and orphan child rows.
+    """
+    from sqlalchemy import create_engine, event
+
+    from app.database import _set_sqlite_pragma
+
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'overflow.db'}",
+        connect_args={"check_same_thread": False},
+        pool_size=1,
+        max_overflow=3,
+        pool_timeout=5,
+    )
+    event.listen(engine, "connect", _set_sqlite_pragma)
+    try:
+        # Hold >pool_size connections open simultaneously to force the pool to
+        # mint overflow connections (each triggers the connect listener).
+        conns = [engine.connect() for _ in range(4)]
+        try:
+            for conn in conns:
+                fk = conn.exec_driver_sql("PRAGMA foreign_keys").fetchone()[0]
+                assert fk == 1, "foreign_keys must be ON on every connection"
+                busy = conn.exec_driver_sql("PRAGMA busy_timeout").fetchone()[0]
+                assert busy == 5000, "busy_timeout must be set on every connection"
+                journal = conn.exec_driver_sql("PRAGMA journal_mode").fetchone()[0]
+                assert journal.lower() == "wal", "journal_mode must be WAL on a file DB"
+        finally:
+            for conn in conns:
+                conn.close()
+    finally:
+        engine.dispose()

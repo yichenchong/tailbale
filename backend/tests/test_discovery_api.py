@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import docker
+import requests
 
 
 def _make_mock_container(
@@ -84,6 +85,25 @@ class TestListContainers:
         mock_client.close.assert_called_once()
 
     @patch("app.routers.discovery.docker.DockerClient")
+    def test_list_connection_error_degrades_to_empty(self, mock_docker_cls, client):
+        # The client constructs fine (daemon reachable at version-probe time) but
+        # the daemon dies before containers.list(); the SDK surfaces a raw
+        # requests.exceptions.ConnectionError, which is NOT a DockerException.
+        # Discovery must degrade to 200/empty (matching the DockerException path
+        # and the services router's edge-action mapping), not 500.
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.side_effect = requests.exceptions.ConnectionError(
+            "daemon went away mid-call"
+        )
+
+        resp = client.get("/api/discovery/containers")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"containers": [], "total": 0}
+        mock_client.close.assert_called_once()
+
+    @patch("app.routers.discovery.docker.DockerClient")
     def test_container_fields(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -121,6 +141,23 @@ class TestListContainers:
         mock_client.containers.list.return_value = [
             _make_mock_container(id="c1", name="myapp"),
             _make_mock_container(id="c2", name="edge_myapp", labels={"tailbale.managed": "true"}),
+        ]
+
+        resp = client.get("/api/discovery/containers?hide_managed=true")
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["containers"][0]["name"] == "myapp"
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_hides_main_orchestrator_container(self, mock_docker_cls, client):
+        """The tailBale orchestrator itself (labeled tailbale.main=true, per
+        docker-compose) must never be offered as an exposure candidate. It carries
+        tailbale.main, NOT tailbale.managed, so checking only the latter leaked it."""
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.return_value = [
+            _make_mock_container(id="c1", name="myapp"),
+            _make_mock_container(id="c2", name="tailbale", labels={"tailbale.main": "true"}),
         ]
 
         resp = client.get("/api/discovery/containers?hide_managed=true")
@@ -303,3 +340,39 @@ class TestListContainers:
         assert data["containers"][0]["ports"] == [
             {"container_port": "80", "host_port": "8080", "protocol": "tcp"}
         ]
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_uses_base_url_when_socket_path_configured(self, mock_docker_cls, client):
+        """A configured docker_socket_path is passed verbatim as base_url."""
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+        mock_client.containers.list.return_value = []
+
+        resp = client.get("/api/discovery/containers")
+
+        assert resp.status_code == 200
+        # Default setting is the local unix socket -> constructor (not from_env).
+        mock_docker_cls.assert_called_once_with(base_url="unix:///var/run/docker.sock")
+        mock_docker_cls.from_env.assert_not_called()
+
+    @patch("app.routers.discovery.docker.DockerClient")
+    def test_uses_from_env_when_socket_path_blank(self, mock_docker_cls, client, db_session):
+        """When docker_socket_path is cleared (operator opts into DOCKER_HOST),
+        discovery must resolve the daemon via from_env() so it honors DOCKER_HOST,
+        mirroring _validate_upstream / the edge managers. Passing base_url="" would
+        silently query the default local socket and ignore DOCKER_HOST."""
+        from app.settings_store import set_setting
+
+        set_setting(db_session, "docker_socket_path", "")
+        db_session.commit()
+
+        mock_from_env_client = MagicMock()
+        mock_docker_cls.from_env.return_value = mock_from_env_client
+        mock_from_env_client.containers.list.return_value = []
+
+        resp = client.get("/api/discovery/containers")
+
+        assert resp.status_code == 200
+        mock_docker_cls.from_env.assert_called_once_with()
+        mock_docker_cls.assert_not_called()  # base_url constructor must not be used
+        mock_from_env_client.close.assert_called_once()

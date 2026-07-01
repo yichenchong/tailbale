@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, waitFor, fireEvent } from "@testing-library/react"
-import { MemoryRouter } from "react-router-dom"
+import { renderRoute } from "./testkit"
 import App from "@/App"
 import { Sidebar } from "@/components/Sidebar"
 
@@ -13,12 +13,7 @@ beforeEach(() => {
 })
 
 describe("Sidebar", () => {
-  const renderSidebar = () =>
-    render(
-      <MemoryRouter initialEntries={["/"]}>
-        <Sidebar />
-      </MemoryRouter>
-    )
+  const renderSidebar = () => renderRoute(<Sidebar />, { initialEntries: ["/"] })
 
   it("renders the app name", () => {
     renderSidebar()
@@ -31,6 +26,7 @@ describe("Sidebar", () => {
     expect(screen.getByText("Services")).toBeInTheDocument()
     expect(screen.getByText("Discover")).toBeInTheDocument()
     expect(screen.getByText("Events")).toBeInTheDocument()
+    expect(screen.getByText("Orphan DNS")).toBeInTheDocument()
     expect(screen.getByText("Settings")).toBeInTheDocument()
   })
 
@@ -40,6 +36,7 @@ describe("Sidebar", () => {
     expect(screen.getByText("Services").closest("a")).toHaveAttribute("href", "/services")
     expect(screen.getByText("Discover").closest("a")).toHaveAttribute("href", "/discover")
     expect(screen.getByText("Events").closest("a")).toHaveAttribute("href", "/events")
+    expect(screen.getByText("Orphan DNS").closest("a")).toHaveAttribute("href", "/orphan-dns")
     expect(screen.getByText("Settings").closest("a")).toHaveAttribute("href", "/settings")
   })
 })

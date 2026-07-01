@@ -2,53 +2,45 @@ import contextlib
 import os
 import secrets
 import stat
-import tempfile
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
+
+from app.fsutil import atomic_write_text
 
 
 def _load_or_create_jwt_secret(data_dir: Path) -> str:
     """Read JWT secret from data dir, or generate and persist one on first run."""
     secret_file = data_dir / "secrets" / ".jwt_secret"
-    if secret_file.exists():
-        existing = secret_file.read_text(encoding="utf-8").strip()
-        if existing:
-            return existing
-        # A persisted-but-empty/corrupt file (e.g. truncated by a botched backup
-        # restore or a 0-byte volume mount) would yield an empty HMAC key, making
-        # every JWT trivially forgeable. Fall through to regenerate instead.
-    secret_file.parent.mkdir(parents=True, exist_ok=True)
-    secret = secrets.token_urlsafe(64)
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{secret_file.name}.",
-        suffix=".tmp",
-        dir=secret_file.parent,
-    )
-    tmp_file = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(secret)
-            f.flush()
-            os.fsync(f.fileno())
+        existing = secret_file.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        existing = ""
+    if existing:
         with contextlib.suppress(OSError):
-            os.chmod(tmp_file, stat.S_IRUSR | stat.S_IWUSR)
-        tmp_file.replace(secret_file)
-    except Exception:
-        with contextlib.suppress(OSError):
-            tmp_file.unlink()
-        raise
+            os.chmod(secret_file, stat.S_IRUSR | stat.S_IWUSR)
+        return existing
+    # A persisted-but-empty/corrupt file (e.g. truncated by a botched backup
+    # restore or a 0-byte volume mount) would yield an empty HMAC key, making
+    # every JWT trivially forgeable. Reading directly and catching
+    # FileNotFoundError (rather than an exists() pre-check) also closes the
+    # TOCTOU window a concurrent first-run writer would open. Fall through to
+    # regenerate instead.
+    secret_file.parent.mkdir(parents=True, exist_ok=True)
+    # Lock the secrets dir to owner-only the instant it is created so it is never
+    # world-listable in the window between this import-time creation and the later
+    # ensure_dirs() chmod. Best-effort: an exotic/overlay FS that rejects chmod
+    # must not crash startup.
+    with contextlib.suppress(OSError):
+        os.chmod(secret_file.parent, 0o700)
+    secret = secrets.token_urlsafe(64)
+    atomic_write_text(secret_file, secret, mode=stat.S_IRUSR | stat.S_IWUSR)
     return secret
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment / .env file."""
-
-    # General
-    base_domain: str = "example.com"
-    acme_email: str = "you@example.com"
-    reconcile_interval_seconds: int = 60
-    cert_renewal_window_days: int = 30
 
     # Paths
     data_dir: Path = Path("./data")
@@ -58,13 +50,21 @@ class Settings(BaseSettings):
     # If unset, defaults to data_dir (fine for non-containerised installs).
     host_data_dir: Path | None = None
 
-    # Docker
-    docker_socket: str = "unix:///var/run/docker.sock"
-
     # Auth
     jwt_secret: str = ""  # Auto-generated on first run; see _load_or_create_jwt_secret
-    jwt_expiry_hours: int = 24
-    cookie_secure: bool = False  # Set True in production with HTTPS
+    # ge=1: a 0/negative expiry makes every issued token already-expired on
+    # arrival (exp == now), silently breaking ALL logins. Unlike the rate-limit
+    # knobs below (clamped via max(1, ...) in the limiter) this value feeds JWT
+    # exp and the cookie max-age directly, with no downstream guard — so reject
+    # a non-positive setting loudly at startup.
+    jwt_expiry_hours: int = Field(default=24, ge=1)
+    cookie_secure: bool = False  # Force Secure flag even over HTTP. Auto-enabled when the request arrives over HTTPS (incl. X-Forwarded-Proto).
+
+    # Login brute-force protection. After `login_max_failures` consecutive
+    # failed logins from a client, further attempts are rejected with HTTP 429
+    # for `login_lockout_seconds`. A successful login resets the client's count.
+    login_max_failures: int = 5
+    login_lockout_seconds: int = 60
 
     # CORS. Empty disables CORS; explicit origins allow credentialed cross-origin requests.
     cors_origins: str = ""
@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8080
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     # Derived paths
     @property
@@ -106,6 +106,14 @@ class Settings(BaseSettings):
             self.tailscale_state_dir,
         ]:
             d.mkdir(parents=True, exist_ok=True)
+        # mkdir's mode is umask-masked, so the secrets dir can land at ~0755,
+        # letting a local host user enumerate which secret files exist (their
+        # contents stay 0600). Force owner-only on it with an explicit chmod.
+        # Best-effort like fsync_directory: an exotic/overlay FS that rejects
+        # the chmod must not crash startup. Other dirs are left untouched as
+        # they may be mounted broader for Caddy.
+        with contextlib.suppress(OSError):
+            os.chmod(self.secrets_dir, 0o700)
 
 
 settings = Settings()

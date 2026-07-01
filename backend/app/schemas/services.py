@@ -4,6 +4,67 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
+_HOSTNAME_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$"
+)
+
+
+def _validate_hostname(v: str) -> str:
+    """Validate hostname charset/structure plus RFC 1035 length limits.
+
+    The regex enforces lowercase DNS labels; the explicit length checks reject
+    hostnames that DNS/ACME would otherwise reject with an opaque error (the
+    hostname is also used verbatim as the on-disk cert directory name).
+    """
+    # fullmatch (not match): match() would let a trailing newline through because
+    # `$` also anchors before a final "\n" — and the hostname is used verbatim as
+    # the cert dir name and in the Caddyfile, so embedded control chars are unsafe.
+    if not _HOSTNAME_RE.fullmatch(v):
+        raise ValueError("Invalid hostname format")
+    if len(v) > 253:
+        raise ValueError("Hostname must not exceed 253 characters")
+    if any(len(label) > 63 for label in v.split(".")):
+        raise ValueError("Each hostname label must not exceed 63 characters")
+    return v
+
+
+_CONTAINER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
+
+
+def _validate_container_name(v: str) -> str:
+    """Validate an upstream container name against Docker's name charset.
+
+    The name is rendered RAW into the Caddyfile ``reverse_proxy <name>:<port>``
+    line, so an unconstrained value is a config-injection vector via the direct
+    API. Docker container names match ``[a-zA-Z0-9][a-zA-Z0-9_.-]*`` — this
+    accepts every legitimate name (e.g. ``nextcloud``, ``c123``, ``my-app_1.2``)
+    while rejecting any value carrying whitespace, newlines, ``;``, braces, or
+    quotes that could escape the directive.
+    """
+    # fullmatch (not match): match() would let a trailing newline through
+    # because `$` also anchors before a final "\n".
+    if not _CONTAINER_NAME_RE.fullmatch(v):
+        raise ValueError(
+            "Invalid container name: must match Docker's charset "
+            "'[a-zA-Z0-9][a-zA-Z0-9_.-]*'"
+        )
+    return v
+
+
+def _validate_caddy_snippet(v: str) -> str:
+    """Validate a rendered custom Caddy snippet for site-block containment.
+
+    The snippet-containment lexer lives in the edge subsystem; import it lazily
+    here so this schema (transport/contract) layer does not pull the 12KB edge
+    module in at import time. The dependency is deferred to the single moment a
+    snippet is actually validated, and only the stable ``validate_caddy_snippet``
+    facade is imported — never edge internals. Request-time 422 behavior is
+    identical to a module-level import (validation still runs during parsing).
+    """
+    from app.edge.caddy_snippet import validate_caddy_snippet
+
+    return validate_caddy_snippet(v)
+
 
 class ServiceCreate(BaseModel):
     """Request body for creating a new service exposure."""
@@ -29,9 +90,17 @@ class ServiceCreate(BaseModel):
     @field_validator("hostname")
     @classmethod
     def validate_hostname(cls, v: str) -> str:
-        if not re.match(r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$", v):
-            raise ValueError("Invalid hostname format")
-        return v
+        return _validate_hostname(v)
+
+    @field_validator("upstream_container_name")
+    @classmethod
+    def validate_upstream_container_name(cls, v: str) -> str:
+        return _validate_container_name(v)
+
+    @field_validator("custom_caddy_snippet")
+    @classmethod
+    def validate_custom_caddy_snippet(cls, v: str | None) -> str | None:
+        return _validate_caddy_snippet(v) if v is not None else v
 
 
 class ServiceUpdate(BaseModel):
@@ -70,11 +139,12 @@ class ServiceUpdate(BaseModel):
     @field_validator("hostname")
     @classmethod
     def validate_hostname(cls, v: str | None) -> str | None:
-        if v is not None and not re.match(
-            r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$", v
-        ):
-            raise ValueError("Invalid hostname format")
-        return v
+        return _validate_hostname(v) if v is not None else v
+
+    @field_validator("custom_caddy_snippet")
+    @classmethod
+    def validate_custom_caddy_snippet(cls, v: str | None) -> str | None:
+        return _validate_caddy_snippet(v) if v is not None else v
 
 
 class ServiceStatusResponse(BaseModel):
@@ -119,8 +189,6 @@ class ServiceResponse(BaseModel):
     created_at: str
     updated_at: str
 
-    model_config = {"from_attributes": True}
-
 
 class ServiceListResponse(BaseModel):
     services: list[ServiceResponse]
@@ -142,7 +210,6 @@ class DiscoveredContainer(BaseModel):
     ports: list[ContainerPortInfo]
     networks: list[str]
     labels: dict[str, str]
-
 
 
 class AppProfileResponse(BaseModel):

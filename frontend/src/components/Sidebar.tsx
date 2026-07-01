@@ -24,7 +24,16 @@ export function Sidebar() {
   const [version, setVersion] = useState<string | null>(null)
 
   useEffect(() => {
-    api.get<{ version: string }>("/version").then((r) => setVersion(r.version)).catch(() => {})
+    let active = true
+    api.meta
+      .version()
+      .then((r) => {
+        if (active) setVersion(r.version)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
   }, [])
 
   return (

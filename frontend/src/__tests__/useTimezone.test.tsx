@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, beforeAll, afterAll } from "vitest"
+import { describe, it, expect, vi, beforeEach, afterEach, beforeAll, afterAll } from "vitest"
 import { render, screen, act } from "@testing-library/react"
 import {
   useTimezone,
@@ -106,5 +106,66 @@ describe("backend timestamp parsing (non-UTC host)", () => {
     it("returns an empty string for unparseable input", () => {
       expect(formatDateTime("not-a-date", "UTC")).toBe("")
     })
+
+    it("falls back to a renderable string instead of throwing on an invalid tz", () => {
+      // Regression: toLocaleString throws a RangeError on a bogus IANA zone, so
+      // an unguarded formatter white-screens every timestamp during render.
+      expect(() => formatDateTime("2026-06-21T12:00:00Z", "Not/AZone")).not.toThrow()
+      expect(formatDateTime("2026-06-21T12:00:00Z", "Not/AZone")).not.toBe("")
+    })
+
+    it("keeps the explicit timezone authoritative over a bad options.timeZone", () => {
+      // Regression: the dedicated `timezone` arg must win over `options`, or a
+      // caller-supplied `options.timeZone` silently overrides both the
+      // configured zone AND the UTC safety net, forcing a raw-ISO fallback.
+      const withBadOption = formatDateTime("2026-06-21T12:00:00Z", "UTC", {
+        timeZone: "Not/AZone",
+      })
+      const plain = formatDateTime("2026-06-21T12:00:00Z", "UTC")
+      expect(withBadOption).toBe(plain)
+      // And it must be the formatted UTC string, not the raw ISO fallback.
+      expect(withBadOption).not.toBe("2026-06-21T12:00:00.000Z")
+    })
+  })
+})
+
+describe("useTimezone settings fetch", () => {
+  beforeEach(() => {
+    _resetTimezoneCache()
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it("does not let a late settings fetch clobber a newer explicit timezone", async () => {
+    // Hold the /api/settings response open so we control exactly when it lands.
+    let resolveFetch!: (value: unknown) => void
+    const pending = new Promise((res) => {
+      resolveFetch = res
+    })
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(pending))
+
+    // Mounting kicks off the (now in-flight) settings fetch because the cache is empty.
+    render(<TzProbe />)
+
+    // Meanwhile a newer value is set explicitly (e.g. the user saves settings).
+    act(() => {
+      setConfiguredTimezone("Asia/Tokyo")
+    })
+    expect(screen.getByTestId("tz").textContent).toBe("Asia/Tokyo")
+
+    // The stale fetch finally resolves with a DIFFERENT, older timezone. Pre-fix
+    // this called setConfiguredTimezone("UTC") and clobbered the explicit value.
+    await act(async () => {
+      resolveFetch({
+        ok: true,
+        json: () => Promise.resolve({ general: { timezone: "UTC" } }),
+      })
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    // The explicit value must survive; the late fetch must be ignored.
+    expect(screen.getByTestId("tz").textContent).toBe("Asia/Tokyo")
   })
 })

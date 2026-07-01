@@ -103,6 +103,13 @@ def _repository_path(image_name: str) -> str:
         image = image[:last_colon]
     return image
 
+def _repository_component_matches(component: str, pattern: str) -> bool:
+    return (
+        component == pattern
+        or component.startswith(f"{pattern}-")
+        or component.endswith(f"-{pattern}")
+    )
+
 
 def detect_profile(image_name: str) -> str | None:
     """Auto-detect an app profile from a Docker image name.
@@ -110,23 +117,24 @@ def detect_profile(image_name: str) -> str | None:
     Returns the profile key or None if no match.
     """
     repository = _repository_path(image_name)
+    components = repository.split("/")
     for key, profile in APP_PROFILES.items():
         if key == "generic":
             continue
         for pattern in profile["image_patterns"]:
-            if pattern in repository:
+            if any(_repository_component_matches(component, pattern) for component in components):
                 return key
     return None
 
 
 @router.get("", response_model=ProfilesResponse)
-async def list_profiles() -> ProfilesResponse:
+def list_profiles() -> ProfilesResponse:
     """List all available app profiles."""
     return ProfilesResponse(profiles=APP_PROFILES)
 
 
 @router.get("/detect", response_model=ProfileDetectionResponse)
-async def detect_profile_endpoint(image: str) -> ProfileDetectionResponse:
+def detect_profile_endpoint(image: str) -> ProfileDetectionResponse:
     """Auto-detect a profile from a Docker image name."""
     profile_key = detect_profile(image)
     return ProfileDetectionResponse(

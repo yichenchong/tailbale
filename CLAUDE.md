@@ -27,20 +27,20 @@ pip install -r requirements.txt -r requirements-dev.txt
 uvicorn app.main:app --reload --port 8080
 
 # Test (run from repo root or backend/)
-py -3.12 -m pytest
-py -3.12 -m pytest tests/test_foo.py  # single file
+python -m pytest
+python -m pytest tests/test_foo.py  # single file
 ```
 
 ### Docker
 ```bash
-docker compose -f docker-compose.dev.yml up           # Dev (hot reload)
-docker compose -f docker-compose.prod.yml up -d --build  # Production
+HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.dev.yml up           # Dev (hot reload)
+HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build  # Production
 ```
 
 ## Architecture
 
 ### Stack
-- **Backend**: Python 3.12 + FastAPI + SQLAlchemy 2.0 (SQLite WAL) + Docker SDK
+- **Backend**: Python 3.14 + FastAPI + SQLAlchemy 2.0 (SQLite WAL) + Docker SDK
 - **Frontend**: React 18 + Vite + TypeScript + Tailwind CSS v4 + React Router v7
 - **Edge containers**: Per-service Tailscale + Caddy image (built from `edge/Dockerfile`)
 - **Certs**: Lego CLI (ACME DNS-01 via Cloudflare), stored in `data/certs/`
@@ -55,11 +55,11 @@ docker compose -f docker-compose.prod.yml up -d --build  # Production
 | `auth.py` | JWT (HS256 cookie) + two-layer password hashing (SHA-256 + bcrypt) |
 | `models/` | 8 ORM models: Service, ServiceStatus, Certificate, DnsRecord, Event, Job, Setting, User |
 | `routers/` | 8 REST routers: auth, services, settings, discovery, events, dashboard, profiles, jobs |
-| `reconciler/` | **Core engine** — 14-step idempotent per-service reconciliation loop (60s cadence) |
+| `reconciler/` | **Core engine** — 14-step idempotent per-service reconciliation; full reconcile hourly + a lightweight 60s health sweep that escalates to a full reconcile on drift |
 | `edge/` | Edge container management (Caddy + Tailscale lifecycle) |
 | `certs/` | Certificate issuance and renewal (lego ACME) |
 | `adapters/` | Cloudflare DNS adapter, DNS record reconciliation |
-| `health/` | 11 health subchecks aggregated into service phase |
+| `health/` | 12 health subchecks aggregated into service phase |
 | `events/` | Event emission and storage |
 | `settings_store.py` | Key-value persistent config (wraps Setting model) |
 | `secrets.py` | Secret file management |
@@ -69,15 +69,15 @@ docker compose -f docker-compose.prod.yml up -d --build  # Production
 | Path | Purpose |
 |------|---------|
 | `App.tsx` | Router root — checks `/api/auth/status` to gate setup/login/app |
-| `pages/` | 12 pages: Dashboard, Services, ServiceDetail, Discover, Expose, Events, OrphanDns, Settings, Setup, Login, etc. |
+| `pages/` | 10 pages: Dashboard, Services, ServiceDetail, Discover, Expose, Events, OrphanDns, Settings, Setup, Login |
 | `components/` | Layout (sidebar + outlet), shared UI |
 | `lib/api.ts` | Fetch-based API client (`api.get/post/put/delete`), auto-redirects on 401 |
 
 ### Core Data Flow
 
-1. **Reconciler loop** (every 60s): For each enabled service, runs 14 idempotent steps — ensures Docker network, creates/starts the edge container, writes Caddyfile, issues/renews cert, reconciles DNS record, detects Tailscale IP, reloads Caddy, runs health checks, updates `ServiceStatus`.
+1. **Reconcile loop** (hourly by default, `reconcile_interval_seconds`): For each enabled service, runs the 14 idempotent steps — ensures Docker network, creates/starts the edge container, writes Caddyfile, issues/renews cert, reconciles DNS record, detects Tailscale IP, reloads Caddy, runs health checks, updates `ServiceStatus`. A separate lightweight **health sweep** (every 60s, `health_check_interval_seconds`) re-runs the health checks and escalates a drifting service to a full reconcile.
 
-2. **Health checks** (11 subchecks): Upstream container present & running, edge container state, Tailscale ready/IP present, cert present & not expiring, DNS record matches IP, Caddy config exists, HTTPS probe success. Result aggregates to phase: `healthy` / `warning` / `error` / `failed`.
+2. **Health checks** (12 subchecks): Upstream container present & running, edge container state, Tailscale ready/IP present, cert present & not expiring, DNS record matches IP, Caddy config exists, HTTPS probe success. `aggregate_status` returns one of `healthy` / `warning` / `error`. (The reconciler separately sets `pending` / `disabled` / `failed` on the service status outside the health aggregation.)
 
 3. **Edge container per service**: Isolated Docker network shared with upstream container. Caddy reverse-proxies to upstream via Docker DNS. TLS via mounted Let's Encrypt certs.
 
@@ -93,4 +93,4 @@ docker compose -f docker-compose.prod.yml up -d --build  # Production
 - Dynamic favicon (`public/`) turns green/red based on overall health
 
 ### Database Migrations
-Schema changes are applied as lightweight post-launch migrations in `database.py` (ADD COLUMN statements guarded by try/except). No migration framework — check existing pattern when adding columns.
+Schema changes are applied as lightweight post-launch migrations in `database.py::run_migrations` — inspection-guarded (via `inspect()`'s `has_table`/`get_columns`) `ADD COLUMN` for new nullable columns plus `CREATE INDEX IF NOT EXISTS`. Additive-only (no drops/renames/type changes/backfills); no migration framework — check the existing pattern when adding columns.

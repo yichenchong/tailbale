@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import docker.errors
+import pytest
 
 
 class TestCreateNetwork:
@@ -48,6 +49,42 @@ class TestCreateNetwork:
 
         create_network("edge_net_test", socket_path="tcp://localhost:2375")
         mock_cls.assert_called_with(base_url="tcp://localhost:2375")
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_recovers_from_concurrent_create_race(self, mock_cls):
+        """If another caller creates the network between our get and create
+        (modern daemons reject duplicate names with 409), recover by returning
+        the existing network instead of propagating the error."""
+        from app.edge.network_manager import create_network
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        existing = MagicMock(id="net_existing")
+        mock_client.networks.get.side_effect = [
+            docker.errors.NotFound("not found"),  # initial check: absent
+            existing,                              # post-race lookup: present
+        ]
+        mock_client.networks.create.side_effect = docker.errors.APIError(
+            "network with name edge_net_test already exists"
+        )
+
+        result = create_network("edge_net_test")
+        assert result == "net_existing"
+        assert mock_client.networks.get.call_count == 2
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_create_failure_without_existing_reraises(self, mock_cls):
+        """A genuine create failure (network still absent afterwards) surfaces
+        the original APIError rather than a confusing NotFound."""
+        from app.edge.network_manager import create_network
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_client.networks.get.side_effect = docker.errors.NotFound("not found")
+        mock_client.networks.create.side_effect = docker.errors.APIError("driver boom")
+
+        with pytest.raises(docker.errors.APIError, match="driver boom"):
+            create_network("edge_net_test")
 
 
 class TestRemoveNetwork:
@@ -201,6 +238,30 @@ class TestConnectContainer:
         mock_network.connect.assert_not_called()
 
     @patch("app.edge.network_manager.docker.DockerClient")
+    def test_connect_race_already_connected_is_idempotent(self, mock_cls):
+        from app.edge.network_manager import connect_container
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_client.networks.get.return_value = mock_network
+        mock_container = MagicMock()
+        mock_container.id = "container_123"
+        mock_container.attrs = {"NetworkSettings": {"Networks": {}}}
+        mock_client.containers.get.return_value = mock_container
+
+        def connect_then_report_connected(container):
+            mock_container.attrs = {"NetworkSettings": {"Networks": {"edge_net_test": {}}}}
+            raise docker.errors.APIError("endpoint already exists in network")
+
+        mock_network.connect.side_effect = connect_then_report_connected
+
+        result = connect_container("edge_net_test", "container_123")
+
+        assert result == "container_123"
+        mock_network.connect.assert_called_once_with(mock_container)
+
+    @patch("app.edge.network_manager.docker.DockerClient")
     def test_falls_back_to_container_name_when_id_is_stale(self, mock_cls):
         from app.edge.network_manager import connect_container
 
@@ -220,6 +281,24 @@ class TestConnectContainer:
 
         assert result == "resolved_456"
         mock_network.connect.assert_called_once_with(mock_container)
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_connect_reraises_unexpected_api_error(self, mock_cls):
+        """An APIError that is NOT an 'already connected/exists' race must
+        propagate — it is a real failure, not idempotent recovery."""
+        from app.edge.network_manager import connect_container
+
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_network = MagicMock()
+        mock_client.networks.get.return_value = mock_network
+        mock_container = MagicMock()
+        mock_container.attrs = {"NetworkSettings": {"Networks": {}}}
+        mock_client.containers.get.return_value = mock_container
+        mock_network.connect.side_effect = docker.errors.APIError("500 server error: boom")
+
+        with pytest.raises(docker.errors.APIError):
+            connect_container("edge_net_test", "container_123")
 
 
 class TestEnsureNetwork:

@@ -2,7 +2,7 @@
 
 **Stack:** Python 3.12 (FastAPI) + SQLAlchemy/SQLite | React + TypeScript (Vite 8) | lego (ACME) | Tailscale official base image + Caddy
 
-Reference: [unraid-edge-orchestrator-detailed-spec.md](./unraid-edge-orchestrator-detailed-spec.md)
+Reference: [edge-orchestrator-detailed-spec.md](./edge-orchestrator-detailed-spec.md)
 
 ---
 
@@ -326,7 +326,7 @@ Reference: [unraid-edge-orchestrator-detailed-spec.md](./unraid-edge-orchestrato
   - Entrypoint: tailscaled (userspace) → tailscale up → caddy run, with graceful shutdown
   - No hardcoded secrets — all config injected via env vars and mounted files
   - Registry push deferred until user is ready
-- [x] **9.3** Unraid deployment documentation (`DEPLOY.md`)
+- [x] **9.3** Deployment documentation (`DEPLOY.md`)
   - Docker Compose deployment (recommended path)
   - Manual `docker run` alternative
   - Volume mount reference table
@@ -411,7 +411,7 @@ Reference: [unraid-edge-orchestrator-detailed-spec.md](./unraid-edge-orchestrato
 | Backend language | Python 3.12 (FastAPI) | User preference, good async support |
 | Frontend | React 18 + TypeScript (Vite 8) | Wizard-style UI, large ecosystem |
 | CSS | Tailwind CSS 4 + shadcn/ui utilities | Utility-first, pre-built accessible components |
-| Database | SQLAlchemy 2.0 + SQLite | Single-file DB, good for Unraid appdata |
+| Database | SQLAlchemy 2.0 + SQLite | Single-file DB, good for self-hosted appdata |
 | ACME | Shell out to `lego` | Simpler than native ACME lib for v1 |
 | Edge base image | `tailscale/tailscale` | Less maintenance for TS updates |
 | Edge reverse proxy | Caddy | File-based TLS, simple config, auto-reload |

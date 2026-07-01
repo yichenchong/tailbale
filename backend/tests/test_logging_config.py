@@ -49,6 +49,30 @@ def test_configure_logging_honors_log_level_env(monkeypatch):
         root.setLevel(original_level)
 
 
+def test_configure_logging_falls_back_to_info_for_non_int_level_attr(monkeypatch):
+    # LOG_LEVEL is resolved via getattr(logging, NAME); a name that exists but is
+    # not an int level (e.g. BASIC_FORMAT, a str) must not become the root level.
+    monkeypatch.setenv("LOG_LEVEL", "BASIC_FORMAT")
+    root = logging.getLogger()
+    original_level = root.level
+    try:
+        configure_logging()
+        assert root.level == logging.INFO
+    finally:
+        root.setLevel(original_level)
+
+
+def test_configure_logging_falls_back_to_info_for_unknown_level(monkeypatch):
+    monkeypatch.setenv("LOG_LEVEL", "verbose")
+    root = logging.getLogger()
+    original_level = root.level
+    try:
+        configure_logging()
+        assert root.level == logging.INFO
+    finally:
+        root.setLevel(original_level)
+
+
 def test_configure_logging_updates_uvicorn_access_handler_without_propagation():
     logger = logging.getLogger("uvicorn.access")
     original_handlers = list(logger.handlers)
