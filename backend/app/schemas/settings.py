@@ -17,7 +17,12 @@ class GeneralSettingsUpdate(_SettingsUpdateModel):
     acme_email: str | None = Field(default=None, min_length=1)
     reconcile_interval_seconds: int | None = Field(default=None, ge=1)
     health_check_interval_seconds: int | None = Field(default=None, ge=1)
-    cert_renewal_window_days: int | None = Field(default=None, ge=1)
+    # Upper bound (~27 years) keeps `datetime.now() + timedelta(days=window)` well
+    # clear of the OverflowError ceiling that would 500 the manual /renew-cert path
+    # (dashboard/reconciler/renewal consumers guard defensively; this stops the bad
+    # value at write). event_retention_days keeps its ge=1-only contract (its consumer
+    # has defined saturating overflow semantics).
+    cert_renewal_window_days: int | None = Field(default=None, ge=1, le=10000)
     event_retention_days: int | None = Field(default=None, ge=1)
     timezone: str | None = Field(default=None, min_length=1)
     developer_mode: bool | None = None

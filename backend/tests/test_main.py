@@ -199,3 +199,94 @@ class TestLifespanBackgroundTasks:
         asyncio.run(_drive())
         # ...and every still-running loop must have been cancelled (no leak).
         assert sorted(cancelled) == ["health", "reconcile", "retention"]
+
+
+class TestServiceErrorHandler:
+    """The single central @app.exception_handler(ServiceError) (AR7) must map
+    EVERY service-layer domain exception to its canonical status + {"detail": ...}
+    the routers used to raise inline, and must NOT intercept a plain HTTPException
+    (whose own status/detail must still flow through Starlette's default handler).
+
+    The per-endpoint status codes are exercised indirectly by the router API
+    suites; these pin the generic handler itself (bare-base default, subclass
+    fan-out via MRO, and the HTTPException-passthrough invariant) so a future
+    edit that re-registers it for the wrong type — or accidentally widens it to
+    Exception — fails here.
+    """
+
+    @staticmethod
+    def _client():
+        from fastapi import FastAPI, HTTPException
+        from fastapi.testclient import TestClient
+
+        from app.main import _service_error_handler
+        from app.services.errors import (
+            HostnameChangeError,
+            HostnameInUse,
+            HostnameSuffixInvalid,
+            ServiceDisabled,
+            ServiceError,
+            ServiceNotFound,
+            TailscaleAuthKeyMissing,
+        )
+
+        app = FastAPI()
+        app.add_exception_handler(ServiceError, _service_error_handler)
+
+        @app.get("/notfound")
+        def _nf():
+            raise ServiceNotFound()
+
+        @app.get("/disabled")
+        def _d():
+            raise ServiceDisabled()
+
+        @app.get("/inuse")
+        def _i():
+            raise HostnameInUse("a.example.com")
+
+        @app.get("/suffix")
+        def _s():
+            raise HostnameSuffixInvalid("a.foo", "example.com")
+
+        @app.get("/tskey")
+        def _t():
+            raise TailscaleAuthKeyMissing()
+
+        @app.get("/hc502")
+        def _h():
+            raise HostnameChangeError("boom502", status_code=502)
+
+        @app.get("/base")
+        def _b():
+            raise ServiceError()
+
+        @app.get("/http418")
+        def _http():
+            raise HTTPException(status_code=418, detail="teapot")
+
+        return TestClient(app, raise_server_exceptions=False)
+
+    @pytest.mark.parametrize(
+        ("path", "code", "detail"),
+        [
+            ("/notfound", 404, "Service not found"),
+            ("/disabled", 409, "Service is disabled"),
+            ("/inuse", 409, "Hostname 'a.example.com' is already in use"),
+            ("/suffix", 422, "Hostname 'a.foo' must end with '.example.com'"),
+            ("/tskey", 400, "Tailscale auth key not configured"),
+            ("/hc502", 502, "boom502"),
+            ("/base", 400, "Service operation failed"),
+        ],
+    )
+    def test_maps_each_service_error_to_canonical_response(self, path, code, detail):
+        resp = self._client().get(path)
+        assert resp.status_code == code
+        assert resp.json() == {"detail": detail}
+
+    def test_plain_httpexception_is_not_swallowed(self):
+        """A non-ServiceError HTTPException must keep its own status/detail — the
+        ServiceError handler must not intercept it (they are disjoint hierarchies)."""
+        resp = self._client().get("/http418")
+        assert resp.status_code == 418
+        assert resp.json() == {"detail": "teapot"}

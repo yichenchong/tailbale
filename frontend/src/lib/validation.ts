@@ -103,10 +103,18 @@ export function isUpstreamPort(value: string | number): boolean {
  * `ServiceUpdate`). The leading `.trim()` matches that server-side strip so a
  * whitespace-only name fails `min_length` on both sides, and a value over 128
  * chars gives instant feedback rather than a server 422 after submit.
+ *
+ * Length is measured in Unicode CODE POINTS (`[...trimmed].length`), NOT
+ * `String.length` (UTF-16 code units), because the backend counts with Python
+ * `len()` which is code-point-based. Using `.length` would over-count any name
+ * containing astral characters (emoji, some CJK) — a 65-emoji name is 65 code
+ * points (backend-accepted) but 130 UTF-16 units, so `.length > 128` would
+ * false-reject a name the server happily takes (a doomed-block instead of a
+ * doomed-request). Code-point counting keeps both sides in lockstep.
  */
 export function isServiceName(value: string): boolean {
-  const trimmed = value.trim()
-  return trimmed.length >= 1 && trimmed.length <= 128
+  const length = [...value.trim()].length
+  return length >= 1 && length <= 128
 }
 
 /**

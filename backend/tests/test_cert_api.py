@@ -99,6 +99,42 @@ class TestRenewCertEndpoint:
         assert mock_process.call_args.kwargs == {"force": True}
 
     @patch("app.certs.renewal_task.process_service_cert")
+    def test_renew_cert_huge_window_days_does_not_overflow(
+        self, mock_process, client, db_session
+    ):
+        # A legacy / directly-set cert_renewal_window_days can exceed the schema
+        # ceiling (writes now bound it at le=10000, but old rows or a direct DB
+        # write are not revalidated). A value this large overflows
+        # timedelta(days=window) inside the far-from-expiry check, which used to
+        # 500 the manual renew path. The fix treats the overflow as "not far
+        # healthy" (unbounded window means renew eagerly) and proceeds normally.
+        from app import settings_store
+
+        svc_id = _create_service(client).json()["id"]
+        # Healthy, far-from-expiry, no prior failure — enters the far_healthy
+        # branch where timedelta(days=window_days) is evaluated.
+        _upsert_cert(
+            db_session, svc_id, "nextcloud.example.com",
+            expires_at=datetime.now(UTC) + timedelta(days=60),
+        )
+        # 10**9 days exceeds timedelta's 999_999_999-day ceiling, so
+        # timedelta(days=window_days) raises OverflowError when constructed.
+        settings_store.set_setting(db_session, "cert_renewal_window_days", str(10**9))
+        db_session.commit()
+
+        resp = client.post(f"/api/services/{svc_id}/renew-cert")
+
+        # Without the OverflowError guard this is a generic 500; with it the
+        # overflow falls through to a real renewal (far_healthy=False).
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["performed"] is True
+        assert data["needs_force"] is False
+        mock_process.assert_called_once()
+        assert mock_process.call_args.kwargs == {"force": True}
+
+    @patch("app.certs.renewal_task.process_service_cert")
     def test_renew_cert_near_expiry_no_force_performs(self, mock_process, client, db_session):
         svc_id = _create_service(client).json()["id"]
         _upsert_cert(

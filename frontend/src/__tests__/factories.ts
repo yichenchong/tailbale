@@ -18,6 +18,9 @@ export interface ServiceStatusFixture {
   last_reconciled_at: string | null
   health_checks: Record<string, boolean> | null
   cert_expires_at: string | null
+  probe_retry_at: string | null
+  probe_retry_attempt: number | null
+  last_probe_at: string | null
 }
 
 /** Default status mirrors ServiceDetail's inline `mockService.status`. */
@@ -36,6 +39,9 @@ export function makeServiceStatus(
       cert_present: true,
     },
     cert_expires_at: "2026-08-01T00:00:00",
+    probe_retry_at: null,
+    probe_retry_attempt: null,
+    last_probe_at: null,
     ...overrides,
   }
 }
@@ -99,8 +105,11 @@ export interface GeneralSettingsFixture {
   base_domain: string
   acme_email: string
   reconcile_interval_seconds: number
+  health_check_interval_seconds: number
   cert_renewal_window_days: number
+  event_retention_days: number
   timezone: string
+  developer_mode: boolean
 }
 
 export interface SettingsFixture {
@@ -118,10 +127,15 @@ export interface SettingsFixture {
 }
 
 /**
- * Default settings mirror the identical `mockSettings` literal shared verbatim
- * by ExposeService.test.tsx and OrphanDns.test.tsx (the "unconfigured" shape
- * those pages fetch for base-domain/hostname preview). SettingsPage.test.tsx
- * uses a different, fully-configured shape and keeps its own literal.
+ * Default settings mirror the "unconfigured" shape ExposeService.test.tsx and
+ * OrphanDns.test.tsx fetch for base-domain/hostname preview. The `general`
+ * section carries the FULL {@link GeneralSettingsFixture} — every field the real
+ * `GET /settings` `general` block returns (see api.ts `GeneralSettings`),
+ * including `health_check_interval_seconds`/`event_retention_days`/
+ * `developer_mode` — so a SettingsPage test built on this factory feeds each
+ * numeric field a real value (a missing one would make `isPositiveInt(String(
+ * undefined))` fail and wrongly disable Save). SettingsPage.test.tsx currently
+ * keeps its own fully-configured literal; this stays a drop-in for it too.
  */
 export function makeSettings(overrides: Partial<SettingsFixture> = {}): SettingsFixture {
   return {
@@ -129,8 +143,11 @@ export function makeSettings(overrides: Partial<SettingsFixture> = {}): Settings
       base_domain: "example.com",
       acme_email: "a@b.com",
       reconcile_interval_seconds: 60,
+      health_check_interval_seconds: 60,
       cert_renewal_window_days: 30,
+      event_retention_days: 30,
       timezone: "UTC",
+      developer_mode: false,
     },
     cloudflare: { zone_id: "", token_configured: false },
     tailscale: {

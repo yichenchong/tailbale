@@ -596,3 +596,75 @@ class TestDashboardHotPathIndexes:
 
     def test_event_created_at_indexed(self):
         assert "created_at" in self._indexed_columns(Event)
+
+
+# ---------------------------------------------------------------------------
+# AR13: run_migrations must BACK-FILL the hot-path indexes onto a legacy DB
+# (create_all only adds them to fresh DBs). Guards the model<->migration
+# pairing: dropping the _INDEX_MIGRATIONS entry for a model-declared index
+# would leave every existing production DB silently unindexed, and the
+# declaration-only tests above would not catch it.
+# ---------------------------------------------------------------------------
+
+
+class TestDashboardHotPathIndexBackfill:
+    """A DB created before AR13 has the tables but not the expires_at / phase
+    indexes. run_migrations must add them (idempotently) so upgraded installs
+    get the same indexes a fresh create_all produces."""
+
+    @staticmethod
+    def _legacy_engine():
+        # Build the two tables WITHOUT the AR13 indexes, mirroring a pre-AR13 DB.
+        from sqlalchemy import create_engine, text
+
+        eng = create_engine("sqlite:///:memory:")
+        with eng.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE certificates (service_id TEXT PRIMARY KEY, hostname TEXT, "
+                "expires_at DATETIME, last_renewed_at DATETIME, last_failure TEXT, "
+                "next_retry_at DATETIME, updated_at DATETIME)"
+            ))
+            conn.execute(text(
+                "CREATE TABLE service_status (service_id TEXT PRIMARY KEY, phase TEXT, "
+                "message TEXT, tailscale_ip TEXT, edge_container_id TEXT, health_checks TEXT, "
+                "last_reconciled_at DATETIME, probe_retry_at DATETIME, "
+                "probe_retry_attempt INTEGER, last_probe_at DATETIME, updated_at DATETIME)"
+            ))
+        return eng
+
+    @staticmethod
+    def _indexed_columns(eng, table):
+        from sqlalchemy import inspect
+
+        return {
+            col
+            for index in inspect(eng).get_indexes(table)
+            for col in index["column_names"]
+        }
+
+    def test_backfills_certificate_expires_at_index(self):
+        from app.database import run_migrations
+
+        eng = self._legacy_engine()
+        assert "expires_at" not in self._indexed_columns(eng, "certificates")
+        run_migrations(eng)
+        assert "expires_at" in self._indexed_columns(eng, "certificates")
+
+    def test_backfills_service_status_phase_index(self):
+        from app.database import run_migrations
+
+        eng = self._legacy_engine()
+        assert "phase" not in self._indexed_columns(eng, "service_status")
+        run_migrations(eng)
+        assert "phase" in self._indexed_columns(eng, "service_status")
+
+    def test_backfill_is_idempotent(self):
+        from app.database import run_migrations
+
+        eng = self._legacy_engine()
+        run_migrations(eng)
+        # A second pass must not raise (CREATE INDEX IF NOT EXISTS) and must leave
+        # the indexes intact.
+        run_migrations(eng)
+        assert "expires_at" in self._indexed_columns(eng, "certificates")
+        assert "phase" in self._indexed_columns(eng, "service_status")

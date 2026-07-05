@@ -41,6 +41,8 @@ def find_edge_container(
     client: docker.DockerClient,
     service_id: str,
     edge_container_name: str,
+    *,
+    tolerate_lookup_errors: bool = False,
 ) -> docker.models.containers.Container | None:
     """Locate an edge container on an already-open *client*.
 
@@ -48,6 +50,16 @@ def find_edge_container(
     at a different service), then falls back to a label search so Docker
     ID/name changes still resolve. This is the single lookup implementation
     shared by the edge lifecycle helpers and the health checker.
+
+    The named-lookup step normally swallows only ``NotFound`` and lets any other
+    error (APIError / connection) propagate, so a lifecycle caller never mistakes
+    a transient daemon fault for "container absent" and creates a duplicate. The
+    health checker, however, must stay resilient: a transient non-``NotFound``
+    fault on ``containers.get`` should still fall through to the label search
+    rather than degrade the service to unhealthy. Pass
+    ``tolerate_lookup_errors=True`` (health path only) to restore that broader
+    tolerance; an error raised by the label ``list`` itself still propagates in
+    both modes (that path was always broad-then-propagate).
     """
     try:
         container = client.containers.get(edge_container_name)
@@ -61,6 +73,14 @@ def find_edge_container(
         )
     except docker.errors.NotFound:
         pass
+    except Exception:
+        if not tolerate_lookup_errors:
+            raise
+        logger.debug(
+            "Named lookup of %s failed transiently; falling back to label search",
+            edge_container_name,
+            exc_info=True,
+        )
 
     # Fallback: search by label. This also handles Docker ID/name changes.
     containers = client.containers.list(

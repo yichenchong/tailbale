@@ -48,7 +48,14 @@ def renew_cert(db: Session, svc: Service, *, force: bool) -> dict:
         expires_at = cert.expires_at
         expires_utc = as_utc(expires_at)
         window_days = settings_store.get_positive_int_setting(db, "cert_renewal_window_days")
-        far_healthy = expires_utc - datetime.now(UTC) > timedelta(days=window_days)
+        # Schema bounds cert_renewal_window_days at write, but a legacy/directly-set
+        # huge value would overflow `timedelta(days=window_days)` and 500 this
+        # manual-renew endpoint. An unbounded window means "renew eagerly", so an
+        # overflow is correctly NOT far_healthy (fall through to a real renewal).
+        try:
+            far_healthy = expires_utc - datetime.now(UTC) > timedelta(days=window_days)
+        except OverflowError:
+            far_healthy = False
 
     if far_healthy and not force:
         return {

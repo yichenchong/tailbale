@@ -618,6 +618,96 @@ class TestRunHealthChecks:
         assert checks["dns_record_present"] is True
         assert set(checks) == set(CRITICAL_CHECKS) | set(WARNING_CHECKS)
 
+class TestEdgeLookupResilienceOnTransientDaemonFault:
+    """HE-R2-1 regression: the health path must stay resilient to a *transient*
+    non-``NotFound`` Docker fault on the named ``containers.get`` lookup.
+
+    Pre-refactor, health's own ``_find_edge_container_for_health`` caught a broad
+    ``Exception`` on the named lookup, then fell through to the label search, so a
+    momentary daemon hiccup (APIError / connection reset) that still leaves the
+    container discoverable by its ``tailbale.service_id`` label reported the edge
+    accurately. AR16/AR7 routed health through the shared ``find_edge_container``,
+    which (correctly, for the edge *lifecycle* callers) only swallows ``NotFound``
+    and re-raises everything else. That silently narrowed the health path: a
+    transient APIError now degrades a perfectly-running service to ``error``.
+
+    The fix opts the health callsites into ``tolerate_lookup_errors=True`` so the
+    broad-then-label-fallback behavior is restored for health only, while the
+    lifecycle callers keep propagating (no duplicate-container footgun). A
+    ``NotFound`` still means "absent"; only the label search can recover it.
+    """
+
+    def _svc(self):
+        svc = Service(
+            name="T", upstream_container_id="c1", upstream_container_name="t",
+            upstream_scheme="http", upstream_port=80, hostname="t.example.com",
+            base_domain="example.com", edge_container_name="edge_t",
+            network_name="n", ts_hostname="ts",
+        )
+        svc.id = "svc-transient"
+        return svc
+
+    def _client_named_faults_label_finds(self, container):
+        """Docker client whose named ``get`` raises a transient APIError but whose
+        label ``list`` still finds *container*."""
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.APIError(
+            "500 Server Error: daemon busy"
+        )
+        client.containers.list.return_value = [container]
+        return client
+
+    def test_check_edge_recovers_via_label_search(self):
+        from app.health.health_checker import _check_edge
+
+        running = MagicMock()
+        running.status = "running"
+        client = self._client_named_faults_label_finds(running)
+
+        # Fail-before: the shared lookup re-raised the APIError, _check_edge's own
+        # except returned (False, False) — a running edge misreported as absent.
+        assert _check_edge(client, self._svc()) == (True, True)
+        client.containers.list.assert_called_once()
+
+    def test_check_tailscale_recovers_via_label_search(self):
+        from app.health.health_checker import _check_tailscale
+
+        edge = MagicMock()
+        edge.status = "running"
+        exec_result = MagicMock()
+        exec_result.exit_code = 0
+        exec_result.output = json.dumps(
+            {"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.5"]}}
+        ).encode()
+        edge.exec_run.return_value = exec_result
+        client = self._client_named_faults_label_finds(edge)
+
+        ready, ip_present, ip = _check_tailscale(client, self._svc(), edge_running=True)
+        assert (ready, ip_present, ip) == (True, True, "100.64.0.5")
+
+    def test_check_https_probe_recovers_via_label_search(self):
+        from app.health.health_checker import _check_https_probe
+
+        edge = MagicMock()
+        edge.status = "running"
+        # _check_https_probe unpacks ``exit_code, output = container.exec_run(...)``,
+        # so exec_run must return a 2-tuple (unlike _check_tailscale, which reads
+        # ``.exit_code``/``.output`` attributes off the result object).
+        edge.exec_run.return_value = (0, b"200")
+        client = self._client_named_faults_label_finds(edge)
+
+        assert _check_https_probe(self._svc(), "100.64.0.5", client) is True
+
+    def test_notfound_is_not_masked_by_tolerance(self):
+        # Tolerance only broadens the *named* lookup; a genuine NotFound with no
+        # label match still means the edge is absent (not a false positive).
+        from app.health.health_checker import _check_edge
+
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.NotFound("no such container")
+        client.containers.list.return_value = []
+        assert _check_edge(client, self._svc()) == (False, False)
+
 
 class TestCertNotExpiringSubcheck:
     """Direct coverage of the HEV4 ``_cert_not_expiring_subcheck`` contract: the

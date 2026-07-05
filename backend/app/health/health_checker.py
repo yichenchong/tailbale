@@ -187,7 +187,9 @@ def _check_upstream_network(client: docker.DockerClient, service: Service) -> bo
 
 def _check_edge(client: docker.DockerClient, service: Service) -> tuple[bool, bool]:
     try:
-        container = find_edge_container(client, service.id, service.edge_container_name)
+        container = find_edge_container(
+            client, service.id, service.edge_container_name, tolerate_lookup_errors=True
+        )
         if container is None:
             return False, False
         return True, container.status == "running"
@@ -202,7 +204,9 @@ def _check_tailscale(
     if not edge_running:
         return False, False, None
     try:
-        container = find_edge_container(client, service.id, service.edge_container_name)
+        container = find_edge_container(
+            client, service.id, service.edge_container_name, tolerate_lookup_errors=True
+        )
         if container is None:
             return False, False, None
         result = container.exec_run(
@@ -354,7 +358,9 @@ def _check_https_probe(
         return False
 
     try:
-        container = find_edge_container(client, service.id, service.edge_container_name)
+        container = find_edge_container(
+            client, service.id, service.edge_container_name, tolerate_lookup_errors=True
+        )
         if container is None:
             _log_https_probe_failure(
                 service,

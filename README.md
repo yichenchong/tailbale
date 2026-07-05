@@ -116,6 +116,7 @@ npx vitest run
 │       ├── auth.py              # Password hashing, JWT, auth dependency
 │       ├── models/              # SQLAlchemy models (7 tables + users)
 │       ├── routers/             # API endpoints
+│       ├── services/            # Service lifecycle layer (crud/edge_ops/cert_ops/errors)
 │       ├── edge/                # Edge container + network management
 │       ├── certs/               # Certificate issuance + renewal
 │       ├── adapters/            # Cloudflare DNS adapter

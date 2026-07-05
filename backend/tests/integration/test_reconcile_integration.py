@@ -14,7 +14,9 @@ network_manager / container_manager / health_checker code paths.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 from app import secrets, settings_store
 from app.models.dns_record import DnsRecord
@@ -248,3 +250,105 @@ class TestDirectReconcileMarkersAndEvents:
         assert kinds.get("edge_started", 0) == 2
         # reconcile_completed is emitted once per pass.
         assert kinds.get("reconcile_completed", 0) == 2
+
+
+class _FakeCFResponse:
+    """Minimal stand-in for an ``httpx2.Response`` (only what cloudflare_adapter reads)."""
+
+    def __init__(self, payload: dict, status_code: int = 200) -> None:
+        self._payload = payload
+        self.status_code = status_code
+        self.text = json.dumps(payload)
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class TestReconcileExercisesRealDnsPath:
+    """RC-R2-2: close the seam's DNS gap.
+
+    The other integration tests never set CLOUDFLARE_TOKEN, so ``_ensure_dns``
+    short-circuits and the REAL ``reconcile_dns`` create/update path — plus the
+    new ``global_ops_lock`` wrapping around it — is never exercised by the seam
+    despite its docstring advertising a full ``router -> service -> reconciler ->
+    edge/DNS`` chain. This drives the actual DNS reconcile by patching ONLY the
+    httpx2 HTTP edge (the true external boundary, exactly as the seam patches only
+    the Docker client), and asserts the OBSERVABLE result: the persisted DnsRecord
+    row and the emitted dns_created event.
+    """
+
+    def test_reconcile_creates_cloudflare_record_and_persists_row(
+        self, db_session, fake_docker, tmp_data_dir
+    ):
+        secrets.write_secret(secrets.TAILSCALE_AUTH_KEY, "tskey-auth-integration-xyz")
+        secrets.write_secret(secrets.CLOUDFLARE_TOKEN, "cf-token-integration")
+        settings_store.set_setting(db_session, "cf_zone_id", "zone-int-1")
+        db_session.commit()
+        write_valid_cert(tmp_data_dir / "certs", "direct.example.com")
+        fake_docker.register_upstream("upstream123", "nextcloud")
+
+        svc = Service(
+            name="DnsDirect",
+            upstream_container_id="upstream123",
+            upstream_container_name="nextcloud",
+            upstream_scheme="http",
+            upstream_port=80,
+            hostname="direct.example.com",
+            base_domain="example.com",
+            edge_container_name="edge_dnsdirect",
+            network_name="edge_net_dnsdirect",
+            ts_hostname="edge-dnsdirect",
+        )
+        db_session.add(svc)
+        db_session.flush()
+        db_session.add(ServiceStatus(service_id=svc.id, phase="pending"))
+        db_session.commit()
+
+        # Fake Cloudflare edge: no existing A record (empty list) -> reconcile_dns
+        # takes the create branch. Only the httpx2 verbs are patched.
+        created_id = "cf-rec-created-1"
+
+        def _fake_get(url, **kwargs):
+            # list_a_records: no records yet for this hostname.
+            return _FakeCFResponse({"success": True, "result": [], "result_info": {"total_count": 0}})
+
+        def _fake_post(url, **kwargs):
+            # create_a_record: echo back a record carrying our IP + comment.
+            body = kwargs.get("json") or {}
+            return _FakeCFResponse(
+                {
+                    "success": True,
+                    "result": {
+                        "id": created_id,
+                        "content": body.get("content"),
+                        "comment": body.get("comment"),
+                        "name": body.get("name"),
+                    },
+                }
+            )
+
+        with (
+            patch("httpx2.get", side_effect=_fake_get),
+            patch("httpx2.post", side_effect=_fake_post),
+        ):
+            result = reconcile_service(db_session, svc, socket_path=FAKE_SOCKET)
+
+        # DNS made the aggregate reach healthy (record present + matches IP).
+        assert result["phase"] == "healthy", result
+        assert result["tailscale_ip"] == FAKE_TS_IP
+
+        # --- Observable: the real reconcile_dns create path persisted a row ---
+        db_session.expire_all()
+        dns_row = db_session.get(DnsRecord, svc.id)
+        assert dns_row is not None
+        assert dns_row.record_id == created_id
+        assert dns_row.value == FAKE_TS_IP
+        assert dns_row.hostname == "direct.example.com"
+
+        # --- Observable: the create emitted a dns_created event ---
+        kinds = _events_by_kind(db_session, svc.id)
+        assert kinds.get("dns_created", 0) == 1
+
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.health_checks["dns_record_present"] is True
+        assert status.health_checks["dns_matches_ip"] is True

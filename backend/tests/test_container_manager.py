@@ -181,6 +181,56 @@ class TestFindEdgeContainerPublic:
             all=True, filters={"label": "tailbale.service_id=svc_123"}
         )
 
+    def test_non_notfound_lookup_error_propagates_by_default(self):
+        # Lifecycle callers (the default) must NOT mistake a transient daemon
+        # fault for "container absent": a non-NotFound error on the named lookup
+        # propagates instead of silently falling through to the label search
+        # (which could resolve a stale/other container and drive a duplicate).
+        from app.edge.container_manager import find_edge_container
+
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.APIError("500 daemon boom")
+
+        with pytest.raises(docker.errors.APIError, match="daemon boom"):
+            find_edge_container(client, "svc_123", "edge_test")
+        client.containers.list.assert_not_called()
+
+    def test_tolerate_lookup_errors_falls_back_to_label_search(self):
+        # Health path (tolerate_lookup_errors=True): a transient non-NotFound
+        # fault on the named lookup must degrade to the label search (matching the
+        # pre-refactor _find_edge_container_for_health broad-catch), so a blip does
+        # not spuriously report the edge missing and escalate it unhealthy.
+        from app.edge.container_manager import find_edge_container
+
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.APIError("500 daemon boom")
+        labelled = MagicMock()
+        client.containers.list.return_value = [labelled]
+
+        result = find_edge_container(
+            client, "svc_123", "edge_test", tolerate_lookup_errors=True
+        )
+
+        assert result is labelled
+        client.containers.list.assert_called_once_with(
+            all=True, filters={"label": "tailbale.service_id=svc_123"}
+        )
+
+    def test_tolerate_lookup_errors_does_not_swallow_label_list_error(self):
+        # Even in tolerant mode, an error from the label ``list`` itself still
+        # propagates: the pre-refactor helper only broadened the named-get step
+        # and let a failing fallback surface (a truly-down daemon is not health).
+        from app.edge.container_manager import find_edge_container
+
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.APIError("named boom")
+        client.containers.list.side_effect = docker.errors.APIError("list boom")
+
+        with pytest.raises(docker.errors.APIError, match="list boom"):
+            find_edge_container(
+                client, "svc_123", "edge_test", tolerate_lookup_errors=True
+            )
+
 
 class TestFindEdgeContainerForUse:
     """Connection failures must propagate, not be masked by a fallback re-search."""

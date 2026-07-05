@@ -182,4 +182,15 @@ describe("isServiceName (mirrors Field(min_length=1, max_length=128)+strip, back
     // Surrounding whitespace is stripped first, so 128 real chars + padding pass.
     expect(isServiceName(`  ${"a".repeat(128)}  `)).toBe(true)
   })
+
+  it("counts length in Unicode code points, not UTF-16 units, matching Python len()", () => {
+    // Backend `Field(max_length=128)` counts with Python `len()` (code points).
+    // An emoji is one code point but two UTF-16 units, so a `.length`-based
+    // check would false-reject a name the server accepts. 65 emoji = 65 code
+    // points (backend-accepted) but 130 UTF-16 units.
+    expect("😀".repeat(65).length).toBe(130) // guards the UTF-16 assumption
+    expect(isServiceName("😀".repeat(65))).toBe(true)
+    expect(isServiceName("😀".repeat(128))).toBe(true) // exactly 128 code points
+    expect(isServiceName("😀".repeat(129))).toBe(false) // 129 code points > max
+  })
 })

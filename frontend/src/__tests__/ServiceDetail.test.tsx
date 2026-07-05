@@ -923,4 +923,87 @@ describe("ServiceDetail page", () => {
     // After updating, the edge reports up-to-date and the button/banner clear.
     await waitFor(() => expect(screen.queryByText("Update Edge")).not.toBeInTheDocument())
   })
+
+  it("reseeds the edit form from the new service after navigating away from an open edit form", async () => {
+    // Guards the useServiceDetail id-change seed race: navigating with an edit
+    // form OPEN must (a) close the form and (b) let the next service's response
+    // reseed the fields — i.e. the editingRef guard must have flipped back to
+    // false before the new id's detail response lands. If the guard stayed
+    // stuck true, re-opening Edit would show the PREVIOUS service's values.
+    const alpha = { ...mockService, id: "svc_alpha", name: "Alpha", upstream_port: 80 }
+    const beta = { ...mockService, id: "svc_beta", name: "Beta", upstream_port: 8443 }
+    const edgeVersion = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    vi.stubGlobal("fetch", vi.fn((url: string) => {
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVersion) })
+      }
+      const svc = String(url) === "/api/services/svc_beta" ? beta : alpha
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(svc) })
+    }))
+
+    const { default: ServiceDetail } = await import("@/pages/ServiceDetail")
+    render(
+      <MemoryRouter initialEntries={["/services/svc_alpha"]}>
+        <Link to="/services/svc_beta">Go beta</Link>
+        <Routes>
+          <Route path="/services/:id" element={<ServiceDetail />} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => expect(screen.getByText("Alpha")).toBeInTheDocument())
+    // Open the edit form on Alpha and dirty the name so a stale reseed would be
+    // visible; the field is seeded from svc_alpha.
+    fireEvent.click(screen.getByText("Edit"))
+    expect(screen.getByLabelText("Name")).toHaveValue("Alpha")
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "DirtyLocalEdit" } })
+
+    // Navigate to Beta while the form is open.
+    fireEvent.click(screen.getByText("Go beta"))
+    await waitFor(() => expect(screen.getByText("Beta")).toBeInTheDocument())
+
+    // The form closed on navigation (editing reset); re-open it. The fields MUST
+    // reflect Beta, never the stale Alpha edit ("DirtyLocalEdit") nor "Alpha".
+    fireEvent.click(screen.getByText("Edit"))
+    expect(screen.getByLabelText("Name")).toHaveValue("Beta")
+    expect(screen.getByLabelText("Upstream Port")).toHaveValue(8443)
+  })
+
+  it("allows saving a name valid by code points but >128 UTF-16 units (emoji), and sends it", async () => {
+    // Regression (post lib/validation code-point migration): handleSave and the
+    // inline hint must delegate to the shared code-point isServiceName, not a
+    // raw String.length (UTF-16) check. A 65-emoji name is 65 code points
+    // (backend-accepted) but 130 UTF-16 units — the old `.length > 128` guard
+    // would block the PUT and flash a false "too long" error, disagreeing with
+    // nameValid (which enables Save).
+    const emojiName = "\u{1F600}".repeat(65) // 65 code points, 130 UTF-16 units
+    expect(emojiName.length).toBeGreaterThan(128) // UTF-16 units
+    expect([...emojiName].length).toBe(65) // code points
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }) })
+      }
+      if (init?.method === "PUT") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ ...mockService, name: emojiName }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Edit"))
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: emojiName } })
+
+    // No false "too long" hint, and Save stays enabled.
+    expect(screen.queryByText("Service name must be 128 characters or fewer.")).not.toBeInTheDocument()
+    expect(screen.getByText("Save")).toBeEnabled()
+
+    fireEvent.click(screen.getByText("Save"))
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true)
+    )
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")
+    expect(JSON.parse(String(putCall?.[1]?.body))).toMatchObject({ name: emojiName })
+  })
 })

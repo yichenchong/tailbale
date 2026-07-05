@@ -642,6 +642,53 @@ class TestAtomicCopyCerts:
         cur = dest_dir / "current"
         assert cert_key_pair_matches(cur / "fullchain.pem", cur / "privkey.pem") is True
 
+    def test_refuses_to_publish_unparseable_cert(self, tmp_path):
+        """CT1 guard: an UNPARSEABLE fullchain must NEVER be published, even
+        beside a real private key. This is a distinct guard from the mismatch
+        check because ``cert_key_pair_matches`` treats an unparseable cert as
+        "nothing to verify" and returns True (lenient contract), so the mismatch
+        guard alone would let the corrupt cert through. Publishing it would point
+        ``current`` at a cert Caddy cannot load AND the success-path prune would
+        delete the last-good generation, taking TLS down with no fallback. The
+        new generation must be discarded and any existing ``current`` untouched.
+        """
+        import os
+
+        from app.certs.cert_manager import _atomic_copy_certs, cert_key_pair_matches
+
+        dest_dir = tmp_path / "dest"
+
+        # A first, valid generation is live.
+        good_cert = tmp_path / "good_cert.pem"
+        good_key = tmp_path / "good_key.pem"
+        _write_cert_key_pair(good_cert, good_key)
+        _atomic_copy_certs(good_cert, good_key, dest_dir)
+        good_gen = os.readlink(dest_dir / "current")
+
+        # Attempt to publish an UNPARSEABLE cert beside a real key. The lenient
+        # mismatch check would pass (unparseable cert -> "nothing to verify" ->
+        # True), so only the expiry-readability guard can reject it.
+        bad_cert = tmp_path / "bad_cert.pem"
+        bad_key = tmp_path / "bad_key.pem"
+        bad_cert.write_bytes(
+            b"-----BEGIN CERTIFICATE-----\nNOT-A-REAL-CERT\n-----END CERTIFICATE-----\n"
+        )
+        _, key_pem = _real_pem_pair()
+        bad_key.write_bytes(key_pem)
+        # Sanity: the mismatch guard is blind to this corruption.
+        assert cert_key_pair_matches(bad_cert, bad_key) is True
+
+        with pytest.raises(RuntimeError, match="unparseable"):
+            _atomic_copy_certs(bad_cert, bad_key, dest_dir)
+
+        # current still resolves to the original good generation (no last-good
+        # generation was pruned), and the corrupt generation was discarded.
+        assert os.readlink(dest_dir / "current") == good_gen
+        cur = dest_dir / "current"
+        assert cert_key_pair_matches(cur / "fullchain.pem", cur / "privkey.pem") is True
+        gens = [p.name for p in dest_dir.iterdir() if p.name.startswith("gen-")]
+        assert gens == [good_gen]
+
     def test_failed_swap_keeps_previous_current(self, tmp_path, monkeypatch):
         """If a crash strikes before the symlink swap, the old current stays
         valid - the new generation is simply discarded (atomic swap)."""

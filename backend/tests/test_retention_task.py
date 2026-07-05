@@ -156,3 +156,104 @@ class TestRetentionLoop:
         # backed off with the configured daily interval.
         assert calls["purge"] == 1
         assert retention_mod.RETENTION_INTERVAL_SECONDS in calls["sleeps"]
+
+    def test_happy_path_startup_delay_then_daily_interval_and_per_pass_reread(
+        self, monkeypatch
+    ):
+        # HE-R2: the run_periodic migration must preserve the documented loop
+        # contract (module docstring): a 15s startup delay, then a successful
+        # purge each pass followed by a sleep of exactly RETENTION_INTERVAL_SECONDS,
+        # with the retention window RE-READ every pass (an operator change takes
+        # effect on the next sweep). Without this, a refactor that hoisted the
+        # setting read out of the per-pass work — or drifted the startup delay /
+        # interval — would silently break behavior no other test pins.
+        import asyncio
+
+        purge_calls = {"n": 0}
+
+        def fake_purge() -> int:
+            # Stands in for run_retention_purge, which opens a session and RE-READS
+            # event_retention_days every call; count invocations to prove per-pass.
+            purge_calls["n"] += 1
+            return purge_calls["n"]
+
+        monkeypatch.setattr(retention_mod, "run_retention_purge", fake_purge)
+
+        class _Stop(Exception):
+            pass
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            # sleeps: [startup, interval(pass1), interval(pass2)] -> stop on 3rd.
+            if len(sleeps) >= 3:
+                raise _Stop
+
+        monkeypatch.setattr(retention_mod.asyncio, "sleep", fake_sleep)
+
+        with pytest.raises(_Stop):
+            asyncio.run(retention_mod.retention_loop())
+
+        # Startup delay is exactly 15s, before any purge ran.
+        assert sleeps[0] == 15
+        # Two full successful passes: purge re-invoked each pass (per-pass re-read).
+        assert purge_calls["n"] == 2
+        # Each successful pass sleeps the fixed daily interval (never a backoff).
+        assert sleeps[1] == retention_mod.RETENTION_INTERVAL_SECONDS
+        assert sleeps[2] == retention_mod.RETENTION_INTERVAL_SECONDS
+
+    def test_huge_window_loop_does_not_back_off_forever(self, monkeypatch):
+        # HE1 guard, verified at the LOOP level (not just purge): an absurd but
+        # write-valid event_retention_days (ge=1, no upper bound) makes the cutoff
+        # overflow. purge_old_events swallows the OverflowError and returns 0, so
+        # the loop must treat the pass as a normal success — sleep the daily
+        # interval, NOT enter the error branch and back off forever (the exact
+        # failure the guard exists to prevent).
+        import asyncio
+
+        calls = {"purge": 0}
+
+        def fake_purge() -> int:
+            calls["purge"] += 1
+            # Mirrors run_retention_purge -> purge_old_events on a huge window: the
+            # OverflowError guard returns 0 BEFORE the db_write_section, so the db
+            # is never touched and None is a safe stand-in.
+            return purge_old_events(None, retention_days=10**9)
+
+        monkeypatch.setattr(retention_mod, "run_retention_purge", fake_purge)
+
+        class _Stop(Exception):
+            pass
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(seconds):
+            sleeps.append(seconds)
+            if len(sleeps) >= 2:  # [startup, interval-after-success]
+                raise _Stop
+
+        monkeypatch.setattr(retention_mod.asyncio, "sleep", fake_sleep)
+
+        with pytest.raises(_Stop):
+            asyncio.run(retention_mod.retention_loop())
+
+        assert calls["purge"] == 1
+        # Success path: post-pass sleep is the normal interval (not an error backoff
+        # that would be identical here — but crucially the loop did NOT crash and
+        # the OverflowError never surfaced to the loop's error branch).
+        assert sleeps[1] == retention_mod.RETENTION_INTERVAL_SECONDS
+
+    def test_cancellation_propagates_out_of_loop(self, monkeypatch):
+        # Graceful shutdown: a CancelledError raised during the loop (here from the
+        # startup sleep) must propagate so the task terminates cleanly — never be
+        # swallowed by the generic error/back-off branch.
+        import asyncio
+
+        async def cancel_on_startup(seconds):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(retention_mod.asyncio, "sleep", cancel_on_startup)
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(retention_mod.retention_loop())

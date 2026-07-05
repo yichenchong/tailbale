@@ -72,6 +72,54 @@ class TestDashboardSummary:
         assert data["services"]["warning"] == 0
         assert data["services"]["error"] == 0
 
+    def test_phase_aggregate_folds_error_and_failed_and_excludes_other_phases(
+        self, client, db_session
+    ):
+        # AR13 (ST-R2): the GROUP BY aggregate must bucket exactly like the old
+        # per-service Python loop. 'healthy'/'warning' map 1:1; BOTH the current
+        # 'error' phase and the legacy 'failed' phase fold into `error`; any
+        # other phase (e.g. an in-progress 'provisioning') counts toward `total`
+        # only, never a status bucket. A regression dropping the error/failed
+        # fold, or mis-bucketing a non-status phase, passes every other
+        # dashboard test — this pins it.
+        _create_service(db_session, "H", phase="healthy")
+        _create_service(db_session, "W", phase="warning")
+        _create_service(db_session, "E", phase="error")       # literal error
+        _create_service(db_session, "F", phase="failed")      # legacy -> error
+        _create_service(db_session, "P", phase="provisioning")  # non-bucketed
+
+        data = client.get("/api/dashboard/summary").json()
+        assert data["services"]["total"] == 5
+        assert data["services"]["healthy"] == 1
+        assert data["services"]["warning"] == 1
+        assert data["services"]["error"] == 2  # error + failed folded together
+
+    def test_huge_cert_window_does_not_500_the_dashboard(self, client, db_session):
+        # ST-R2-3 regression (cross-flagged by HE-R2): cert_renewal_window_days
+        # has no write-time upper bound (schema ge=1 only, by design — same as
+        # event_retention_days). An absurdly large stored value pushes
+        # `datetime.now(UTC) + timedelta(days=window)` past the max
+        # representable date -> OverflowError -> the whole /dashboard/summary
+        # 500s. The consumer must clamp (matching events/retention_task.py), so
+        # an unbounded horizon flags every cert instead of crashing.
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session, "Overflow")
+        db_session.add(Certificate(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            expires_at=datetime.now(UTC) + timedelta(days=90),
+        ))
+        set_setting(db_session, "cert_renewal_window_days", str(10**9))
+        db_session.commit()
+
+        resp = client.get("/api/dashboard/summary")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Unbounded horizon -> the cert is within range and flagged.
+        assert len(data["expiring_certs"]) == 1
+        assert data["expiring_certs"][0]["service_name"] == "Overflow"
+
     def test_expiring_certs(self, client, db_session):
         svc = _create_service(db_session, "Expiring")
         cert = Certificate(

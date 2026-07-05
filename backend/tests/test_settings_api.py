@@ -126,6 +126,41 @@ class TestUpdateGeneral:
         assert data["base_domain"] == "example.com"
         assert data["acme_email"] == "admin@example.com"
 
+    def test_base_domain_mixed_case_stored_not_flagged_as_change(self, client, db_session):
+        # ST-R2-1 regression: the guard must compare base_domain
+        # case-insensitively. A deployment predating the normalize_base_domain
+        # validator can hold a mixed-case stored value; the frontend reads it
+        # back and echoes it on save, the schema lowercases it, and a raw
+        # comparison would see a spurious "change" and 409-lock the whole
+        # /general section. DNS is case-insensitive, so re-submitting the same
+        # domain (differing only in case) MUST 200, even with services present.
+        from app.settings_store import set_setting
+
+        created = client.post("/api/services", json={
+            "name": "Existing",
+            "upstream_container_id": "abc123",
+            "upstream_container_name": "existing",
+            "upstream_scheme": "http",
+            "upstream_port": 80,
+            "hostname": "existing.example.com",
+            "base_domain": "example.com",
+        })
+        assert created.status_code == 201
+
+        # Simulate a legacy mixed-case stored base_domain (pre-normalize).
+        set_setting(db_session, "base_domain", "Example.COM")
+        db_session.commit()
+
+        resp = client.put("/api/settings/general", json={
+            "base_domain": "example.com",  # same domain, schema-normalized
+            "acme_email": "admin@example.com",
+        })
+
+        assert resp.status_code == 200
+        data = resp.json()["general"]
+        assert data["base_domain"] == "example.com"
+        assert data["acme_email"] == "admin@example.com"
+
     def test_update_multiple_fields(self, client):
         resp = client.put("/api/settings/general", json={
             "base_domain": "new.com",
@@ -174,6 +209,30 @@ class TestUpdateGeneral:
         settings = client.get("/api/settings").json()
         assert settings["general"]["reconcile_interval_seconds"] == 3600
         assert settings["general"]["cert_renewal_window_days"] == 30
+
+    @pytest.mark.parametrize("above_bound", [10001, 9_999_999])
+    def test_rejects_cert_renewal_window_above_upper_bound(self, client, above_bound):
+        # A cert_renewal_window_days larger than the schema ceiling (le=10000)
+        # would feed timedelta(days=window) toward its OverflowError limit and
+        # 500 the manual /renew-cert path, so the write is rejected up front.
+        resp = client.put(
+            "/api/settings/general", json={"cert_renewal_window_days": above_bound}
+        )
+        assert resp.status_code == 422
+
+        # The out-of-range value is never persisted; the default is preserved.
+        settings = client.get("/api/settings").json()
+        assert settings["general"]["cert_renewal_window_days"] == 30
+
+    @pytest.mark.parametrize("in_range", [30, 10000])
+    def test_accepts_cert_renewal_window_within_bounds(self, client, in_range):
+        # The inclusive upper bound (10000) and an ordinary value must still be
+        # accepted and persisted — the new ceiling must not reject legal windows.
+        resp = client.put(
+            "/api/settings/general", json={"cert_renewal_window_days": in_range}
+        )
+        assert resp.status_code == 200
+        assert resp.json()["general"]["cert_renewal_window_days"] == in_range
 
     def test_rejects_empty_general_strings(self, client):
         resp = client.put("/api/settings/general", json={"base_domain": ""})

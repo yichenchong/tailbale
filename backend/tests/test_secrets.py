@@ -121,3 +121,21 @@ class TestSecretStorage:
                 write_secret(bad_name, "value")
             with pytest.raises(ValueError):
                 delete_secret(bad_name)
+
+    def test_read_secret_treats_directory_path_as_unset(self, tmp_data_dir):
+        """A Docker bind-mount whose host source path is missing is materialized
+        as an empty DIRECTORY at the secret's path. The old is_file() guard read
+        that as "not configured" (None); the direct-read refactor must preserve
+        that — a directory must NOT surface as an uncaught IsADirectoryError that
+        500s the GET /settings dashboard (via _secret_configured)."""
+        (tmp_data_dir / "secrets" / "cloudflare_token").mkdir()
+        assert read_secret("cloudflare_token") is None
+
+    def test_delete_secret_treats_directory_path_as_absent(self, tmp_data_dir):
+        """delete_secret on a path that is a directory (missing bind-mount source)
+        must return False like the old is_file() guard, not raise
+        IsADirectoryError. The directory itself is left untouched."""
+        secret_dir = tmp_data_dir / "secrets" / "cloudflare_token"
+        secret_dir.mkdir()
+        assert delete_secret("cloudflare_token") is False
+        assert secret_dir.is_dir()

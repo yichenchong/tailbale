@@ -1001,6 +1001,8 @@ describe("SettingsPage", () => {
 describe("SettingsPage tab dirty-state guards", () => {
   const general = mockSettings.general
   const cloudflare = mockSettings.cloudflare
+  const tailscale = mockSettings.tailscale
+  const docker = mockSettings.docker
   const paths = mockSettings.paths
 
   it("keeps an edited field when a background refresh pushes new props (GeneralTab)", async () => {
@@ -1166,6 +1168,120 @@ describe("SettingsPage tab dirty-state guards", () => {
     expect(screen.getByDisplayValue("custom/generated")).toBeInTheDocument()
     expect(screen.getByDisplayValue("srv/certs")).toBeInTheDocument()
     expect(screen.queryByDisplayValue("srv/generated")).not.toBeInTheDocument()
+  })
+
+  it("guards an edited Tailscale field on refresh while an untouched one updates (TailscaleTab)", async () => {
+    // TailscaleTab tracks two fields (control_url + default_ts_hostname_prefix)
+    // through useDirtyForm. A mis-wired extract/bind key (e.g. binding the wrong
+    // field, or dropping one from `extract`) would let a background refresh
+    // clobber a live edit or fail to adopt an untouched server change — the exact
+    // regression the hook was extracted to prevent. Drive the real component.
+    const { TailscaleTab } = await import("@/pages/settings/TailscaleTab")
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const { rerender } = render(
+      <TailscaleTab settings={tailscale} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+
+    // Edit ONLY the hostname prefix; leave control_url untouched.
+    fireEvent.change(screen.getByDisplayValue("edge"), { target: { value: "user-prefix" } })
+
+    rerender(
+      <TailscaleTab
+        settings={{ ...tailscale, control_url: "https://server.example.com", default_ts_hostname_prefix: "server-prefix" }}
+        onSave={onSave}
+        onTest={() => {}}
+        saving={false}
+        testing={false}
+        testResult={null}
+      />
+    )
+
+    // Edited prefix keeps the user value; untouched control_url adopts the server value.
+    expect(screen.getByDisplayValue("user-prefix")).toBeInTheDocument()
+    expect(screen.queryByDisplayValue("server-prefix")).not.toBeInTheDocument()
+    expect(screen.getByDisplayValue("https://server.example.com")).toBeInTheDocument()
+  })
+
+  it("keeps the typed secret keys and edited control URL when a Tailscale save rejects", async () => {
+    // Auth/API keys are write-only state (never seeded from settings) and must be
+    // retained on a failed save so the user can retry, while the dirty control_url
+    // must not be clobbered by a subsequent background refresh.
+    const { TailscaleTab } = await import("@/pages/settings/TailscaleTab")
+    const onSave = vi.fn().mockRejectedValue(new Error("save failed"))
+    const { rerender } = render(
+      <TailscaleTab settings={tailscale} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+
+    fireEvent.change(screen.getByDisplayValue("https://controlplane.tailscale.com"), { target: { value: "https://edited.example.com" } })
+    fireEvent.change(screen.getByPlaceholderText("tskey-auth-..."), { target: { value: "tskey-auth-secret" } })
+    fireEvent.change(screen.getByPlaceholderText("tskey-api-..."), { target: { value: "tskey-api-secret" } })
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save"))
+    })
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({ control_url: "https://edited.example.com", auth_key: "tskey-auth-secret", api_key: "tskey-api-secret" })
+    )
+
+    // Failed save retains the secrets for a retry.
+    expect(screen.getByPlaceholderText("tskey-auth-...")).toHaveValue("tskey-auth-secret")
+    expect(screen.getByPlaceholderText("tskey-api-...")).toHaveValue("tskey-api-secret")
+
+    // And a background refresh must not clobber the still-dirty control URL.
+    rerender(
+      <TailscaleTab settings={{ ...tailscale, control_url: "https://server.example.com" }} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+    expect(screen.getByDisplayValue("https://edited.example.com")).toBeInTheDocument()
+    expect(screen.queryByDisplayValue("https://server.example.com")).not.toBeInTheDocument()
+  })
+
+  it("clears the Tailscale secret keys after a successful save while adopting the server value", async () => {
+    const { TailscaleTab } = await import("@/pages/settings/TailscaleTab")
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const { rerender } = render(
+      <TailscaleTab settings={tailscale} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+
+    fireEvent.change(screen.getByPlaceholderText("tskey-auth-..."), { target: { value: "tskey-auth-secret" } })
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save"))
+    })
+
+    // Secret cleared on success (existing write-only behavior preserved).
+    expect(screen.getByPlaceholderText("tskey-auth-...")).toHaveValue("")
+
+    // Dirty cleared: a server-normalized prefix is now reflected on refresh.
+    rerender(
+      <TailscaleTab settings={{ ...tailscale, default_ts_hostname_prefix: "normalized-prefix" }} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+    expect(screen.getByDisplayValue("normalized-prefix")).toBeInTheDocument()
+  })
+
+  it("guards an edited Docker socket path on refresh and adopts a server change once saved (DockerTab)", async () => {
+    // DockerTab tracks its single socket_path field through useDirtyForm.
+    const { DockerTab } = await import("@/pages/settings/DockerTab")
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    const { rerender } = render(
+      <DockerTab settings={docker} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+
+    fireEvent.change(screen.getByDisplayValue("unix:///var/run/docker.sock"), { target: { value: "tcp://user:2375" } })
+
+    // A background refresh must NOT clobber the live edit.
+    rerender(
+      <DockerTab settings={{ ...docker, socket_path: "tcp://server:2375" }} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+    expect(screen.getByDisplayValue("tcp://user:2375")).toBeInTheDocument()
+    expect(screen.queryByDisplayValue("tcp://server:2375")).not.toBeInTheDocument()
+
+    // After a successful save clears dirty, the server-normalized value is adopted.
+    await act(async () => {
+      fireEvent.click(screen.getByText("Save"))
+    })
+    expect(onSave).toHaveBeenCalledWith({ socket_path: "tcp://user:2375" })
+    rerender(
+      <DockerTab settings={{ ...docker, socket_path: "unix:///normalized.sock" }} onSave={onSave} onTest={() => {}} saving={false} testing={false} testResult={null} />
+    )
+    expect(screen.getByDisplayValue("unix:///normalized.sock")).toBeInTheDocument()
   })
 })
 

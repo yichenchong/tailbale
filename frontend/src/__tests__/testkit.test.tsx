@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { screen } from "@testing-library/react"
 import { useParams, useLocation } from "react-router-dom"
 import { renderRoute, mockApi, jsonOk, jsonError, pendingFetch } from "./testkit"
-import { makeService, makeSettings, makeEvent, makeContainer, makeJob } from "./factories"
+import { makeService, makeServiceStatus, makeSettings, makeEvent, makeContainer, makeJob } from "./factories"
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -84,6 +84,39 @@ describe("testkit", () => {
     expect(makeService({ name: "Other" }).name).toBe("Other")
     expect(makeSettings({ setup_complete: true }).setup_complete).toBe(true)
     expect(makeJob({ status: "failed" }).status).toBe("failed")
+  })
+
+  it("makeSettings.general carries every real GeneralSettings field (no undefined that breaks isPositiveInt)", () => {
+    // Divergence guard: the real GET /settings general block (api.ts
+    // GeneralSettings) has these 8 fields. A missing numeric field would make a
+    // SettingsPage test's isPositiveInt(String(undefined)) fail and wrongly
+    // disable Save, silently passing a "Save disabled" assertion.
+    const general = makeSettings().general
+    expect(Object.keys(general).sort()).toEqual(
+      [
+        "acme_email",
+        "base_domain",
+        "cert_renewal_window_days",
+        "developer_mode",
+        "event_retention_days",
+        "health_check_interval_seconds",
+        "reconcile_interval_seconds",
+        "timezone",
+      ].sort(),
+    )
+    expect(typeof general.health_check_interval_seconds).toBe("number")
+    expect(typeof general.event_retention_days).toBe("number")
+    expect(typeof general.developer_mode).toBe("boolean")
+  })
+
+  it("makeServiceStatus carries the probe fields the real ServiceStatus returns", () => {
+    // Real ServiceStatus (api.ts) always returns these (null when idle). Omitting
+    // them from the fixture would make a HealthChecksPanel probe-retry test read
+    // undefined instead of null and silently render the wrong branch.
+    const status = makeServiceStatus()
+    expect(status).toHaveProperty("probe_retry_at", null)
+    expect(status).toHaveProperty("probe_retry_attempt", null)
+    expect(status).toHaveProperty("last_probe_at", null)
   })
 
   it("mockApi installs as a global fetch stub for a real fetch call", async () => {

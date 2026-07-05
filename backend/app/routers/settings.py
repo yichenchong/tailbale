@@ -155,7 +155,12 @@ def _build_response(db: Session) -> AllSettingsResponse:
     )
 
 def _reject_base_domain_change_with_services(db: Session, new_domain: str) -> None:
-    if new_domain == get_setting(db, "base_domain"):
+    # Compare case-insensitively: DNS names are case-insensitive, the incoming
+    # value is already lowercased by GeneralSettingsUpdate.normalize_base_domain,
+    # and a legacy deployment predating that validator can hold a mixed-case
+    # stored value. Comparing raw would flag an unchanged domain as a change and
+    # 409-lock the whole /general section on upgrade.
+    if new_domain.lower() == get_setting(db, "base_domain").lower():
         return
 
     from app.models.service import Service

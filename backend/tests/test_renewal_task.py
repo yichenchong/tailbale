@@ -683,3 +683,112 @@ class TestCertRenewalDbPaths:
         lego_dir = call_args[0][4] if len(call_args[0]) > 4 else call_args.kwargs.get("lego_dir")
         assert str(cert_dir) == str(Path("/custom/certs") / svc.hostname)
         assert str(lego_dir) == str(Path("/custom/certs") / ".lego")
+
+
+# ---------------------------------------------------------------------------
+# The async background loop (AR17: cert_renewal_loop refactored onto
+# run_periodic). These pin the cadence the refactor must preserve: a 10s
+# startup delay, a fixed 24h (86400s) interval, and an error backoff that
+# reuses that same interval (no on_error). Cancellation must propagate.
+# ---------------------------------------------------------------------------
+
+
+class TestCertRenewalLoop:
+    def test_wires_run_periodic_with_daily_cadence(self):
+        """cert_renewal_loop must hand run_periodic the exact cadence the daily
+        scan relies on: startup_delay=10, a fixed 86400s interval, its own logger,
+        and NO on_error (so an error backs off the same 86400s interval). A silent
+        drift here (e.g. 86400 -> 3600) would change how often the app contacts
+        Let's Encrypt without any other test noticing."""
+        import asyncio
+
+        from app.certs import renewal_task
+
+        captured = {}
+
+        async def fake_run_periodic(**kwargs):
+            captured.update(kwargs)
+
+        with patch.object(renewal_task, "run_periodic", fake_run_periodic):
+            asyncio.run(renewal_task.cert_renewal_loop())
+
+        assert captured["startup_delay"] == 10
+        assert captured["interval_fn"]() == 86400
+        assert captured["logger"] is renewal_task.logger
+        # No custom error backoff: run_periodic falls back to interval_fn() on
+        # error, matching the pre-refactor fixed 86400s sleep-after-failure.
+        assert captured.get("on_error") is None
+
+    def test_work_runs_scan_off_thread(self):
+        """The work callable must run run_renewal_scan (off the event loop via
+        asyncio.to_thread) exactly once per pass."""
+        import asyncio
+
+        from app.certs import renewal_task
+
+        captured = {}
+
+        async def fake_run_periodic(**kwargs):
+            captured.update(kwargs)
+
+        with (
+            patch.object(renewal_task, "run_periodic", fake_run_periodic),
+            patch.object(renewal_task, "run_renewal_scan", return_value=3) as mock_scan,
+        ):
+            asyncio.run(renewal_task.cert_renewal_loop())
+            # Drive one pass of the captured work callable.
+            asyncio.run(captured["work"]())
+
+        mock_scan.assert_called_once_with()
+
+    def test_startup_then_scan_then_interval_and_cancels_cleanly(self, monkeypatch):
+        """End-to-end through the real run_periodic: a 10s startup sleep, one
+        scan, then the 86400s interval sleep, and a clean CancelledError on
+        shutdown."""
+        import asyncio
+
+        from app.certs import renewal_task
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+            # startup (1st) then the post-scan interval (2nd); cancel to break out.
+            if len(sleeps) >= 2:
+                raise asyncio.CancelledError()
+
+        monkeypatch.setattr(renewal_task.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(renewal_task, "run_renewal_scan", MagicMock(return_value=2))
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(renewal_task.cert_renewal_loop())
+
+        # 10s startup delay, one scan pass, then the 24h interval.
+        assert sleeps == [10, 86400]
+
+    def test_scan_error_backs_off_full_interval(self, monkeypatch):
+        """A scan that raises must be logged and retried on the SAME fixed 86400s
+        cadence (no shorter error backoff), matching pre-refactor behavior."""
+        import asyncio
+
+        from app.certs import renewal_task
+
+        sleeps: list[float] = []
+
+        async def fake_sleep(secs):
+            sleeps.append(secs)
+            if len(sleeps) >= 2:
+                raise asyncio.CancelledError()
+
+        monkeypatch.setattr(renewal_task.asyncio, "sleep", fake_sleep)
+        monkeypatch.setattr(
+            renewal_task,
+            "run_renewal_scan",
+            MagicMock(side_effect=RuntimeError("scan boom")),
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(renewal_task.cert_renewal_loop())
+
+        # startup, then the error backoff which defaults to interval_fn() = 86400.
+        assert sleeps == [10, 86400]

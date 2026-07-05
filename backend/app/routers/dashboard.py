@@ -47,7 +47,16 @@ def dashboard_summary(db: Session = Depends(get_db)):
     # use, so the dashboard attention list tracks the actual renewal policy
     # instead of a hard-coded 30 days.
     window_days = get_positive_int_setting(db, "cert_renewal_window_days")
-    threshold = datetime.now(UTC) + timedelta(days=window_days)
+    # No upper bound is enforced at write (settings validate ge=1 only — same
+    # convention as event_retention_days, see events/retention_task.py), so an
+    # absurdly large stored window would push the threshold past the maximum
+    # representable date and make ``datetime`` raise OverflowError, 500-ing the
+    # whole dashboard. An unbounded horizon means "every cert is within range",
+    # so clamp to datetime.max instead of raising.
+    try:
+        threshold = datetime.now(UTC) + timedelta(days=window_days)
+    except OverflowError:
+        threshold = datetime.max.replace(tzinfo=UTC)
     certs = (
         db.query(Certificate)
         .filter(
