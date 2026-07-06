@@ -61,19 +61,26 @@ def read_secret(name: str) -> str | None:
     """Read a secret value from file. Returns None if not set.
 
     Reads directly and catches the not-a-readable-file errors rather than doing
-    an ``is_file()`` pre-check: that closes the TOCTOU window a concurrent /
-    multi-process delete would open (``FileNotFoundError``) AND preserves the
-    old ``is_file()``-guard's graceful "not configured" result for a path that
-    is a *directory* rather than a file. The latter is a real deployment state:
-    a Docker bind-mount whose host source path is missing is materialized as an
-    empty directory at the secret's path, which must read as "unset" (False in
-    :func:`_secret_configured`), never crash the settings page with an uncaught
-    ``IsADirectoryError``.
+    an ``is_file()`` pre-check. This closes the TOCTOU window a concurrent /
+    multi-process delete would open (``FileNotFoundError``) while preserving the
+    old ``is_file()``-guard's graceful "not configured" result for *every*
+    filesystem state that guard swallowed: ``is_file()`` returns False on any
+    ``os.stat`` ``OSError`` (a directory ``IsADirectoryError``, a symlink loop
+    ``ELOOP``, a non-directory path component ``ENOTDIR``, an unreadable parent
+    ``EACCES``), so we catch ``OSError`` for parity. These are all real
+    deployment states — a Docker bind-mount whose host source is missing
+    materializes as an empty directory at the secret's path; a wrong-owner /
+    wrong-mode mount denies traversal — and each must read as "unset" (False in
+    :func:`_secret_configured`), never crash the settings page or the
+    reconcile/renewal loops with an uncaught ``OSError``.
     """
     path = _secret_path(name)
     try:
         return path.read_text(encoding="utf-8").strip()
-    except (FileNotFoundError, IsADirectoryError):
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        logger.warning("Secret %s is not a readable file (%s); treating as unset", name, exc)
         return None
 
 
@@ -82,10 +89,12 @@ def delete_secret(name: str) -> bool:
 
     unlink() is itself atomic, so the prior is_file() pre-check only added a
     TOCTOU window against a concurrent (or multi-process) delete. A vanished
-    file simply yields False. A path that is a *directory* (e.g. a Docker
-    bind-mount with a missing host source) is likewise treated as "no secret
-    file to delete" -> False, matching the old is_file() guard rather than
-    raising an uncaught IsADirectoryError.
+    file simply yields False. Any other filesystem state the old is_file() guard
+    swallowed (a *directory* from a missing Docker bind-mount source
+    ``IsADirectoryError``, a symlink loop ``ELOOP``, a non-directory component
+    ``ENOTDIR``, an unreadable parent ``EACCES``) is likewise treated as "no
+    secret file to delete" -> False, matching that guard rather than raising an
+    uncaught OSError. The directory / offending path itself is left untouched.
     """
     path = _secret_path(name)
     try:
@@ -94,6 +103,6 @@ def delete_secret(name: str) -> bool:
     except FileNotFoundError:
         logger.debug("Secret %s already absent on delete", name)
         return False
-    except IsADirectoryError:
-        logger.warning("Secret path %s is a directory, not a file; not deleting", name)
+    except OSError as exc:
+        logger.warning("Secret path %s is not a deletable file (%s); not deleting", name, exc)
         return False

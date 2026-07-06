@@ -139,3 +139,50 @@ class TestSecretStorage:
         secret_dir.mkdir()
         assert delete_secret("cloudflare_token") is False
         assert secret_dir.is_dir()
+
+    def test_read_secret_treats_symlink_loop_as_unset(self, tmp_data_dir):
+        """A self-referential symlink at the secret path (broken mount / operator
+        error) makes read_text raise OSError(ELOOP=40) — NOT FileNotFoundError or
+        IsADirectoryError. The old is_file() guard swallowed every os.stat OSError
+        and read it as "not configured"; the direct-read path must match, or the
+        settings page + reconcile/renewal loops 500 on an uncaught OSError."""
+        loop = tmp_data_dir / "secrets" / "cloudflare_token"
+        os.symlink(loop, loop)
+        assert read_secret("cloudflare_token") is None
+
+    def test_delete_secret_treats_symlink_loop_as_absent(self, tmp_data_dir):
+        """delete_secret on a self-referential symlink: unlink() removes the link
+        itself and returns True (the link existed). What must NOT happen is an
+        uncaught OSError. Assert the graceful outcome rather than crashing."""
+        loop = tmp_data_dir / "secrets" / "tailscale_authkey"
+        os.symlink(loop, loop)
+        # unlink() on the dangling self-symlink succeeds (removes the link).
+        assert delete_secret("tailscale_authkey") is True
+        assert not loop.is_symlink()
+
+    def test_read_secret_treats_unreadable_path_as_unset(self, tmp_data_dir, monkeypatch):
+        """A wrong-owner/wrong-mode bind-mount denies traversal: read_text raises
+        PermissionError (an OSError, not FileNotFoundError/IsADirectoryError).
+        The old is_file() guard read that as "not configured"; read_secret must
+        swallow it and return None rather than 500 the GET /settings dashboard.
+        Monkeypatched so the result is deterministic regardless of test-runner uid
+        (root would otherwise bypass a real chmod-0 parent)."""
+        write_secret("cloudflare_token", "value")
+
+        def _raise_eacces(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("pathlib.Path.read_text", _raise_eacces)
+        assert read_secret("cloudflare_token") is None
+
+    def test_delete_secret_treats_unreadable_path_as_absent(self, tmp_data_dir, monkeypatch):
+        """delete_secret must swallow a PermissionError (OSError family) from
+        unlink() — same graceful contract as read_secret — returning False rather
+        than propagating an uncaught OSError to the caller."""
+        write_secret("cloudflare_token", "value")
+
+        def _raise_eacces(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("pathlib.Path.unlink", _raise_eacces)
+        assert delete_secret("cloudflare_token") is False
