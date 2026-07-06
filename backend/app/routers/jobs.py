@@ -148,12 +148,19 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             commit_with_lock(db)
 
         try:
-            from app.adapters.cloudflare_adapter import delete_a_record, find_record
+            from app.adapters.cloudflare_adapter import delete_a_record, list_a_records
 
-            # Check whether the record still exists in Cloudflare
-            existing = find_record(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
+            # Locate our SPECIFIC orphaned record by record_id among ALL A records
+            # for the hostname. find_record() returns only the lowest-id match, so
+            # if the hostname carries several A records and the orphan is not the
+            # lowest-id one, that call returns a DIFFERENT record: the id compare
+            # would fail and we'd wrongly report "cleaned up" and drop the job while
+            # the orphaned record survives in Cloudflare. Matching record_id
+            # explicitly across the full record set avoids that silent orphan leak.
+            records = list_a_records(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
+            existing = next((r for r in records if r.get("id") == record_id), None)
 
-            if existing and existing.get("id") == record_id:
+            if existing is not None:
                 # Guard against deleting a record a service has since reclaimed:
                 # reconcile_dns reuses the same Cloudflare record id when a hostname
                 # is re-exposed, so this id may now belong to a live service.
@@ -189,7 +196,8 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                     db.delete(current_job)
                     commit_with_lock(db)
             else:
-                # Record is already gone (manually deleted or different record now)
+                # Our specific orphaned record is no longer present (manually
+                # deleted, or the hostname now carries only other records).
                 with db_write_section(db):
                     current_job = db.get(Job, job_id, populate_existing=True)
                     if current_job is None:

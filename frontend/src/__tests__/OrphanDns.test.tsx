@@ -353,6 +353,11 @@ describe("OrphanDns page", () => {
         screen.getByText("Cloudflare API error: connection refused")
       ).toBeInTheDocument()
     })
+    // The action error is injected asynchronously and must announce to
+    // assistive tech via a live region (role="alert").
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Cloudflare API error: connection refused"
+    )
   })
 
 

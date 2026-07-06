@@ -253,6 +253,28 @@ describe("useResource", () => {
     expect(result.current.data).toBe("optimistic")
   })
 
+  it("setData clears a prior error so a successful write leaves no stale banner", async () => {
+    // Repro of the ServiceDetail toggle bug: a failed enable/disable sets `error`
+    // via setError; the retry succeeds and installs the fresh service through
+    // setData (applyServiceUpdate). Before the fix, setData left `error` intact,
+    // so the updated service rendered under a stale red error banner. A winning
+    // write must resolve the resource to a clean state, exactly like run's success.
+    const fetcher = vi.fn().mockResolvedValue("A")
+    const { result } = renderHook(() => useResource(fetcher))
+    await waitFor(() => expect(result.current.data).toBe("A"))
+
+    act(() => {
+      result.current.setError("toggle failed")
+    })
+    expect(result.current.error).toBe("toggle failed")
+
+    act(() => {
+      result.current.setData("B")
+    })
+    expect(result.current.data).toBe("B")
+    expect(result.current.error).toBeNull()
+  })
+
   it("lets onData take over a response by returning true (keeps loading, skips store)", async () => {
     const fetcher = vi.fn().mockResolvedValue("A")
     const onData = vi.fn().mockReturnValue(true)

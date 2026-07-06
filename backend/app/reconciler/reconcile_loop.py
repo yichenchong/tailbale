@@ -120,7 +120,7 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
                         service_id,
                     )
                     continue
-                svc = db.get(Service, service_id)
+                svc = db.get(Service, service_id, populate_existing=True)
                 if svc is None:
                     # Deleted since the snapshot — nothing to check. The
                     # try-acquire above re-created this id's registry entry via
@@ -129,6 +129,17 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
                     # live + in-flight ids. Done while still holding the lock,
                     # exactly as the reconcile path does.
                     forget_reconcile_lock(service_id)
+                    continue
+                if not svc.enabled:
+                    # Disabled since the snapshot. disable_service commits the
+                    # "disabled" status (cleared message / checks / probe retry)
+                    # and releases the reconcile lock BEFORE this sweep acquires
+                    # it, so persisting a health-derived phase here would clobber
+                    # that status — and since neither loop sweeps disabled
+                    # services, the wrong phase (even "healthy" if the edge has
+                    # not stopped yet) would stick indefinitely. Re-read inside
+                    # the lock and skip, mirroring reconcile_service's disable
+                    # guard.
                     continue
                 checks = health_checker.run_health_checks(db, svc, generated_dir, certs_dir, socket_path)
                 phase = health_checker.aggregate_status(checks)

@@ -284,6 +284,9 @@ describe("Discover page", () => {
       expect(screen.getByText("Request failed: 500")).toBeInTheDocument()
     })
     expect(screen.queryByText(/No containers found/)).not.toBeInTheDocument()
+    // The load error is injected asynchronously and must announce to assistive
+    // tech via a live region (role="alert").
+    expect(screen.getByRole("alert")).toHaveTextContent("Request failed: 500")
 
     // Fire the poll tick; its discovery request is still pending.
     await act(async () => {

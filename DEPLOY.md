@@ -231,7 +231,13 @@ docker tag tailbale-edge:latest ghcr.io/<your-username>/tailbale-edge:latest
 docker push ghcr.io/<your-username>/tailbale-edge:latest
 ```
 
-Then update the edge image reference in the orchestrator's `image_builder.py` (the `EDGE_IMAGE` constant) to point to your registry image instead of a local build.
+The orchestrator **always builds the edge image locally** from the bundled
+`/app/edge-image` context (`image_builder.ensure_edge_image` checks the local
+`tailbale-edge:latest` tag's `tailbale.version` label and rebuilds on mismatch —
+it never pulls). Repointing the `EDGE_IMAGE` constant at a registry ref alone
+does **not** switch to pulling; you would also have to change `ensure_edge_image`
+to pull the image instead of building it. Pushing images to a registry is only
+needed to share/back up the built artifacts, not for the default self-hosted flow.
 
 ## Troubleshooting
 

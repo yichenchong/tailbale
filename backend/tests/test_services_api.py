@@ -2294,7 +2294,9 @@ class TestActionEndpointErrorDetailGeneric:
         with patch(
             "app.certs.renewal_task.process_service_cert",
             side_effect=RuntimeError(secret),
-        ), caplog.at_level(logging.ERROR, logger="app.routers.services"):
+        ), patch("app.secrets.read_secret", return_value="cf-token"), caplog.at_level(
+            logging.ERROR, logger="app.routers.services"
+        ):
             resp = client.post(f"/api/services/{svc_id}/renew-cert")
 
         assert resp.status_code == 500
@@ -2716,7 +2718,8 @@ class TestRenewCertHealthyNeedsForce:
         mock_process.assert_not_called()
 
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_healthy_cert_renews_with_force(self, mock_process, client, db_session):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_healthy_cert_renews_with_force(self, mock_secret, mock_process, client, db_session):
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         self._seed_healthy_cert(db_session, svc_id)
 

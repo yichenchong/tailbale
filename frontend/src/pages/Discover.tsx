@@ -132,7 +132,7 @@ export default function Discover() {
             <Loader2 className="h-4 w-4 animate-spin" /> Loading containers...
           </div>
         ) : error && containers.length === 0 ? (
-          <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+          <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
             {error}
           </div>
         ) : containers.length === 0 ? (

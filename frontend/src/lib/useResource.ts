@@ -34,7 +34,12 @@ export interface UseResourceResult<T> {
   /**
    * Optimistically install an authoritative value (e.g. the body returned by a
    * mutating write). Bumps the request-id guard so any fetch still in flight is
-   * discarded instead of clobbering this value, and clears `loading`.
+   * discarded instead of clobbering this value, clears `loading`, and clears any
+   * prior `error` — a successful write is a winning response, so it resolves the
+   * resource to a clean state exactly as `run`'s success path does. Without this
+   * a stale error banner from an earlier failure would linger over the freshly
+   * installed value (e.g. ServiceDetail's inline error after a failed-then-retried
+   * enable/disable toggle).
    */
   setData: (value: T) => void
   /** Set the error string directly (e.g. for action/validation errors). */
@@ -112,6 +117,7 @@ export function useResource<T>(
   const setData = useCallback((value: T) => {
     requestId.current += 1
     setDataState(value)
+    setError(null)
     setLoading(false)
   }, [])
 

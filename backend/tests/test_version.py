@@ -27,6 +27,30 @@ class TestVersionModule:
             from app.version import get_version
             assert get_version() == "2.0.0"
 
+    def test_empty_file_falls_through_to_next_location(self, tmp_path):
+        # CI1 regression: a 0-byte VERSION at the first location (truncated build
+        # / botched volume mount — the same failure config.py guards for the JWT
+        # secret) must be treated as "not found", not returned as "". The next
+        # location wins.
+        empty = tmp_path / "VERSION"
+        empty.write_text("")
+        good = tmp_path / "VERSION2"
+        good.write_text("9.9.9\n")
+
+        with patch("app.version._VERSION_FILE_LOCATIONS", [empty, good]):
+            from app.version import get_version
+            assert get_version() == "9.9.9"
+
+    def test_whitespace_only_file_falls_through_to_dev(self, tmp_path):
+        # CI1 regression: a whitespace-only VERSION at the only location must fall
+        # through to the "dev" sentinel, never return "".
+        blank = tmp_path / "VERSION"
+        blank.write_text("   \n\t")
+
+        with patch("app.version._VERSION_FILE_LOCATIONS", [blank]):
+            from app.version import get_version
+            assert get_version() == "dev"
+
 
 class TestVersionEndpoint:
     def test_returns_version(self, client):

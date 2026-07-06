@@ -96,7 +96,7 @@ export default function Dashboard() {
                 const cert = certStatus(c.expires_at)
                 return (
                   <li key={c.service_id} className="flex items-center justify-between text-sm">
-                    <Link to={`/services/${c.service_id}`} className="text-zinc-700 hover:underline">
+                    <Link to={`/services/${encodeURIComponent(c.service_id)}`} className="text-zinc-700 hover:underline">
                       {c.service_name} <span className="text-zinc-400">({c.hostname})</span>
                     </Link>
                     <span className={cn("font-medium", cert.color)}>

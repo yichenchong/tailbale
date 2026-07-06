@@ -179,3 +179,24 @@ def test_claude_md_documents_services_package():
     assert "`services/`" in claude, (
         "CLAUDE.md Backend Structure table must document the services/ package"
     )
+
+def test_root_dockerfile_pins_base_images_and_lego():
+    """The production Dockerfile must pin its base images and the lego release,
+    mirroring the edge Dockerfile guard. A drift to a floating tag
+    (``python:latest`` / ``node:alpine``) or an unpinned lego download breaks
+    reproducible builds and is invisible to the rest of CI (which never builds
+    the image), so guard the pins here."""
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+    # Base images pinned to explicit tags, never floating ``latest``.
+    assert "python:3.14-slim" in dockerfile
+    assert "python:latest" not in dockerfile
+    assert "FROM node:" in dockerfile
+    assert "node:latest" not in dockerfile
+
+    # lego (ACME client) pinned to a concrete release and fetched from the
+    # pinned GitHub release tarball, not a floating "latest" download.
+    m = re.search(r"ARG LEGO_VERSION=(\d+\.\d+\.\d+)", dockerfile)
+    assert m, "LEGO_VERSION must be pinned to an explicit x.y.z release"
+    assert "github.com/go-acme/lego/releases/download" in dockerfile
+    assert 'lego_v${LEGO_VERSION}_linux_${lego_arch}.tar.gz' in dockerfile

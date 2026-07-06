@@ -161,14 +161,14 @@ class TestGetJob:
 
 class TestRetryOrphanCleanup:
     @patch("app.adapters.cloudflare_adapter.delete_a_record")
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_deletes_existing_record(
-        self, mock_secret, mock_find, mock_delete, client, db_session
+        self, mock_secret, mock_list, mock_delete, client, db_session
     ):
         job = _create_orphan_job(db_session)
         job_id = job.id
-        mock_find.return_value = {"id": "cf_abc123", "content": "100.64.0.1"}
+        mock_list.return_value = [{"id": "cf_abc123", "content": "100.64.0.1"}]
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 200
@@ -188,14 +188,14 @@ class TestRetryOrphanCleanup:
         assert len(events) == 1
         assert "successfully deleted" in events[0].message
 
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_succeeds_when_record_already_gone(
-        self, mock_secret, mock_find, client, db_session
+        self, mock_secret, mock_list, client, db_session
     ):
         job = _create_orphan_job(db_session)
         job_id = job.id
-        mock_find.return_value = None  # record no longer exists
+        mock_list.return_value = []  # record no longer exists
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 200
@@ -209,16 +209,16 @@ class TestRetryOrphanCleanup:
         assert len(events) == 1
         assert "already removed" in events[0].message
 
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_succeeds_when_different_record_at_hostname(
-        self, mock_secret, mock_find, client, db_session
+        self, mock_secret, mock_list, client, db_session
     ):
-        """If find_record returns a different record_id, it means our orphan is gone."""
+        """If our record_id is absent from the hostname's A records, the orphan is gone."""
         job = _create_orphan_job(db_session)
         job_id = job.id
-        # Different id — someone re-created the record
-        mock_find.return_value = {"id": "cf_different", "content": "100.64.0.2"}
+        # Only a different record exists at the hostname — our orphan is gone
+        mock_list.return_value = [{"id": "cf_different", "content": "100.64.0.2"}]
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 200
@@ -227,9 +227,49 @@ class TestRetryOrphanCleanup:
         db_session.expire_all()
         assert db_session.get(Job, job_id) is None
 
-    @patch("app.adapters.cloudflare_adapter.find_record", side_effect=RuntimeError("API timeout"))
+    @patch("app.adapters.cloudflare_adapter.delete_a_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
-    def test_retry_fails_on_cf_error(self, mock_secret, mock_find, client, db_session):
+    def test_retry_deletes_orphan_when_not_lowest_id_among_multiple_records(
+        self, mock_secret, mock_list, mock_delete, client, db_session
+    ):
+        """DN5 regression: when a hostname carries MORE THAN ONE A record and the
+        orphaned record_id is NOT the lowest-id one, the retry must still find and
+        delete the specific orphan. The old code used find_record(), which returns
+        only the lowest-id match; the orphan's id would then not match, control
+        fell through to the "already cleaned up" branch, the job was dropped, and
+        the orphaned Cloudflare record silently survived. list_a_records() returns
+        the full set (sorted by id), so the orphan is matched by id regardless of
+        rank and actually deleted."""
+        job = _create_orphan_job(db_session)  # details.record_id == "cf_abc123"
+        job_id = job.id
+        # "cf_abc123" sorts AFTER "cf_000lowest": find_record() would have picked
+        # the lowest and missed our orphan entirely.
+        mock_list.return_value = [
+            {"id": "cf_000lowest", "content": "100.64.0.5"},
+            {"id": "cf_abc123", "content": "100.64.0.1"},
+        ]
+
+        resp = client.post(f"/api/jobs/{job_id}/retry")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+
+        # The SPECIFIC orphaned record must be deleted (not the lowest-id one).
+        from app.routers.jobs import CF_CLEANUP_TIMEOUT
+        mock_delete.assert_called_once_with(
+            "cf-token-123", "zone1", "cf_abc123", timeout=CF_CLEANUP_TIMEOUT
+        )
+
+        # Job cleared only because the orphan was genuinely removed.
+        db_session.expire_all()
+        assert db_session.get(Job, job_id) is None
+        events = db_session.query(Event).filter(Event.kind == "dns_orphan_resolved").all()
+        assert len(events) == 1
+        assert "successfully deleted" in events[0].message
+
+    @patch("app.adapters.cloudflare_adapter.list_a_records", side_effect=RuntimeError("API timeout"))
+    @patch("app.secrets.read_secret", return_value="cf-token-123")
+    def test_retry_fails_on_cf_error(self, mock_secret, mock_list, client, db_session):
         job = _create_orphan_job(db_session)
 
         resp = client.post(f"/api/jobs/{job.id}/retry")
@@ -334,10 +374,10 @@ class TestRetryOrphanCleanup:
         db_session.expire_all()
         assert db_session.get(Job, job.id).status == "pending"
 
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_uses_current_zone_when_job_details_lack_zone(
-        self, mock_secret, mock_find, client, db_session
+        self, mock_secret, mock_list, client, db_session
     ):
         from app.settings_store import set_setting
 
@@ -350,13 +390,13 @@ class TestRetryOrphanCleanup:
             "service_name": "TestApp",
         })
         job_id = job.id
-        mock_find.return_value = None
+        mock_list.return_value = []
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
 
         assert resp.status_code == 200
         from app.routers.jobs import CF_CLEANUP_TIMEOUT
-        mock_find.assert_called_once_with(
+        mock_list.assert_called_once_with(
             "cf-token-123", "zone-from-settings", "test.example.com", "A",
             timeout=CF_CLEANUP_TIMEOUT,
         )
@@ -364,17 +404,17 @@ class TestRetryOrphanCleanup:
         assert db_session.get(Job, job_id) is None
 
     @patch("app.adapters.cloudflare_adapter.delete_a_record")
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_skips_deletion_when_record_reclaimed_by_active_service(
-        self, mock_secret, mock_find, mock_delete, client, db_session
+        self, mock_secret, mock_list, mock_delete, client, db_session
     ):
         """If a live service now owns the same Cloudflare record id, retry must
         NOT delete it (the hostname was reclaimed; deletion would cause an outage)."""
         job = _create_orphan_job(db_session)
         job_id = job.id
-        # find_record returns our orphan's id — but a live DnsRecord now owns it.
-        mock_find.return_value = {"id": "cf_abc123", "content": "100.64.0.9"}
+        # list_a_records returns our orphan's id — but a live DnsRecord now owns it.
+        mock_list.return_value = [{"id": "cf_abc123", "content": "100.64.0.9"}]
         svc = _create_service(client, hostname="test.example.com").json()
         db_session.add(DnsRecord(
             service_id=svc["id"],
@@ -394,10 +434,10 @@ class TestRetryOrphanCleanup:
         assert db_session.get(Job, job_id) is None
 
     @patch("app.adapters.cloudflare_adapter.delete_a_record")
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_caps_cloudflare_timeout_to_short_value(
-        self, mock_secret, mock_find, mock_delete, client, db_session
+        self, mock_secret, mock_list, mock_delete, client, db_session
     ):
         """Both Cloudflare calls on the lock-held retry path MUST use the short
         cleanup timeout, not the adapter's 30s default, so a slow/unreachable
@@ -407,21 +447,21 @@ class TestRetryOrphanCleanup:
         assert CF_CLEANUP_TIMEOUT < 30.0
         job = _create_orphan_job(db_session)
         job_id = job.id
-        mock_find.return_value = {"id": "cf_abc123", "content": "100.64.0.1"}
+        mock_list.return_value = [{"id": "cf_abc123", "content": "100.64.0.1"}]
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 200
 
-        assert mock_find.call_args.kwargs["timeout"] == CF_CLEANUP_TIMEOUT
+        assert mock_list.call_args.kwargs["timeout"] == CF_CLEANUP_TIMEOUT
         assert mock_delete.call_args.kwargs["timeout"] == CF_CLEANUP_TIMEOUT
 
     @patch("app.adapters.cloudflare_adapter.delete_a_record")
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_retry_delete_timeout_resets_job_to_failed_not_running(
-        self, mock_secret, mock_find, mock_delete, client, db_session
+        self, mock_secret, mock_list, mock_delete, client, db_session
     ):
-        """A timeout raised by delete_a_record AFTER find_record succeeds (and the
+        """A timeout raised by delete_a_record AFTER list_a_records succeeds (and the
         owner guard passes) must not leave the job wedged in 'running'. The job is
         set to 'running' before the Cloudflare I/O; if the shortened cleanup
         timeout fires mid-delete the shared except handler MUST roll it back to
@@ -432,7 +472,7 @@ class TestRetryOrphanCleanup:
         job_id = job.id
         # Record still present and orphaned (no live DnsRecord owner) -> we reach
         # the delete call, which then times out.
-        mock_find.return_value = {"id": "cf_abc123", "content": "100.64.0.1"}
+        mock_list.return_value = [{"id": "cf_abc123", "content": "100.64.0.1"}]
         mock_delete.side_effect = RuntimeError("Cloudflare delete_a_record failed: read timed out")
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
@@ -547,9 +587,9 @@ class TestDeleteCreatesRetryableOrphan:
     """End-to-end: delete a service with surviving DNS -> retry cleans up."""
 
     @patch("app.adapters.cloudflare_adapter.delete_a_record")
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
-    def test_full_lifecycle(self, mock_secret, mock_find, mock_delete, client, db_session):
+    def test_full_lifecycle(self, mock_secret, mock_list, mock_delete, client, db_session):
         from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone1")
 
@@ -579,7 +619,7 @@ class TestDeleteCreatesRetryableOrphan:
 
         # Now retry the job — this time CF is fine
         mock_delete.side_effect = None
-        mock_find.return_value = {"id": "cf_r1", "content": "100.64.0.1"}
+        mock_list.return_value = [{"id": "cf_r1", "content": "100.64.0.1"}]
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 200
@@ -589,10 +629,10 @@ class TestDeleteCreatesRetryableOrphan:
         db_session.expire_all()
         assert db_session.get(Job, job_id) is None
 
-    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_delete_without_zone_creates_job_retryable_after_zone_configured(
-        self, mock_secret, mock_find, client, db_session
+        self, mock_secret, mock_list, client, db_session
     ):
         from app.settings_store import set_setting
 
@@ -616,13 +656,13 @@ class TestDeleteCreatesRetryableOrphan:
 
         set_setting(db_session, "cf_zone_id", "zone-configured-later")
         db_session.commit()
-        mock_find.return_value = None
+        mock_list.return_value = []
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
 
         assert resp.status_code == 200
         from app.routers.jobs import CF_CLEANUP_TIMEOUT
-        mock_find.assert_called_once_with(
+        mock_list.assert_called_once_with(
             "cf-token-123", "zone-configured-later", "nextcloud.example.com", "A",
             timeout=CF_CLEANUP_TIMEOUT,
         )

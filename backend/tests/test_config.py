@@ -133,6 +133,20 @@ def test_existing_jwt_secret_is_returned(tmp_path):
     assert _load_or_create_jwt_secret(tmp_path) == "pre-existing-secret-value"
 
 
+def test_existing_world_readable_jwt_secret_is_retightened_to_0600(tmp_path):
+    """CI2: an existing .jwt_secret left world-readable by an older release (or a
+    lax volume mount) must be re-tightened to owner-only 0600 on every startup,
+    not merely read. The HMAC key must never stay readable to other host users."""
+    secrets_dir = tmp_path / "secrets"
+    secrets_dir.mkdir(parents=True)
+    secret_path = secrets_dir / ".jwt_secret"
+    secret_path.write_text("pre-existing-secret-value", encoding="utf-8")
+    os.chmod(secret_path, 0o644)  # legacy world-readable mode
+
+    assert _load_or_create_jwt_secret(tmp_path) == "pre-existing-secret-value"
+    assert stat.S_IMODE(secret_path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+
+
 def test_missing_jwt_secret_file_generates_one(tmp_path):
     """When no .jwt_secret exists yet, the missing-file read must fall through to
     generate a fresh non-empty secret rather than raising FileNotFoundError."""

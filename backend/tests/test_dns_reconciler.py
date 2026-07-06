@@ -1,4 +1,4 @@
-"""Tests for DNS reconciliation logic and drift detection."""
+"""Tests for DNS reconciliation logic (reconcile_dns + cleanup_dns_record)."""
 
 from unittest.mock import MagicMock, patch
 
@@ -586,6 +586,96 @@ class TestReconcileDns:
         mock_create.assert_not_called()
         msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
         assert not any("not managed by tailBale" in m for m in msgs)
+
+    @patch("app.adapters.dns_reconciler.create_a_record")
+    @patch("app.adapters.dns_reconciler.list_a_records")
+    def test_hard_list_failure_propagates_and_persists_no_row(
+        self, mock_list, mock_create, db_session
+    ):
+        """Module contract: reconcile_dns lets a hard Cloudflare API failure bubble
+        out (never swallowed) and, because the LIST fails before any local write,
+        persists NO phantom DnsRecord row. A create must NOT be attempted after a
+        failed list."""
+        from app.adapters.cloudflare_adapter import CloudflareAPIError
+        from app.adapters.dns_reconciler import reconcile_dns
+
+        mock_list.side_effect = CloudflareAPIError(
+            "find_record", "Invalid token (code 10000)",
+            errors=[{"code": 10000, "message": "Invalid token"}],
+        )
+        svc = _create_service(db_session)
+
+        with pytest.raises(CloudflareAPIError, match="Invalid token"):
+            reconcile_dns(db_session, svc, "100.64.0.1", "cf-token", "zone1")
+
+        mock_create.assert_not_called()
+        assert db_session.get(DnsRecord, svc.id) is None
+
+    @patch("app.adapters.dns_reconciler.create_a_record")
+    @patch("app.adapters.dns_reconciler.list_a_records")
+    def test_hard_create_failure_propagates_and_persists_no_row(
+        self, mock_list, mock_create, db_session
+    ):
+        """A hard Cloudflare failure on the CREATE path bubbles out and leaves no
+        stale local row behind (the db write section is never reached)."""
+        from app.adapters.cloudflare_adapter import CloudflareAPIError
+        from app.adapters.dns_reconciler import reconcile_dns
+
+        mock_list.return_value = []
+        mock_create.side_effect = CloudflareAPIError(
+            "create_a_record", "Record already exists (code 81057)",
+            errors=[{"code": 81057, "message": "Record already exists"}],
+        )
+        svc = _create_service(db_session)
+
+        with pytest.raises(CloudflareAPIError, match="Record already exists"):
+            reconcile_dns(db_session, svc, "100.64.0.1", "cf-token", "zone1")
+
+        assert db_session.get(DnsRecord, svc.id) is None
+
+    @patch("app.adapters.dns_reconciler.delete_a_record")
+    @patch("app.adapters.dns_reconciler.update_a_record")
+    @patch("app.adapters.dns_reconciler.create_a_record")
+    @patch("app.adapters.dns_reconciler.list_a_records")
+    def test_updates_canonical_and_removes_owned_duplicate_in_one_pass(
+        self, mock_list, mock_create, mock_update, mock_delete, db_session
+    ):
+        """Single-pass convergence: the canonical (lowest-id) OWNED record carries a
+        WRONG ip while a higher-id OWNED duplicate happens to hold the right ip.
+        reconcile updates the canonical to the correct ip (never adopts the dup as
+        canonical -- the lowest-id owned record is authoritative) AND removes the
+        owned duplicate, emitting BOTH a dns_updated and a dns_duplicate_removed
+        event. Guards that update and dedup compose correctly in one reconcile."""
+        from app.adapters.cloudflare_adapter import ownership_comment
+        from app.adapters.dns_reconciler import reconcile_dns
+
+        svc = _create_service(db_session)
+        own = ownership_comment(svc.id)
+        mock_list.return_value = [
+            {"id": "r1", "content": "100.64.0.9", "comment": own},  # canonical, WRONG ip
+            {"id": "r2", "content": "100.64.0.1", "comment": own},  # owned dup, right ip
+        ]
+        mock_update.return_value = {"id": "r1", "content": "100.64.0.1"}
+
+        result = reconcile_dns(db_session, svc, "100.64.0.1", "cf-token", "zone1")
+
+        assert result.record_id == "r1"
+        assert result.value == "100.64.0.1"
+        mock_create.assert_not_called()
+        # Canonical updated to the correct ip (re-stamped with our marker).
+        mock_update.assert_called_once_with(
+            "cf-token", "zone1", "r1", "100.64.0.1", timeout=10.0, comment=own
+        )
+        # The owned duplicate is removed (never the canonical).
+        mock_delete.assert_called_once_with("cf-token", "zone1", "r2", timeout=10.0)
+
+        updated = db_session.query(Event).filter(Event.kind == "dns_updated").all()
+        dups = db_session.query(Event).filter(Event.kind == "dns_duplicate_removed").all()
+        assert len(updated) == 1
+        assert "100.64.0.9" in updated[0].message and "100.64.0.1" in updated[0].message
+        assert len(dups) == 1
+        assert dups[0].details["removed_record_ids"] == ["r2"]
+        assert dups[0].details["canonical_record_id"] == "r1"
 
 
 class TestCleanupDnsRecord:

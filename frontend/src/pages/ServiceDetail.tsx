@@ -104,7 +104,7 @@ export default function ServiceDetail() {
         <button onClick={() => navigate("/services")} className="mb-4 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700">
           <ArrowLeft className="h-4 w-4" /> Back to Services
         </button>
-        <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+        <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       </div>
     )
   }
@@ -141,10 +141,10 @@ export default function ServiceDetail() {
       </div>
 
       {error && (
-        <div className="mt-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+        <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}
       {actionMsg && (
-        <div className="mt-4 rounded-md bg-yellow-50 px-4 py-3 text-sm text-yellow-800">{actionMsg}</div>
+        <div role="status" className="mt-4 rounded-md bg-yellow-50 px-4 py-3 text-sm text-yellow-800">{actionMsg}</div>
       )}
 
       {/* Info / Edit / Runtime */}

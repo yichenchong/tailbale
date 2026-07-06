@@ -70,6 +70,11 @@ describe("Services page", () => {
       expect(screen.getByText("Unable to load services: database unavailable")).toBeInTheDocument()
     })
     expect(screen.queryByText("No services exposed yet.")).not.toBeInTheDocument()
+    // The load error is injected asynchronously and must announce to assistive
+    // tech via a live region (role="alert").
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Unable to load services: database unavailable"
+    )
   })
 
   it("renders service list with data", async () => {
@@ -325,6 +330,9 @@ describe("Services page", () => {
     fireEvent.click(screen.getByText("Reload Caddy"))
     await flushAction()
     expect(screen.getByText("first failure")).toBeInTheDocument()
+    // The action-feedback banner (carrying failure messages) is injected
+    // asynchronously and must announce via a polite live region (role="status").
+    expect(screen.getByRole("status")).toHaveTextContent("first failure")
     const firstActionTimer = timers.at(-1)!
 
     fireEvent.click(screen.getByLabelText("Actions"))

@@ -5,6 +5,7 @@ import { type ConnectionTestResult } from "@/lib/api"
 export function TestResultBanner({ result }: { result: ConnectionTestResult }) {
   return (
     <div
+      role="status"
       className={cn(
         "flex items-center gap-2 rounded-md px-3 py-2 text-sm",
         result.success ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"

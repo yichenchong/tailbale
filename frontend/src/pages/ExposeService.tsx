@@ -220,7 +220,7 @@ export default function ExposeService() {
       </p>
 
       {settingsError && (
-        <div className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{settingsError}</div>
+        <div role="alert" className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{settingsError}</div>
       )}
 
       <form className="mt-6 max-w-lg space-y-5" onSubmit={handleSubmit}>
@@ -387,7 +387,7 @@ export default function ExposeService() {
 
         {/* Error */}
         {error && (
-          <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+          <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
         )}
 
         {/* Submit */}

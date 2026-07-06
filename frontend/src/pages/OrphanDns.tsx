@@ -99,14 +99,14 @@ export default function OrphanDns() {
       </p>
 
       {successMessage && (
-        <div className="mt-4 flex items-center gap-2 rounded-md bg-green-50 px-4 py-3 text-green-700">
+        <div role="status" className="mt-4 flex items-center gap-2 rounded-md bg-green-50 px-4 py-3 text-green-700">
           <CheckCircle2 className="h-4 w-4" />
           {successMessage}
         </div>
       )}
 
       {error && (
-        <div className="mt-4 flex items-center gap-2 rounded-md bg-red-50 px-4 py-3 text-red-700">
+        <div role="alert" className="mt-4 flex items-center gap-2 rounded-md bg-red-50 px-4 py-3 text-red-700">
           <AlertTriangle className="h-4 w-4" />
           {error}
         </div>

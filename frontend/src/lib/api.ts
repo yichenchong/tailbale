@@ -177,8 +177,8 @@ export const api = {
       qs.set("offset", String(params.offset))
       return get<JobsResponse>(`/jobs?${qs.toString()}`)
     },
-    retry: (id: string) => post<JobActionResult>(`/jobs/${id}/retry`),
-    dismiss: (id: string) => del<void>(`/jobs/${id}`),
+    retry: (id: string) => post<JobActionResult>(`/jobs/${encodeURIComponent(id)}/retry`),
+    dismiss: (id: string) => del<void>(`/jobs/${encodeURIComponent(id)}`),
   },
 
   settings: {

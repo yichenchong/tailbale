@@ -401,6 +401,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
 
         {testResult && (
           <div
+            role="status"
             className={cn(
               "mt-4 flex items-start gap-2 rounded-md px-4 py-3 text-sm",
               testResult.success ? "bg-green-50 text-green-800" : "bg-red-50 text-red-800"
@@ -412,7 +413,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         )}
 
         {error && (
-          <div className="mt-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+          <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
         )}
 
         <div className="mt-6 flex items-center justify-between">

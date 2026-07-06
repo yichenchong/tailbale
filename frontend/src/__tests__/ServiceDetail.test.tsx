@@ -347,6 +347,9 @@ describe("ServiceDetail page", () => {
     fireEvent.click(screen.getByText("Reload Caddy"))
     await flushAction()
     expect(screen.getByText("first detail failure")).toBeInTheDocument()
+    // The action-feedback banner (carrying failure messages) is injected
+    // asynchronously and must announce via a polite live region (role="status").
+    expect(screen.getByRole("status")).toHaveTextContent("first detail failure")
     const firstActionTimer = timers.at(-1)!
 
     fireEvent.click(screen.getByText("Restart Edge"))
@@ -424,6 +427,9 @@ describe("ServiceDetail page", () => {
     await waitFor(() => {
       expect(screen.getByText("Service not found")).toBeInTheDocument()
     })
+    // The error is injected asynchronously after a failed load, so it must be
+    // announced to assistive tech via a live region (role="alert").
+    expect(screen.getByRole("alert")).toHaveTextContent("Service not found")
   })
 
   it("shows back button", async () => {

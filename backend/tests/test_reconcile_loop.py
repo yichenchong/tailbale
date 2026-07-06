@@ -438,3 +438,51 @@ class TestHealthCheckAll:
             # The live service's entry was legitimately (re-)created; drop it so
             # the process-global registry stays clean for other tests.
             forget_reconcile_lock(a.id)
+
+    def test_disabled_mid_sweep_does_not_clobber_disabled_status(self, db_session):
+        # A disable that commits after the enabled-id snapshot but before this
+        # service's turn must NOT be overwritten by a health-derived phase.
+        # disable_service sets phase="disabled" (cleared message/checks/probe
+        # retry) and releases the per-service reconcile lock BEFORE the sweep
+        # acquires it, so without an in-lock re-check the sweep would run health
+        # checks and persist a phase over "disabled" — and since neither loop
+        # ever sweeps a disabled service, that wrong phase (here "healthy", the
+        # worst case: the edge has not stopped yet) would stick forever.
+        alive = _create_service(db_session, name="Alive")
+        doomed = _create_service(db_session, name="Doomed")
+        # Pre-set the disabled status exactly as disable_service leaves it.
+        doomed_status = db_session.get(ServiceStatus, doomed.id)
+        doomed_status.phase = "disabled"
+        doomed_status.message = "Service disabled by user"
+        doomed_status.health_checks = None
+        db_session.commit()
+
+        def disable_doomed_during_alive(db, svc, generated_dir, certs_dir, socket_path):
+            # Land the disable mid-sweep: flip enabled=False on the doomed row
+            # (committed via _persist_status below) while Alive is checked, so the
+            # sweep re-reads it as disabled when it reaches it.
+            if svc.id == alive.id:
+                target = db.get(Service, doomed.id)
+                target.enabled = False
+                db.flush()
+            return {"ok": True}
+
+        with (
+            patch(
+                "app.health.health_checker.run_health_checks",
+                side_effect=disable_doomed_during_alive,
+            ),
+            patch("app.health.health_checker.aggregate_status", return_value="healthy"),
+            patch.object(loop_mod, "reconcile_one") as mock_reconcile,
+        ):
+            count = loop_mod.health_check_all(db_session, socket_path=None)
+
+        # Only the live service was health-checked; the disabled one was skipped.
+        assert count == 1
+        mock_reconcile.assert_not_called()
+        db_session.expire_all()
+        doomed_status = db_session.get(ServiceStatus, doomed.id)
+        # The "disabled" status survives — not clobbered with a health phase.
+        assert doomed_status.phase == "disabled"
+        assert doomed_status.message == "Service disabled by user"
+        assert doomed_status.health_checks is None

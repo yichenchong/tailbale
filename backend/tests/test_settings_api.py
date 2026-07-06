@@ -684,6 +684,62 @@ class TestDeveloperActions:
         resp = client.get("/api/settings/developer/main-logs?tail=0")
         assert resp.status_code == 422
 
+    def test_main_logs_404_when_no_container_found(self, client, monkeypatch):
+        # No labeled container and every fallback name misses -> the endpoint
+        # surfaces a 404 (not a 502): the container genuinely does not exist.
+        from app.routers.settings import docker
+
+        client.put("/api/settings/general", json={"developer_mode": True})
+
+        class FakeContainers:
+            def list(self, all=True, filters=None):
+                return []
+
+            def get(self, name):
+                raise docker.errors.NotFound("no such container")
+
+        class FakeDockerClient:
+            def __init__(self, base_url):
+                self.containers = FakeContainers()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.routers.settings.docker.DockerClient", FakeDockerClient)
+
+        resp = client.get("/api/settings/developer/main-logs")
+        assert resp.status_code == 404
+        assert "not found" in resp.json()["detail"].lower()
+
+    def test_main_logs_502_when_log_read_fails(self, client, monkeypatch):
+        # The container is found but reading its logs raises (daemon hiccup): the
+        # failure must map to 502 with a descriptive message, not a bare 500.
+        client.put("/api/settings/general", json={"developer_mode": True})
+
+        class FakeContainer:
+            name = "tailbale"
+
+            def logs(self, stdout=True, stderr=True, tail=200, timestamps=False):
+                raise RuntimeError("docker log stream broke")
+
+        class FakeContainers:
+            def list(self, all=True, filters=None):
+                return [FakeContainer()]
+
+        class FakeDockerClient:
+            def __init__(self, base_url):
+                self.containers = FakeContainers()
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.routers.settings.docker.DockerClient", FakeDockerClient)
+
+        resp = client.get("/api/settings/developer/main-logs")
+        assert resp.status_code == 502
+        assert "could not read" in resp.json()["detail"].lower()
+        assert "docker log stream broke" in resp.json()["detail"]
+
 class TestConnectionTests:
     def test_tailscale_valid_key(self, client, tmp_data_dir):
         from app.secrets import TAILSCALE_AUTH_KEY, write_secret

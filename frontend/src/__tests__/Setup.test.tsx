@@ -61,6 +61,9 @@ describe("Setup wizard", () => {
     await waitFor(() => {
       expect(screen.getByText("network down")).toBeInTheDocument()
     })
+    // The progress-load error is injected asynchronously and must announce to
+    // assistive tech via a live region (role="alert").
+    expect(screen.getByRole("alert")).toHaveTextContent("network down")
   })
 
   it("renders first step with account fields on fresh install", async () => {

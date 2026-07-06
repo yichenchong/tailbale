@@ -285,6 +285,21 @@ describe("api client", () => {
     expect(qs.get("offset")).toBe("0")
   })
 
+  it("jobs.retry and jobs.dismiss URL-encode the job id in the path segment", async () => {
+    // Consistency with servicePath/profiles.detect: a runtime id interpolated
+    // into a path segment must be encoded so a reserved char (e.g. a stray '#'
+    // or space) can't split the path or open a query. Job ids are `job_<hex>`
+    // today, but the encode guards the contract, not the current id shape.
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve("{}") })
+    global.fetch = fetchMock
+
+    await api.jobs.retry("job a#1")
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/jobs/job%20a%231/retry")
+
+    await api.jobs.dismiss("job a#1")
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/jobs/job%20a%231")
+  })
+
   it("discovery.containers stringifies runningOnly, forces hide_managed, and omits a blank search", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve("{}") })
     global.fetch = fetchMock

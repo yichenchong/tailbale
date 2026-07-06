@@ -80,6 +80,14 @@ describe("usePagination", () => {
     // Non-finite input is ignored (stays put).
     act(() => result.current.goToPage(NaN))
     expect(result.current.offset).toBe(50)
+
+    // +/-Infinity is finite-checked AFTER clamping into [1, pageCount], so it
+    // lands on the last / first page rather than being ignored like NaN. (The
+    // clamp runs first: min(pageCount, max(1, +-Inf)) collapses to a real page.)
+    act(() => result.current.goToPage(Infinity))
+    expect(result.current.offset).toBe(100)
+    act(() => result.current.goToPage(-Infinity))
+    expect(result.current.offset).toBe(0)
   })
 
   it("clampToContent corrects an offset that fell off the end after a shrink", () => {

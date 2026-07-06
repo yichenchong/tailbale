@@ -413,6 +413,9 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Base domain is required")).toBeInTheDocument()
     })
+    // The save error is injected asynchronously and must announce to assistive
+    // tech via a live region (role="alert"), matching the load-error banner.
+    expect(screen.getByRole("alert")).toHaveTextContent("Base domain is required")
   })
 
   it("clears saved Cloudflare secret input and refreshes returned settings", async () => {
@@ -504,6 +507,9 @@ describe("SettingsPage", () => {
     await waitFor(() => {
       expect(screen.getByText("Docker is reachable")).toBeInTheDocument()
     })
+    // The test result is injected asynchronously after a deliberate action, so it
+    // must announce to assistive tech via a polite live region (role="status").
+    expect(screen.getByRole("status")).toHaveTextContent("Docker is reachable")
   })
 
   it("surfaces a thrown connection-test error as a failure banner", async () => {

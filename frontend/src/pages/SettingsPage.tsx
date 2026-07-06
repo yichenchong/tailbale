@@ -46,7 +46,7 @@ export default function SettingsPage() {
   if (!settings) {
     return (
       <div className="p-8">
-        <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error || "Failed to load settings"}</div>
+        <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error || "Failed to load settings"}</div>
       </div>
     )
   }
@@ -81,7 +81,7 @@ export default function SettingsPage() {
       </div>
 
       {error && (
-        <div className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+        <div role="alert" className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}
 
       <div className="mt-6 max-w-lg" role="tabpanel" aria-label={`${tab} settings`}>

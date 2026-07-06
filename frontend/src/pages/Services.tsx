@@ -85,17 +85,17 @@ export default function Services() {
       </div>
 
       {actionMsg && (
-        <div className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{actionMsg}</div>
+        <div role="status" className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{actionMsg}</div>
       )}
 
       {error && services.length > 0 && (
-        <div className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800">
+        <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800">
           Unable to refresh services: {error}
         </div>
       )}
 
       {error && services.length === 0 ? (
-        <div className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+        <div role="alert" className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
           Unable to load services: {error}
         </div>
       ) : services.length === 0 ? (

@@ -36,7 +36,8 @@ def _upsert_cert(db, svc_id, hostname, *, expires_at, last_failure=None):
 
 class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_renew_cert_success(self, mock_process, client):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_renew_cert_success(self, mock_secret, mock_process, client):
         svc_id = _create_service(client).json()["id"]
 
         resp = client.post(f"/api/services/{svc_id}/renew-cert")
@@ -54,7 +55,8 @@ class TestRenewCertEndpoint:
         assert resp.status_code == 404
 
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_renew_cert_failure(self, mock_process, client):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_renew_cert_failure(self, mock_secret, mock_process, client):
         svc_id = _create_service(client).json()["id"]
         mock_process.side_effect = Exception("ACME rate limited")
 
@@ -82,7 +84,8 @@ class TestRenewCertEndpoint:
         mock_process.assert_not_called()
 
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_renew_cert_far_healthy_force_renews(self, mock_process, client, db_session):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_renew_cert_far_healthy_force_renews(self, mock_secret, mock_process, client, db_session):
         svc_id = _create_service(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
@@ -99,8 +102,9 @@ class TestRenewCertEndpoint:
         assert mock_process.call_args.kwargs == {"force": True}
 
     @patch("app.certs.renewal_task.process_service_cert")
+    @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_huge_window_days_does_not_overflow(
-        self, mock_process, client, db_session
+        self, mock_secret, mock_process, client, db_session
     ):
         # A legacy / directly-set cert_renewal_window_days can exceed the schema
         # ceiling (writes now bound it at le=10000, but old rows or a direct DB
@@ -135,7 +139,8 @@ class TestRenewCertEndpoint:
         assert mock_process.call_args.kwargs == {"force": True}
 
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_renew_cert_near_expiry_no_force_performs(self, mock_process, client, db_session):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_renew_cert_near_expiry_no_force_performs(self, mock_secret, mock_process, client, db_session):
         svc_id = _create_service(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
@@ -151,7 +156,8 @@ class TestRenewCertEndpoint:
         assert mock_process.call_args.kwargs == {"force": True}
 
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_renew_cert_expired_no_force_performs(self, mock_process, client, db_session):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_renew_cert_expired_no_force_performs(self, mock_secret, mock_process, client, db_session):
         svc_id = _create_service(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
@@ -164,13 +170,29 @@ class TestRenewCertEndpoint:
         mock_process.assert_called_once()
 
     @patch("app.certs.renewal_task.process_service_cert")
-    def test_renew_cert_missing_cert_no_force_performs(self, mock_process, client):
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_renew_cert_missing_cert_no_force_performs(self, mock_secret, mock_process, client):
         svc_id = _create_service(client).json()["id"]
 
         resp = client.post(f"/api/services/{svc_id}/renew-cert")
         assert resp.status_code == 200
         assert resp.json()["performed"] is True
         mock_process.assert_called_once()
+
+    def test_renew_cert_no_cf_token_reports_not_performed(self, client):
+        # An enabled service with no Cloudflare token configured cannot run the
+        # DNS-01 challenge: process_service_cert skips outright (logs a warning,
+        # issues nothing). The manual endpoint must NOT claim it processed a cert.
+        # read_secret returns None with no secret file, so process_service_cert
+        # runs for real (unmocked) and no-ops; renew_cert must report honestly.
+        svc_id = _create_service(client).json()["id"]
+
+        resp = client.post(f"/api/services/{svc_id}/renew-cert?force=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["performed"] is False
+        assert data["needs_force"] is False
+        assert "Cloudflare" in data["message"]
 
 
 class TestCertLogsEndpoint:

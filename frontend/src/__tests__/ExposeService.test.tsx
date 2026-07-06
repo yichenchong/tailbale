@@ -252,6 +252,11 @@ describe("ExposeService page", () => {
     fireEvent.submit(screen.getByRole("button", { name: "Create Service" }).closest("form")!)
 
     expect(screen.getByText("Choose a discovered container before creating a service")).toBeInTheDocument()
+    // Submit-validation error is injected asynchronously; it must announce to
+    // assistive tech via a live region (role="alert").
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Choose a discovered container before creating a service"
+    )
     expect(
       fetchMock.mock.calls.some(
         (call: unknown[]) =>
