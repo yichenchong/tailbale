@@ -8,6 +8,7 @@ import {
 } from "@/lib/validation"
 import { Row } from "./Row"
 import { type ServiceEditState } from "./useServiceDetail"
+import { errorMessage } from "@/lib/utils"
 
 /**
  * Configuration card: the read-only detail list plus the inline edit form. Owns
@@ -60,7 +61,7 @@ export function ServiceEditForm({
       applyServiceUpdate(svc)
       edit.setEditing(false)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       setSaving(false)
     }

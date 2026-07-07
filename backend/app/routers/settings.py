@@ -1,3 +1,4 @@
+import logging
 import os
 from collections.abc import Callable
 from typing import Any, NamedTuple
@@ -11,6 +12,12 @@ from sqlalchemy.orm import Session
 from app.auth import get_current_user
 from app.database import commit_with_lock, db_write_section, get_db
 from app.edge.docker_client import docker_client, resolve_socket
+from app.locks import lifecycle_lock
+from app.models.event import Event
+from app.models.job import Job
+from app.models.service import Service
+from app.models.setting import Setting
+from app.models.user import User
 from app.schemas.settings import (
     AllSettingsResponse,
     CloudflareSettingsResponse,
@@ -38,8 +45,11 @@ from app.secrets import (
     read_secret,
     write_secret,
 )
+from app.services import UpstreamApiError, delete_service_record
 from app.settings_store import get_all_settings, get_positive_int_setting, get_setting, set_setting
 from app.setup_state import missing_setup_requirements
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/settings",
@@ -162,8 +172,6 @@ def _reject_base_domain_change_with_services(db: Session, new_domain: str) -> No
     # 409-lock the whole /general section on upgrade.
     if new_domain.lower() == get_setting(db, "base_domain").lower():
         return
-
-    from app.models.service import Service
 
     if db.query(Service.id).first() is not None:
         raise HTTPException(
@@ -310,7 +318,8 @@ def get_main_container_logs(
     except HTTPException:
         raise
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Could not read tailBale logs: {exc}") from exc
+        logger.warning("Could not read tailBale container logs", exc_info=True)
+        raise UpstreamApiError("Could not read tailBale logs") from exc
 
 
 @router.post("/developer/reset-setup-complete")
@@ -326,20 +335,12 @@ def reset_setup_complete(db: Session = Depends(get_db)):
 def reset_all(db: Session = Depends(get_db)):
     _require_developer_mode(db)
 
-    from app.locks import lifecycle_lock
-    from app.models.event import Event
-    from app.models.job import Job
-    from app.models.service import Service
-    from app.models.setting import Setting
-    from app.models.user import User
-    from app.services.service_ops import _delete_service_record
-
     with lifecycle_lock():
         service_ids = [service_id for (service_id,) in db.query(Service.id).all()]
         for service_id in service_ids:
             service = db.get(Service, service_id)
             if service is not None:
-                _delete_service_record(db, service, cleanup_dns=True)
+                delete_service_record(db, service, cleanup_dns=True)
 
         with db_write_section(db):
             for job in db.query(Job).all():

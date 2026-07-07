@@ -2,9 +2,7 @@ import { type AllSettings, type ConnectionTestResult } from "@/lib/api"
 import { isNonBlank } from "@/lib/validation"
 import { useDirtyForm } from "@/lib/useDirtyForm"
 import { Field } from "@/components/settings/Field"
-import { SaveButton } from "@/components/settings/SaveButton"
-import { TestButton } from "@/components/settings/TestButton"
-import { TestResultBanner } from "@/components/settings/TestResultBanner"
+import { ConnectionSection } from "@/components/settings/ConnectionSection"
 import { type SaveHandler } from "./useSettings"
 
 export function DockerTab({
@@ -37,11 +35,15 @@ export function DockerTab({
         placeholder="unix:///var/run/docker.sock"
         error={socketPathValid ? undefined : "Required — cannot be blank"}
       />
-      <div className="flex gap-2">
-        <SaveButton saving={saving} onClick={handleSave} disabled={!socketPathValid} />
-        <TestButton testing={testing} onClick={onTest} label="Test Connection" />
-      </div>
-      {testResult && <TestResultBanner result={testResult} />}
+      <ConnectionSection
+        saving={saving}
+        onSave={handleSave}
+        saveDisabled={!socketPathValid}
+        testing={testing}
+        onTest={onTest}
+        testLabel="Test Connection"
+        testResult={testResult}
+      />
     </div>
   )
 }

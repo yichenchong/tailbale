@@ -6,17 +6,17 @@ wires them together in spec order. Split out of ``reconciler.py`` so the
 orchestration spine (``reconcile_service`` + status persistence) reads without
 paging through every helper.
 
-Status I/O (``_persist_status`` / ``_update_phase``) and the ``ReconcileError``
-sentinel stay in ``reconciler.py``; these helpers reach back to them through the
-module import (resolved at call time, so the two modules cross-reference without
-an import cycle).
+Status I/O (``_persist_status`` / ``_update_phase``) lives in the leaf module
+``reconciler/status.py`` and the ``ReconcileError`` sentinel in
+``reconciler/errors.py``; these helpers and ``reconciler.py`` both import those
+leaves directly, so there is no reconciler↔steps import cycle to reach across.
 """
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
@@ -27,15 +27,17 @@ from app import secrets, settings_store
 from app.adapters import dns_reconciler
 from app.certs import cert_manager, renewal_task
 from app.database import commit_with_lock, db_write_section
-from app.edge import config_renderer, container_manager, network_manager
+from app.edge import caddy_admin, config_renderer, container_manager, network_manager, tailscale_ops
 from app.fsutil import atomic_write_text
 from app.health import health_checker
 from app.health.health_checker import CRITICAL_CHECKS
 from app.locks import global_ops_lock
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
-from app.reconciler import probe_retry, reconciler
-from app.timeutil import as_utc
+from app.reconciler import probe_retry
+from app.reconciler.errors import ReconcileError
+from app.reconciler.status import _persist_status, _update_phase
+from app.timeutil import as_utc, days_from_now
 
 logger = logging.getLogger(__name__)
 
@@ -80,11 +82,11 @@ def _validate_and_prepare(db: Session, service: Service) -> tuple[str, _RuntimeP
     ReconcileError when the auth key is not configured.
     """
     service_id = service.id
-    reconciler._update_phase(db, service_id, "validating", "Checking settings and secrets")
+    _update_phase(db, service_id, "validating", "Checking settings and secrets")
 
     ts_authkey = secrets.read_secret(secrets.TAILSCALE_AUTH_KEY)
     if not ts_authkey:
-        raise reconciler.ReconcileError("Tailscale auth key not configured")
+        raise ReconcileError("Tailscale auth key not configured")
 
     runtime = settings_store.get_runtime_paths(db)
     paths = _RuntimePaths(
@@ -105,7 +107,7 @@ def _validate_and_prepare(db: Session, service: Service) -> tuple[str, _RuntimeP
 def _ensure_network(db: Session, service: Service, socket_path: str | None) -> None:
     """Creating-network step: ensure the Docker network and heal a stale upstream id."""
     service_id = service.id
-    reconciler._update_phase(db, service_id, "creating_network", "Ensuring Docker network")
+    _update_phase(db, service_id, "creating_network", "Ensuring Docker network")
     network_result = network_manager.ensure_network(
         service.network_name,
         service.upstream_container_id,
@@ -126,7 +128,7 @@ def _ensure_network(db: Session, service: Service, socket_path: str | None) -> N
 
 def _ensure_cert(db: Session, service: Service, cert_path: Path) -> None:
     """Ensuring-cert step: (re)issue the cert when missing, expiring, or mismatched."""
-    reconciler._update_phase(db, service.id, "ensuring_cert", "Checking certificate")
+    _update_phase(db, service.id, "ensuring_cert", "Checking certificate")
     if not cert_path.exists():
         renewal_task.process_service_cert(db, service)
         return
@@ -139,7 +141,11 @@ def _ensure_cert(db: Session, service: Service, cert_path: Path) -> None:
 
     expiry_utc = as_utc(expiry)
     privkey_path = cert_path.with_name("privkey.pem")
-    if expiry_utc <= datetime.now(UTC) + timedelta(days=cert_renewal_days):
+    renewal_threshold = days_from_now(cert_renewal_days)
+    # days_from_now returns None only when the (loosely-bounded) renewal window
+    # overflows the datetime range; an absurd window means every cert is "within"
+    # it, so treat None as renew-eagerly.
+    if renewal_threshold is None or expiry_utc <= renewal_threshold:
         renewal_task.process_service_cert(db, service)
     elif not cert_manager.cert_key_pair_matches(cert_path, privkey_path):
         # The cert is issued/published atomically (one relative `current` symlink
@@ -160,7 +166,7 @@ def _render_and_stage_config(
     Returns the staging result (config_changed + reload/cert markers) consumed by
     the reload step.
     """
-    reconciler._update_phase(db, service.id, "rendering_config", "Generating Caddy configuration")
+    _update_phase(db, service.id, "rendering_config", "Generating Caddy configuration")
     new_config = config_renderer.render_caddyfile(service)
     service_config_dir = generated_dir / service.id
     existing_path = service_config_dir / "Caddyfile"
@@ -216,7 +222,7 @@ def _ensure_edge(
     """Ensuring-edge step: create the edge container if absent, start it if stopped."""
     service_id = service.id
     service_name = service.name
-    reconciler._update_phase(db, service_id, "ensuring_edge", "Ensuring edge container")
+    _update_phase(db, service_id, "ensuring_edge", "Ensuring edge container")
     container = container_manager._find_edge_container(service_id, service.edge_container_name, socket_path)
     if container is None:
         container_id = container_manager.create_edge_container(
@@ -227,7 +233,7 @@ def _ensure_edge(
             paths.host_ts_state_dir,
             socket_path,
         )
-        reconciler._persist_status(
+        _persist_status(
             db,
             service_id,
             edge_container_id=container_id,
@@ -237,12 +243,12 @@ def _ensure_edge(
             },
         )
     else:
-        reconciler._persist_status(db, service_id, edge_container_id=container.id)
+        _persist_status(db, service_id, edge_container_id=container.id)
 
     container = container_manager._find_edge_container(service_id, service.edge_container_name, socket_path)
     if container and container.status != "running":
         container_manager.start_edge(service_id, service.edge_container_name, socket_path)
-        reconciler._persist_status(
+        _persist_status(
             db,
             service_id,
             event={
@@ -256,8 +262,8 @@ def _detect_and_persist_ip(db: Session, service: Service, socket_path: str | Non
     """Detecting-ip step: detect the Tailscale IP and persist it (event on change)."""
     service_id = service.id
     service_name = service.name
-    reconciler._update_phase(db, service_id, "detecting_ip", "Waiting for Tailscale IP")
-    ts_ip = container_manager.detect_tailscale_ip(
+    _update_phase(db, service_id, "detecting_ip", "Waiting for Tailscale IP")
+    ts_ip = tailscale_ops.detect_tailscale_ip(
         service_id,
         service.edge_container_name,
         socket_path,
@@ -273,14 +279,14 @@ def _detect_and_persist_ip(db: Session, service: Service, socket_path: str | Non
                 "message": f"Tailscale IP {ts_ip} assigned to '{service_name}'",
                 "details": {"ip": ts_ip},
             }
-        reconciler._persist_status(db, service_id, tailscale_ip=ts_ip, event=event)
+        _persist_status(db, service_id, tailscale_ip=ts_ip, event=event)
     return ts_ip
 
 
 def _ensure_dns(db: Session, service: Service, ts_ip: str | None) -> None:
     """Ensuring-dns step: create/update the public DNS record (best-effort)."""
     service_id = service.id
-    reconciler._update_phase(db, service_id, "ensuring_dns", "Updating DNS record")
+    _update_phase(db, service_id, "ensuring_dns", "Updating DNS record")
     cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
     zone_id = settings_store.get_setting(db, "cf_zone_id")
     if cf_token and zone_id and ts_ip:
@@ -294,7 +300,7 @@ def _ensure_dns(db: Session, service: Service, ts_ip: str | None) -> None:
                 dns_reconciler.reconcile_dns(db, service, ts_ip, cf_token, zone_id)
         except Exception:
             logger.warning("DNS reconciliation failed for %s", service_id, exc_info=True)
-            reconciler._persist_status(
+            _persist_status(
                 db,
                 service_id,
                 event={
@@ -324,23 +330,23 @@ def _reload_if_needed(
 
     service_id = service.id
     service_name = service.name
-    reconciler._update_phase(db, service_id, "reloading_caddy", "Reloading Caddy")
+    _update_phase(db, service_id, "reloading_caddy", "Reloading Caddy")
     try:
-        container_manager.reload_caddy(service_id, service.edge_container_name, socket_path)
+        caddy_admin.reload_caddy(service_id, service.edge_container_name, socket_path)
     except RuntimeError as e:
         # Caddy rejected the config (bad Caddyfile / non-zero reload exit).
         logger.warning("Caddy reload failed for %s", service_id, exc_info=True)
-        raise reconciler.ReconcileError(f"Caddy reload failed: {e}") from e
+        raise ReconcileError(f"Caddy reload failed: {e}") from e
     except (docker.errors.DockerException, ConnectionError) as e:
         # The edge container / Docker daemon was unreachable: exec_run re-raises a
         # docker.errors.APIError, or the admin-API socket refused the connection.
         logger.warning("Caddy reload failed for %s", service_id, exc_info=True)
-        raise reconciler.ReconcileError(f"Caddy reload failed: Docker/edge unavailable: {e}") from e
+        raise ReconcileError(f"Caddy reload failed: Docker/edge unavailable: {e}") from e
     except Exception as e:
         # Anything else is unexpected, but still a reload failure: raise
         # ReconcileError so the reload-pending marker survives for the next retry.
         logger.warning("Caddy reload failed for %s", service_id, exc_info=True)
-        raise reconciler.ReconcileError(f"Caddy reload failed (unexpected): {e}") from e
+        raise ReconcileError(f"Caddy reload failed (unexpected): {e}") from e
     result["caddy_reloaded"] = True
     stage.reload_pending_path.unlink(missing_ok=True)
     # Record the fingerprint captured before the reload as the cert now loaded
@@ -352,7 +358,7 @@ def _reload_if_needed(
     # crash-desync guard, so a bare write_text (no fsync) could lose it.
     if stage.current_cert_fp is not None:
         atomic_write_text(stage.cert_state_path, stage.current_cert_fp)
-    reconciler._persist_status(
+    _persist_status(
         db,
         service_id,
         event={
@@ -377,13 +383,13 @@ def _run_and_persist_health(
     """
     service_id = service.id
     service_name = service.name
-    reconciler._update_phase(db, service_id, "checking_health", "Running health checks")
+    _update_phase(db, service_id, "checking_health", "Running health checks")
     checks = health_checker.run_health_checks(db, service, generated_dir, certs_dir, socket_path)
 
     phase = health_checker.aggregate_status(checks)
     now = datetime.now(UTC)
     level = "info" if phase == "healthy" else "warning" if phase == "warning" else "error"
-    reconciler._persist_status(
+    _persist_status(
         db,
         service_id,
         phase=phase,

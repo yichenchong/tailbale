@@ -737,8 +737,11 @@ class TestDeveloperActions:
 
         resp = client.get("/api/settings/developer/main-logs")
         assert resp.status_code == 502
-        assert "could not read" in resp.json()["detail"].lower()
-        assert "docker log stream broke" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        assert "could not read" in detail.lower()
+        # AR-R3-2: the underlying str(exc) is logged server-side, not leaked to
+        # the client-facing detail.
+        assert "docker log stream broke" not in detail
 
 class TestConnectionTests:
     def test_tailscale_valid_key(self, client, tmp_data_dir):

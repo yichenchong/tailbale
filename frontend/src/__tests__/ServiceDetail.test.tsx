@@ -454,8 +454,8 @@ describe("ServiceDetail page", () => {
       const svc = {
         ...mockService,
         status: {
-          ...mockService.status,
-          health_checks: { ...mockService.status.health_checks, https_probe_ok: false },
+          ...mockService.status!,
+          health_checks: { ...mockService.status!.health_checks, https_probe_ok: false },
           probe_retry_at: retryNaive,
           probe_retry_attempt: 2,
         },
@@ -857,6 +857,109 @@ describe("ServiceDetail page", () => {
     const posts = renewPosts(fetchMock)
     expect(posts).toHaveLength(1)
     expect(posts.some(([url]) => String(url).includes("force=true"))).toBe(false)
+  })
+
+  it("conveys health-check status with a text alternative, not color alone", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockService),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Nextcloud")).toBeInTheDocument())
+
+    expect(screen.getAllByRole("img", { name: "Passing" }).length).toBeGreaterThan(0)
+    expect(screen.getByRole("img", { name: "Failing" })).toBeInTheDocument()
+  })
+
+  it("exposes the logs tabs with ARIA tab semantics", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockService),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Nextcloud")).toBeInTheDocument())
+
+    const edgeTab = screen.getByRole("tab", { name: "Edge Logs" })
+    const eventsTab = screen.getByRole("tab", { name: "Events" })
+    expect(edgeTab).toHaveAttribute("aria-selected", "true")
+    expect(eventsTab).toHaveAttribute("aria-selected", "false")
+    expect(screen.getByRole("tabpanel")).toBeInTheDocument()
+
+    fireEvent.click(eventsTab)
+    expect(eventsTab).toHaveAttribute("aria-selected", "true")
+    expect(edgeTab).toHaveAttribute("aria-selected", "false")
+  })
+
+  it("moves focus into the force-renew dialog when it opens", async () => {
+    const fetchMock = renewFetchMock({ refused: "Certificate is healthy; not renewed.", forced: "Renewal triggered." })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Renew certificate"))
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setTimeout(resolve, 0)
+      await promise
+    })
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+
+    // Focus must land inside the dialog (on its first focusable = Cancel).
+    const dialog = screen.getByRole("dialog")
+    expect(dialog).toContainElement(document.activeElement as HTMLElement)
+  })
+
+  it("closes the force-renew dialog on Escape and restores focus to the trigger", async () => {
+    const fetchMock = renewFetchMock({ refused: "Certificate is healthy; not renewed.", forced: "Renewal triggered." })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    // jsdom clicks don't move focus, so focus the trigger explicitly first.
+    const trigger = screen.getByText("Renew certificate").closest("button")!
+    trigger.focus()
+
+    await act(async () => {
+      fireEvent.click(trigger)
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setTimeout(resolve, 0)
+      await promise
+    })
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() =>
+      expect(screen.queryByText("Force certificate renewal?")).not.toBeInTheDocument()
+    )
+    expect(document.activeElement).toBe(trigger)
+  })
+
+  it("traps Tab focus within the force-renew dialog", async () => {
+    const fetchMock = renewFetchMock({ refused: "Certificate is healthy; not renewed.", forced: "Renewal triggered." })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("Renew certificate"))
+      const { promise, resolve } = Promise.withResolvers<void>()
+      setTimeout(resolve, 0)
+      await promise
+    })
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+
+    const dialog = screen.getByRole("dialog")
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" })
+    const force = within(dialog).getByRole("button", { name: "Force renew" })
+
+    force.focus()
+    expect(document.activeElement).toBe(force)
+    fireEvent.keyDown(document, { key: "Tab" })
+    expect(document.activeElement).toBe(cancel)
+
+    cancel.focus()
+    fireEvent.keyDown(document, { key: "Tab", shiftKey: true })
+    expect(document.activeElement).toBe(force)
   })
 
   it("renews immediately with no modal when the cert is near expiry (performed)", async () => {

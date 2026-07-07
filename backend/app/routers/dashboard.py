@@ -1,6 +1,6 @@
 """Dashboard summary API endpoint."""
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
@@ -12,7 +12,9 @@ from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
+from app.routers.events import _event_to_dict
 from app.settings_store import get_positive_int_setting
+from app.timeutil import days_from_now, iso
 
 router = APIRouter(
     prefix="/api/dashboard",
@@ -47,15 +49,13 @@ def dashboard_summary(db: Session = Depends(get_db)):
     # use, so the dashboard attention list tracks the actual renewal policy
     # instead of a hard-coded 30 days.
     window_days = get_positive_int_setting(db, "cert_renewal_window_days")
-    # The schema bounds cert_renewal_window_days at write (le=10000), but a
-    # legacy/directly-set (raw set_setting / pre-bound DB) huge value would push
-    # the threshold past the maximum representable date and make ``datetime``
-    # raise OverflowError, 500-ing the whole dashboard. An unbounded horizon
-    # means "every cert is within range", so clamp to datetime.max instead of
-    # raising (mirrors the guard in services/cert_ops.py).
-    try:
-        threshold = datetime.now(UTC) + timedelta(days=window_days)
-    except OverflowError:
+    # cert_renewal_window_days is only loosely bounded at write, so a
+    # legacy/directly-set huge value would push the horizon past the maximum
+    # representable date. days_from_now returns None on that OverflowError; an
+    # unbounded horizon means "every cert is within range", so clamp to
+    # datetime.max (matches the saturating policy in services/cert_ops.py).
+    threshold = days_from_now(window_days)
+    if threshold is None:
         threshold = datetime.max.replace(tzinfo=UTC)
     certs = (
         db.query(Certificate)
@@ -81,7 +81,7 @@ def dashboard_summary(db: Session = Depends(get_db)):
             "service_id": cert.service_id,
             "service_name": svc.name if svc else "Unknown",
             "hostname": svc.hostname if svc else "Unknown",
-            "expires_at": cert.expires_at.isoformat() if cert.expires_at else None,
+            "expires_at": iso(cert.expires_at),
         })
 
     # Recent errors (last 20 error-level events)
@@ -110,24 +110,13 @@ def dashboard_summary(db: Session = Depends(get_db)):
         },
         "expiring_certs": expiring_certs,
         "recent_errors": [
-            {
-                "id": e.id,
-                "service_id": e.service_id,
-                "kind": e.kind,
-                "message": e.message,
-                "created_at": e.created_at.isoformat() if e.created_at else None,
-            }
+            _event_to_dict(e, fields=("id", "service_id", "kind", "message", "created_at"))
             for e in recent_errors
         ],
         "recent_events": [
-            {
-                "id": e.id,
-                "service_id": e.service_id,
-                "kind": e.kind,
-                "level": e.level,
-                "message": e.message,
-                "created_at": e.created_at.isoformat() if e.created_at else None,
-            }
+            _event_to_dict(
+                e, fields=("id", "service_id", "kind", "level", "message", "created_at")
+            )
             for e in recent_events
         ],
     }

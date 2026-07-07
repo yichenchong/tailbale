@@ -94,9 +94,10 @@ async def _service_error_handler(request, exc: ServiceError) -> JSONResponse:
     ``HTTPException`` (AR7). This single handler translates them to the EXACT same
     status code + ``{"detail": ...}`` body the routers used to raise inline —
     404 'Service not found', 409 hostname-in-use / disabled, 422 hostname-suffix,
-    400 missing Tailscale key, 502 hostname-change DNS failure — so the observable
-    HTTP behavior is unchanged. Each exception carries its own ``status_code`` +
-    ``detail``, so no per-type branching is needed here.
+    400 missing Tailscale key, 502 hostname-change DNS failure / upstream-API
+    failure (Cloudflare, Docker log proxy), 503 Docker-unavailable — so the
+    observable HTTP behavior is unchanged. Each exception carries its own
+    ``status_code`` + ``detail``, so no per-type branching is needed here.
     """
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 

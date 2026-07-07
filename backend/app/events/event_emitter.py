@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 #
 # Built EXHAUSTIVELY from every ``emit_event(...)`` call site across
 # ``backend/app`` (grep ``emit_event(``):
-#   - services/service_ops.py       service lifecycle, orphan-DNS job creation,
-#                                   edge recreate/update
+#   - services/crud.py              service lifecycle, orphan-DNS job creation
+#   - services/edge_ops.py          edge recreate/update
 #   - routers/services.py           manual Caddy reload / edge restart endpoints
 #   - routers/jobs.py               orphaned-DNS cleanup job outcomes
 #   - adapters/dns_reconciler.py    DNS record create/update/remove/cleanup
@@ -30,14 +30,14 @@ logger = logging.getLogger(__name__)
 # drift canary (non-fatal) if handed a kind absent from this set.
 EVENT_KINDS: frozenset[str] = frozenset(
     {
-        # Service lifecycle (services/service_ops.py)
+        # Service lifecycle (services/crud.py)
         "service_created",
         "service_updated",
         "service_disabled",
         "service_deleted",
         "service_snippet_changed",
         # Edge container / proxy lifecycle (reconciler/reconciler.py,
-        # routers/services.py, services/service_ops.py)
+        # routers/services.py, services/edge_ops.py)
         "edge_started",
         "edge_restarted",
         "edge_recreated",
@@ -55,7 +55,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "dns_update_failed",
         "dns_cleanup_failed",
         "dns_duplicate_removed",
-        # Orphaned-DNS cleanup jobs (services/service_ops.py, routers/jobs.py)
+        # Orphaned-DNS cleanup jobs (services/crud.py, routers/jobs.py)
         "dns_orphan_created",
         "dns_orphan_resolved",
         "dns_orphan_retry_failed",

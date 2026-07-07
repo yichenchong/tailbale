@@ -622,6 +622,16 @@ describe("Setup wizard", () => {
       resolve({ ok: true, json: () => Promise.resolve({ user: { id: "u1", username: "testuser", display_name: null, role: "admin" } }) })
     })
   })
+
+  it("renders the wizard inside a main landmark", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress(FRESH_PROGRESS))
+    const { default: Setup } = await import("@/pages/Setup")
+    renderRoute(<Setup />)
+    await waitFor(() =>
+      expect(screen.getByText("Welcome to tailBale")).toBeInTheDocument()
+    )
+    expect(screen.getByRole("main")).toBeInTheDocument()
+  })
 })
 
 describe("Setup wizard resume", () => {

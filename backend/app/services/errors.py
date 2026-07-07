@@ -97,3 +97,34 @@ class HostnameChangeError(ServiceError):
 
     def __init__(self, detail: str, *, status_code: int):
         super().__init__(detail, status_code=status_code)
+
+
+class DockerUnavailable(ServiceError):
+    """The Docker daemon could not be reached -> 503 'Docker is unavailable'.
+
+    Raised by any layer whose operation needs the Docker daemon when the
+    connection fails (``docker.errors.DockerException`` /
+    ``requests.ConnectionError``). Replaces the hand-rolled ``HTTPException(503,
+    "Docker is unavailable")`` the routers used inline (AR-R3-2). The underlying
+    ``str(exc)`` — which can embed the socket path — is logged server-side by the
+    caller; only the static ``detail`` reaches the client.
+    """
+
+    status_code = 503
+    detail = "Docker is unavailable"
+
+
+class UpstreamApiError(ServiceError):
+    """An external/upstream API call failed -> 502 (Bad Gateway).
+
+    Covers the Cloudflare API (orphan-cleanup retry) and the Docker log proxy
+    (developer main-logs) failures the routers used to map inline with
+    ``HTTPException(502, f"...: {exc}")`` (AR-R3-2). The concrete failure
+    (``str(exc)`` — may embed a token, socket path, or remote error body) is
+    logged server-side by the caller; only a static, non-leaking ``detail``
+    reaches the client. Callers pass the contextual static message
+    (e.g. ``"Cloudflare API error"``) but never interpolate ``str(exc)``.
+    """
+
+    status_code = 502
+    detail = "Upstream service request failed"

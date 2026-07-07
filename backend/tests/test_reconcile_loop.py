@@ -244,7 +244,7 @@ class TestHealthCheckAll:
         with (
             patch("app.health.health_checker.run_health_checks", return_value={"ok": True}),
             patch("app.health.health_checker.aggregate_status", return_value="healthy"),
-            patch("app.reconciler.reconciler._persist_status") as mock_persist,
+            patch("app.reconciler.reconcile_loop._persist_status") as mock_persist,
             patch.object(loop_mod, "reconcile_one") as mock_reconcile,
         ):
             count = loop_mod.health_check_all(db_session, socket_path=None)
@@ -262,7 +262,7 @@ class TestHealthCheckAll:
         with (
             patch("app.health.health_checker.run_health_checks", return_value={"ok": False}),
             patch("app.health.health_checker.aggregate_status", return_value="error"),
-            patch("app.reconciler.reconciler._persist_status") as mock_persist,
+            patch("app.reconciler.reconcile_loop._persist_status") as mock_persist,
             patch.object(loop_mod, "reconcile_one") as mock_reconcile,
         ):
             count = loop_mod.health_check_all(db_session, socket_path="unix:///custom.sock")
@@ -282,7 +282,7 @@ class TestHealthCheckAll:
         with (
             patch("app.health.health_checker.run_health_checks", return_value={"ok": True}),
             patch("app.health.health_checker.aggregate_status", return_value="healthy"),
-            patch("app.reconciler.reconciler._persist_status"),
+            patch("app.reconciler.reconcile_loop._persist_status"),
             patch.object(loop_mod, "reconcile_one"),
         ):
             count = loop_mod.health_check_all(db_session)
@@ -297,7 +297,7 @@ class TestHealthCheckAll:
                 side_effect=[RuntimeError("boom"), {"ok": True}],
             ),
             patch("app.health.health_checker.aggregate_status", return_value="healthy"),
-            patch("app.reconciler.reconciler._persist_status"),
+            patch("app.reconciler.reconcile_loop._persist_status"),
             patch.object(loop_mod, "reconcile_one"),
         ):
             count = loop_mod.health_check_all(db_session)
@@ -354,7 +354,7 @@ class TestHealthCheckAll:
             with (
                 patch("app.health.health_checker.run_health_checks") as mock_health,
                 patch("app.health.health_checker.aggregate_status") as mock_aggregate,
-                patch("app.reconciler.reconciler._persist_status") as mock_persist,
+                patch("app.reconciler.reconcile_loop._persist_status") as mock_persist,
                 patch.object(loop_mod, "reconcile_one") as mock_reconcile,
             ):
                 count = loop_mod.health_check_all(db_session, socket_path=None)
@@ -383,7 +383,7 @@ class TestHealthCheckAll:
                 "app.health.health_checker.run_health_checks", return_value={"ok": True}
             ) as mock_health,
             patch("app.health.health_checker.aggregate_status", return_value="healthy"),
-            patch("app.reconciler.reconciler._persist_status") as mock_persist,
+            patch("app.reconciler.reconcile_loop._persist_status") as mock_persist,
             patch.object(loop_mod, "reconcile_one") as mock_reconcile,
         ):
             count = loop_mod.health_check_all(db_session, socket_path=None)

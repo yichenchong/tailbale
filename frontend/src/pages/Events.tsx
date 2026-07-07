@@ -93,12 +93,14 @@ export default function Events() {
           <input
             type="text"
             placeholder="Search messages..."
+            aria-label="Search event messages"
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             className="pl-9 pr-3 py-2 border rounded-md text-sm w-64"
           />
         </div>
         <select
+          aria-label="Filter by level"
           value={levelFilter}
           onChange={(e) => { setLevelFilter(e.target.value); setOffset(0) }}
           className="border rounded-md px-3 py-2 text-sm"
@@ -109,6 +111,7 @@ export default function Events() {
           <option value="error">Error</option>
         </select>
         <select
+          aria-label="Filter by kind"
           value={kindFilter}
           onChange={(e) => { setKindFilter(e.target.value); setOffset(0) }}
           className="border rounded-md px-3 py-2 text-sm"
@@ -136,11 +139,11 @@ export default function Events() {
             <table className="w-full text-sm">
               <thead className="bg-zinc-50 text-left text-zinc-600">
                 <tr>
-                  <th className="px-3 py-2 w-8"></th>
-                  <th className="px-3 py-2">Time</th>
-                  <th className="px-3 py-2">Level</th>
-                  <th className="px-3 py-2">Kind</th>
-                  <th className="px-3 py-2">Message</th>
+                  <th scope="col" className="px-3 py-2 w-8"><span className="sr-only">Details</span></th>
+                  <th scope="col" className="px-3 py-2">Time</th>
+                  <th scope="col" className="px-3 py-2">Level</th>
+                  <th scope="col" className="px-3 py-2">Kind</th>
+                  <th scope="col" className="px-3 py-2">Message</th>
                 </tr>
               </thead>
               <tbody>

@@ -675,7 +675,7 @@ class TestGetEdgeVersion:
 class TestReloadCaddy(_ConnectStubMixin):
     @patch("app.edge.container_manager._find_edge_container")
     def test_reloads_caddy(self, mock_find):
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -693,7 +693,7 @@ class TestReloadCaddy(_ConnectStubMixin):
     def test_raises_on_failure(self, mock_find):
         import pytest
 
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -707,7 +707,7 @@ class TestReloadCaddy(_ConnectStubMixin):
     def test_raises_if_not_found(self, mock_find):
         import pytest
 
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_find.return_value = None
         with pytest.raises(RuntimeError, match="Edge container not found"):
@@ -717,7 +717,7 @@ class TestReloadCaddy(_ConnectStubMixin):
     def test_raises_when_container_not_running(self, mock_find):
         """A non-running edge container can't be exec'd, so reload refuses early
         with a clear error instead of attempting (and failing) the exec."""
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "exited"
@@ -729,10 +729,10 @@ class TestReloadCaddy(_ConnectStubMixin):
             reload_caddy("svc_123", "edge_test")
         mock_container.exec_run.assert_not_called()
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.caddy_admin.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_retries_when_container_is_restarting(self, mock_find, mock_sleep):
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -751,12 +751,12 @@ class TestReloadCaddy(_ConnectStubMixin):
         assert mock_container.exec_run.call_count == 2
         mock_container.reload.assert_called()
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.caddy_admin.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_when_container_never_stabilizes(self, mock_find, mock_sleep):
         import pytest
 
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -769,7 +769,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         with pytest.raises(RuntimeError, match="never reached a stable running container"):
             reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.caddy_admin.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_real_reload_failure_after_transient_conflict_is_not_masked(
         self, mock_find, mock_sleep
@@ -778,7 +778,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         error, not the transient "restarting" conflict from an earlier attempt."""
         import pytest
 
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -799,7 +799,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         assert "invalid directive" in message
         assert "never reached a stable running container" not in message
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.caddy_admin.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_retries_when_admin_api_connection_refused(self, mock_find, mock_sleep):
         """Caddy's admin API (:2019) may not be up immediately after the
@@ -807,7 +807,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         refused". This is the documented reason reload_caddy retries, so it must
         retry and succeed once the API is ready instead of surfacing the
         transient error as a hard failure."""
-        from app.edge.container_manager import reload_caddy
+        from app.edge.caddy_admin import reload_caddy
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -824,10 +824,10 @@ class TestReloadCaddy(_ConnectStubMixin):
 
 
 class TestDetectTailscaleIp(_ConnectStubMixin):
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.tailscale_ops.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_detects_ip_via_tailscale_ip(self, mock_find, mock_sleep):
-        from app.edge.container_manager import detect_tailscale_ip
+        from app.edge.tailscale_ops import detect_tailscale_ip
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -837,10 +837,10 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.1"
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.tailscale_ops.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_detects_ip_via_status_json(self, mock_find, mock_sleep):
-        from app.edge.container_manager import detect_tailscale_ip
+        from app.edge.tailscale_ops import detect_tailscale_ip
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -859,10 +859,10 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.2"
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.tailscale_ops.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_retries_on_failure(self, mock_find, mock_sleep):
-        from app.edge.container_manager import detect_tailscale_ip
+        from app.edge.tailscale_ops import detect_tailscale_ip
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -876,10 +876,10 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=2, retry_delay=0)
         assert result == "100.64.0.3"
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.tailscale_ops.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_none_after_max_retries(self, mock_find, mock_sleep):
-        from app.edge.container_manager import detect_tailscale_ip
+        from app.edge.tailscale_ops import detect_tailscale_ip
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -891,16 +891,16 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_none_if_container_not_found(self, mock_find):
-        from app.edge.container_manager import detect_tailscale_ip
+        from app.edge.tailscale_ops import detect_tailscale_ip
 
         mock_find.return_value = None
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result is None
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.tailscale_ops.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_ignores_non_tailscale_ips(self, mock_find, mock_sleep):
-        from app.edge.container_manager import detect_tailscale_ip
+        from app.edge.tailscale_ops import detect_tailscale_ip
 
         mock_container = MagicMock()
         mock_container.status = "running"
@@ -938,7 +938,7 @@ def _create_service_via_api(client, **overrides):
 class TestDockerSocketConsistency:
     """Verify that action endpoints pass the configured Docker socket to helpers."""
 
-    @patch("app.edge.container_manager.reload_caddy")
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_passes_socket(self, mock_reload, client, db_session):
         from app.settings_store import set_setting
         set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")

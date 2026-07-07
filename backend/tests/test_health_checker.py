@@ -1281,6 +1281,21 @@ class TestCertPresentCurrentSymlink:
             mock_expiry.return_value = datetime.now(UTC) + timedelta(days=40)
             assert _check_cert_not_expiring(svc, tmp_path, 30) is True
 
+    def test_huge_window_overflows_to_expiring(self, tmp_path):
+        """CHR / AR-R3-8: a renewal window so large the threshold overflows the
+        representable datetime range reads as expiring (False) — no expiry can
+        exceed an unrepresentable threshold. Behavior-preserving after the
+        days_from_now migration (returns None instead of raising OverflowError,
+        which was previously caught as False)."""
+        from app.health.health_checker import _check_cert_not_expiring
+
+        svc = self._svc()
+        self._publish_cert(tmp_path, svc)
+        with patch("app.certs.cert_manager.get_cert_expiry") as mock_expiry:
+            from datetime import UTC, datetime, timedelta
+            mock_expiry.return_value = datetime.now(UTC) + timedelta(days=3650)
+            assert _check_cert_not_expiring(svc, tmp_path, 10**9) is False
+
     def test_default_window_when_no_db_value(self, tmp_path, db_session):
         """With no ``cert_renewal_window_days`` stored, the setting-driven
         subcheck resolves the DEFAULTS 30-day window: ~20 days out is expiring
@@ -1295,3 +1310,166 @@ class TestCertPresentCurrentSymlink:
             assert _cert_not_expiring_subcheck(db_session, svc, tmp_path) is False
             mock_expiry.return_value = datetime.now(UTC) + timedelta(days=40)
             assert _cert_not_expiring_subcheck(db_session, svc, tmp_path) is True
+
+
+# ---------------------------------------------------------------------------
+# CHR / AR-R3-16a: single-source check-name registry
+# ---------------------------------------------------------------------------
+
+
+class TestHealthCheckRegistry:
+    """The check-name registry is the single source of truth for both result
+    dicts, so the Docker-unreachable fallback cannot omit a check the happy path
+    returns (the drift the two hand-listed dicts used to risk)."""
+
+    def test_registry_partitions_into_critical_and_warning(self):
+        from app.health.health_checker import ALL_CHECK_NAMES
+
+        # Every registered check is classified exactly once — critical/warning
+        # together cover the registry and never overlap.
+        assert set(ALL_CHECK_NAMES) == set(CRITICAL_CHECKS) | set(WARNING_CHECKS)
+        assert set(CRITICAL_CHECKS).isdisjoint(WARNING_CHECKS)
+        assert len(ALL_CHECK_NAMES) == len(set(ALL_CHECK_NAMES))  # no duplicates
+
+    def test_offline_fallback_returns_exactly_the_registry(self, db_session, tmp_data_dir):
+        from app.health.health_checker import ALL_CHECK_NAMES
+
+        svc = _create_service(db_session)
+        with patch("app.health.health_checker.connect", side_effect=Exception("Docker down")):
+            checks = run_health_checks(
+                db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
+            )
+        # The fallback is built from the same registry as the happy path via
+        # dict.fromkeys, so its keys are exactly the registry.
+        assert set(checks) == set(ALL_CHECK_NAMES)
+
+
+# ---------------------------------------------------------------------------
+# CHR / AR-R3-16b: probe-result classifier extracted from _check_https_probe
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyProbeResult:
+    """Direct coverage of the 5-branch classifier, testable without a container."""
+
+    def test_2xx_is_healthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"200") is True
+
+    def test_3xx_is_healthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"301") is True
+
+    def test_4xx_is_healthy(self):
+        # 4xx (e.g. auth required) still means Caddy is serving the route.
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"401") is True
+
+    def test_nonzero_curl_exit_is_unhealthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(7, b"curl: (7) Failed to connect") is False
+
+    def test_5xx_is_unhealthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"502") is False
+
+    def test_no_response_000_is_unhealthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"000") is False
+
+    def test_non_three_digit_status_is_unhealthy(self):
+        # Regression: a truncated 2-char numeric status must not slip past isdigit().
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"00") is False
+
+    def test_empty_output_is_unhealthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"") is False
+
+    def test_none_output_is_unhealthy(self):
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, None) is False
+
+    def test_status_is_parsed_from_last_three_chars(self):
+        # The parser takes the trailing 3 chars, so a trailing numeric code
+        # classifies on that suffix and a trailing non-digit run does not.
+        from app.health.health_checker import _classify_probe_result
+
+        assert _classify_probe_result(0, b"xx200") is True
+        assert _classify_probe_result(0, b"200xx") is False
+
+
+# ---------------------------------------------------------------------------
+# CHR / CI-OBS3: Docker-unreachable fallback honors the requested live_dns flag
+# ---------------------------------------------------------------------------
+
+
+class TestOfflineFallbackHonorsLiveDns:
+    """When Docker is unreachable, a manual full check with live_dns=True must
+    still consult Cloudflare for DNS presence (the DNS subcheck needs no Docker).
+    The fallback previously dropped the live flag, silently falling back to the DB
+    mirror and reporting an out-of-band-deleted record as still present."""
+
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    def test_fallback_consults_live_cloudflare_when_requested(
+        self, mock_find_record, db_session, tmp_data_dir
+    ):
+        from app.secrets import CLOUDFLARE_TOKEN, write_secret
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session)
+        # A stale local mirror still records the A record...
+        db_session.add(DnsRecord(
+            service_id=svc.id, hostname=svc.hostname, record_id="r1", value="100.64.0.1",
+        ))
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+        write_secret(CLOUDFLARE_TOKEN, "cf-token")
+        # ...but the record was deleted out of band in Cloudflare.
+        mock_find_record.return_value = None
+
+        with patch("app.health.health_checker.connect", side_effect=Exception("Docker down")):
+            checks = run_health_checks(
+                db_session,
+                svc,
+                tmp_data_dir / "generated",
+                tmp_data_dir / "certs",
+                live_dns=True,
+            )
+
+        # Before the fix the live flag was dropped: find_record was never called
+        # and dns_record_present trusted the stale DB mirror (True).
+        mock_find_record.assert_called_once_with("cf-token", "zone123", svc.hostname, "A")
+        assert checks["dns_record_present"] is False
+
+    def test_fallback_stays_db_only_for_automatic_sweep(self, db_session, tmp_data_dir):
+        # The automatic 60s sweep does not request live_dns, so the fallback must
+        # NOT reach out to Cloudflare — honoring the flag must not become always-live.
+        from app.settings_store import set_setting
+
+        svc = _create_service(db_session)
+        db_session.add(DnsRecord(
+            service_id=svc.id, hostname=svc.hostname, record_id="r1", value="100.64.0.1",
+        ))
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        with (
+            patch("app.health.health_checker.connect", side_effect=Exception("Docker down")),
+            patch("app.adapters.cloudflare_adapter.find_record") as mock_find_record,
+        ):
+            checks = run_health_checks(
+                db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
+            )
+
+        mock_find_record.assert_not_called()
+        assert checks["dns_record_present"] is True  # DB mirror

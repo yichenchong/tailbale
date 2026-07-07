@@ -19,7 +19,7 @@ def _create_service(client, **overrides):
 
 
 class TestReloadEndpoint:
-    @patch("app.edge.container_manager.reload_caddy")
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_success(self, mock_reload, client):
         svc_id = _create_service(client).json()["id"]
         mock_reload.return_value = "config reloaded"
@@ -30,7 +30,7 @@ class TestReloadEndpoint:
         assert data["success"] is True
         assert "reloaded" in data["message"].lower()
 
-    @patch("app.edge.container_manager.reload_caddy")
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_failure(self, mock_reload, client):
         svc_id = _create_service(client).json()["id"]
         mock_reload.side_effect = RuntimeError("Edge container not found")
@@ -42,7 +42,7 @@ class TestReloadEndpoint:
         resp = client.post("/api/services/svc_nonexistent/reload")
         assert resp.status_code == 404
 
-    @patch("app.edge.container_manager.reload_caddy")
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_emits_event(self, mock_reload, client, db_session):
         from app.models.event import Event
 

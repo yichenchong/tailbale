@@ -24,8 +24,8 @@ from app.edge import docker_client
 from app.health import health_checker
 from app.locks import forget_reconcile_lock, try_service_reconcile_lock
 from app.models.service import Service
-from app.reconciler import reconciler
 from app.reconciler.reconciler import reconcile_service
+from app.reconciler.status import _persist_status
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +143,7 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
                     continue
                 checks = health_checker.run_health_checks(db, svc, generated_dir, certs_dir, socket_path)
                 phase = health_checker.aggregate_status(checks)
-                reconciler._persist_status(
+                _persist_status(
                     db,
                     service_id,
                     phase=phase,

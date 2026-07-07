@@ -118,7 +118,7 @@ export function jsonOk(body: JsonBody) {
 
 /** Fetch mock that resolves an error Response (`ok:false`) carrying `{ detail }`. */
 export function jsonError(detail: string, status = 500) {
-  return vi.fn(() =>
+  return vi.fn((_input?: string | URL | Request, _init?: RequestInit) =>
     Promise.resolve({
       ok: false,
       status,
@@ -129,5 +129,5 @@ export function jsonError(detail: string, status = 500) {
 
 /** Fetch mock whose promise never settles — pins a component in its loading state. */
 export function pendingFetch() {
-  return vi.fn(() => new Promise<FakeResponse>(() => {}))
+  return vi.fn((_input?: string | URL | Request, _init?: RequestInit) => new Promise<FakeResponse>(() => {}))
 }

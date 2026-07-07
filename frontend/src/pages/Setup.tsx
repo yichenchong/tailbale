@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type ConnectionTestResult, type SetupProgress } from "@/lib/api"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 import { isEmailLike } from "@/lib/validation"
 import { Loader2, CheckCircle, XCircle, ArrowRight, ArrowLeft } from "lucide-react"
 
@@ -153,7 +153,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         navigate("/", { replace: true })
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     } finally {
       submittingRef.current = false
       setSaving(false)
@@ -222,7 +222,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
   }
 
   return (
-    <div className="mx-auto max-w-lg py-12 px-4">
+    <main className="mx-auto max-w-lg py-12 px-4">
       <h1 className="text-2xl font-bold">Welcome to tailBale</h1>
       <p className="mt-1 text-zinc-500">Let's configure your orchestrator.</p>
 
@@ -444,6 +444,6 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
           </button>
         </div>
       </form>
-    </div>
+    </main>
   )
 }

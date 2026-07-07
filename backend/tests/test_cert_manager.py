@@ -1109,3 +1109,48 @@ class TestCertKeyPairMatches:
         key_path.write_text("not a key")
 
         assert cert_key_pair_matches(cert_path, key_path) is True
+
+
+class TestRenewFallbackAfterSC2Cleanup:
+    """SC2 removes lego's per-hostname cert artifacts on service delete /
+    hostname change. That is only safe because ``renew_cert`` falls back to a
+    fresh issue when the lego state is absent. This regression test pins that
+    load-bearing fallback: given a served cert dir but NO ``.lego/certificates``
+    state (exactly the post-cleanup shape), renew_cert must re-issue and report
+    ``fresh_issued=True`` rather than failing."""
+
+    @patch("app.certs.cert_manager._run_lego")
+    def test_renew_reissues_when_sc2_cleared_lego_state(self, mock_lego, tmp_path):
+        from app.certs.cert_manager import renew_cert
+
+        cert_dir = tmp_path / "certs" / "test.example.com"
+        lego_dir = tmp_path / "certs" / ".lego"
+        # The served cert dir survives, but SC2 wiped the lego per-hostname
+        # artifacts: leave lego_dir/certificates/*.{crt,key} absent so renew
+        # cannot proceed and must fall back to a fresh issue.
+        cert_dir.mkdir(parents=True)
+
+        # The fallback issue -> `lego run` re-creates the lego artifacts.
+        fresh_cert, fresh_key = _real_pem_pair(tag=99)
+
+        def fake_run_lego(args, **kwargs):
+            lego_certs = lego_dir / "certificates"
+            lego_certs.mkdir(parents=True, exist_ok=True)
+            (lego_certs / "test.example.com.crt").write_bytes(fresh_cert)
+            (lego_certs / "test.example.com.key").write_bytes(fresh_key)
+
+        mock_lego.side_effect = fake_run_lego
+
+        result_dir, fresh_issued = renew_cert(
+            "test.example.com", "a@b.com", "cf-token",
+            cert_dir, lego_dir, days=30,
+        )
+
+        assert result_dir == cert_dir
+        assert fresh_issued is True
+        # A fresh issue (`lego run`), never `renew`.
+        call_args = mock_lego.call_args.args[0]
+        assert "run" in call_args
+        assert "renew" not in call_args
+        # The freshly-issued cert is now the published pair.
+        assert (cert_dir / "current" / "fullchain.pem").read_bytes() == fresh_cert

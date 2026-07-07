@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type EdgeVersionResponse } from "@/lib/api"
 import { useTimezone, formatDate } from "@/lib/useTimezone"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 import { phaseStyle } from "@/lib/statusStyles"
 import { Loader2, ArrowLeft } from "lucide-react"
 import { useServiceDetail } from "@/components/service/useServiceDetail"
@@ -68,7 +68,7 @@ export default function ServiceDetail() {
       await loadEdgeVersion()
       void refresh({ background: true })
     } catch (e) {
-      showActionMsg(e instanceof Error ? e.message : String(e))
+      showActionMsg(errorMessage(e))
     } finally {
       setUpdatingEdge(false)
     }
@@ -191,8 +191,13 @@ function LogsTabs() {
   const [logsTab, setLogsTab] = useState<"edge" | "events">("edge")
   return (
     <div className="mt-6 rounded-md border border-zinc-200">
-      <div className="flex border-b border-zinc-200">
+      <div className="flex border-b border-zinc-200" role="tablist" aria-label="Service logs">
         <button
+          type="button"
+          role="tab"
+          id="logs-tab-edge"
+          aria-selected={logsTab === "edge"}
+          aria-controls="logs-panel"
           onClick={() => setLogsTab("edge")}
           className={cn(
             "px-4 py-2.5 text-sm font-medium",
@@ -202,6 +207,11 @@ function LogsTabs() {
           Edge Logs
         </button>
         <button
+          type="button"
+          role="tab"
+          id="logs-tab-events"
+          aria-selected={logsTab === "events"}
+          aria-controls="logs-panel"
           onClick={() => setLogsTab("events")}
           className={cn(
             "px-4 py-2.5 text-sm font-medium",
@@ -211,7 +221,12 @@ function LogsTabs() {
           Events
         </button>
       </div>
-      <div className="flex min-h-[200px] items-center justify-center p-6">
+      <div
+        className="flex min-h-[200px] items-center justify-center p-6"
+        role="tabpanel"
+        id="logs-panel"
+        aria-labelledby={logsTab === "edge" ? "logs-tab-edge" : "logs-tab-events"}
+      >
         <p className="text-sm text-zinc-400">
           {logsTab === "edge"
             ? "Edge container logs will appear here once the reconciler is running."

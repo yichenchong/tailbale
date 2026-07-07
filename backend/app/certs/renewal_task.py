@@ -33,7 +33,7 @@ from app.models.certificate import Certificate
 from app.models.service import Service
 from app.secrets import CLOUDFLARE_TOKEN, read_secret
 from app.settings_store import get_positive_int_setting, get_setting
-from app.timeutil import as_utc
+from app.timeutil import as_utc, days_from_now
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +119,11 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
     if current_expiry is not None:
         expiry_utc = as_utc(current_expiry)
         # force renews regardless of how far off expiry is; background callers
-        # only renew once inside the renewal window.
-        if force or expiry_utc - now <= timedelta(days=renewal_window):
+        # only renew once inside the renewal window. A window so large it
+        # overflows the representable range (days_from_now -> None) means the
+        # cutoff is effectively infinite, so any real expiry is within it: renew.
+        window_cutoff = days_from_now(renewal_window)
+        if force or window_cutoff is None or expiry_utc <= window_cutoff:
             needs_renew = True
 
     if not needs_issue and not needs_renew:

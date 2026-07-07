@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.orm import Session
 
@@ -19,6 +18,7 @@ from app.backoff import run_periodic
 from app.database import SessionLocal, commit_with_lock, db_write_section
 from app.models.event import Event
 from app.settings_store import get_positive_int_setting
+from app.timeutil import days_from_now
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +35,14 @@ def purge_old_events(db: Session, *, retention_days: int) -> int:
 
     An absurdly large ``retention_days`` (no upper bound is enforced at write —
     settings only validate ``ge=1``) would push the cutoff past the minimum
-    representable date and make ``datetime`` raise ``OverflowError`` *before* the
-    query even runs. Left unguarded that aborts every sweep, so the retention
-    loop backs off forever and the events table grows unbounded — the exact
-    failure retention exists to prevent. Treat that as "no event is old enough
-    to delete" (return 0) instead of raising.
+    representable date, so ``days_from_now`` returns ``None`` instead of a
+    datetime. Left unguarded (raising ``OverflowError``) that would abort every
+    sweep, so the retention loop backs off forever and the events table grows
+    unbounded — the exact failure retention exists to prevent. Treat a ``None``
+    cutoff as "no event is old enough to delete" (return 0).
     """
-    try:
-        cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-    except OverflowError:
+    cutoff = days_from_now(-retention_days)
+    if cutoff is None:
         logger.warning(
             "event_retention_days=%d is too large to compute a cutoff; "
             "nothing is old enough to purge",

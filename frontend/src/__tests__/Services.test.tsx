@@ -162,10 +162,7 @@ describe("Services page", () => {
       ...mockServiceData,
       services: [{ ...mockServiceData.services[0], id: "svc/abc 123" }],
     }
-    const fetchMock = vi.fn((url: string, init?: RequestInit) => Promise.resolve({
-      ok: true,
-      json: () => Promise.resolve(init?.method === "POST" ? { success: true } : data),
-    }))
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => Promise.resolve({ ok: true, json: () => Promise.resolve(init?.method === "POST" ? { success: true } : data), }))
     vi.stubGlobal("fetch", fetchMock)
     const { default: Services } = await import("@/pages/Services")
     renderRoute(<Services />)
@@ -385,7 +382,7 @@ describe("Services page", () => {
     // there must NOT wipe the already-rendered table (only the initial mount
     // load clears the list). The error surfaces non-destructively instead.
     let reloadShouldFail = false
-    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) => {
       if (!init?.method || init.method === "GET") {
         if (reloadShouldFail) {
           return Promise.resolve({
@@ -429,7 +426,7 @@ describe("Services page", () => {
   it("cleans up the DNS record when deleting a service from the row menu", async () => {
     // Regression: the row-menu delete used to omit cleanup_dns, silently leaving
     // an orphaned Cloudflare DNS record (the detail page defaults to cleanup).
-    const fetchMock = vi.fn((url: string, init?: RequestInit) =>
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
       Promise.resolve({
         ok: true,
         json: () => Promise.resolve(init?.method === "DELETE" ? {} : mockServiceData),
@@ -459,7 +456,7 @@ describe("Services page", () => {
     // The window.confirm gate guards a destructive, irreversible delete: when the
     // user cancels, handleDelete must bail before touching the API and leave the
     // row in place.
-    const fetchMock = vi.fn((url: string, init?: RequestInit) =>
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
       Promise.resolve({
         ok: true,
         json: () => Promise.resolve(init?.method === "DELETE" ? {} : mockServiceData),
@@ -482,5 +479,39 @@ describe("Services page", () => {
     ).toBe(false)
     // The row survives a cancelled delete.
     expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+  })
+})
+
+describe("Services page a11y contract (FPA)", () => {
+  it("marks every table column header with scope=col", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+    const headers = screen.getAllByRole("columnheader")
+    expect(headers).toHaveLength(7)
+    headers.forEach((h) => expect(h).toHaveAttribute("scope", "col"))
+  })
+
+  it("exposes the actions menu button's popup + expanded state", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+    const btn = screen.getByLabelText("Actions")
+    expect(btn).toHaveAttribute("aria-haspopup", "true")
+    expect(btn).toHaveAttribute("aria-expanded", "false")
+    fireEvent.click(btn)
+    expect(btn).toHaveAttribute("aria-expanded", "true")
   })
 })

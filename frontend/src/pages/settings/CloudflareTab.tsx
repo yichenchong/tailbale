@@ -1,12 +1,11 @@
-import { useState } from "react"
+import { useId } from "react"
 import { type AllSettings, type ConnectionTestResult } from "@/lib/api"
 import { isNonBlank } from "@/lib/validation"
 import { useDirtyForm } from "@/lib/useDirtyForm"
+import { useSecretField, clearOnSuccess } from "@/lib/useSecretField"
 import { Field } from "@/components/settings/Field"
-import { SaveButton } from "@/components/settings/SaveButton"
-import { TestButton } from "@/components/settings/TestButton"
-import { TestResultBanner } from "@/components/settings/TestResultBanner"
 import { SecretStatus } from "@/components/settings/SecretStatus"
+import { ConnectionSection } from "@/components/settings/ConnectionSection"
 import { type SaveHandler } from "./useSettings"
 
 export function CloudflareTab({
@@ -25,13 +24,16 @@ export function CloudflareTab({
   testResult: ConnectionTestResult | null
 }) {
   const { values, bind, save } = useDirtyForm(settings, (s) => ({ zone_id: s.zone_id }))
-  const [token, setToken] = useState("")
+  const token = useSecretField()
+  const tokenStatusId = useId()
 
   const handleSave = () =>
-    save(async () => {
-      await onSave({ zone_id: values.zone_id, token: token || undefined })
-      setToken("")
-    })
+    save(
+      clearOnSuccess(
+        () => onSave({ zone_id: values.zone_id, token: token.payload }),
+        token,
+      ),
+    )
 
   const zoneValid = isNonBlank(values.zone_id)
 
@@ -41,26 +43,27 @@ export function CloudflareTab({
       <div>
         <Field
           label="API Token"
-          value={token}
-          onChange={setToken}
+          value={token.value}
+          onChange={token.set}
           type="password"
           placeholder="Enter new token to update"
           hint="Write-only — current value is never shown"
           autoComplete="off"
+          describedById={tokenStatusId}
         />
         <div className="mt-1">
-          <SecretStatus configured={settings.token_configured} />
+          <SecretStatus configured={settings.token_configured} id={tokenStatusId} />
         </div>
       </div>
-      <div className="flex gap-2">
-        <SaveButton
-          saving={saving}
-          onClick={handleSave}
-          disabled={!zoneValid}
-        />
-        <TestButton testing={testing} onClick={onTest} label="Test Connection" />
-      </div>
-      {testResult && <TestResultBanner result={testResult} />}
+      <ConnectionSection
+        saving={saving}
+        onSave={handleSave}
+        saveDisabled={!zoneValid}
+        testing={testing}
+        onTest={onTest}
+        testLabel="Test Connection"
+        testResult={testResult}
+      />
     </div>
   )
 }

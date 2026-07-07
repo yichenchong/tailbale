@@ -251,6 +251,50 @@ class TestDirectReconcileMarkersAndEvents:
         # reconcile_completed is emitted once per pass.
         assert kinds.get("reconcile_completed", 0) == 2
 
+    def test_hostname_change_reprovisions_new_cert_config_and_reload(
+        self, db_session, fake_docker, tmp_data_dir
+    ):
+        # AR-R3-13 integration seam: after a service's hostname changes, the next
+        # reconcile must re-provision for the NEW hostname — create its cert dir,
+        # re-render the Caddyfile against the new host, notice the config change
+        # and reload, and record the new served-cert fingerprint. Previously this
+        # re-provision path was only exercised end-to-end via the services API test.
+        secrets.write_secret(secrets.TAILSCALE_AUTH_KEY, "tskey-auth-integration-xyz")
+        write_valid_cert(tmp_data_dir / "certs", "direct.example.com")
+        fake_docker.register_upstream("upstream123", "nextcloud")
+        svc = self._make_service(db_session)
+
+        first = reconcile_service(db_session, svc, socket_path=FAKE_SOCKET)
+        assert first["caddy_reloaded"] is True
+
+        paths = settings_store.get_runtime_paths(db_session)
+        service_dir = Path(paths["generated_dir"]) / svc.id
+        certs_dir = Path(paths["certs_dir"])
+        assert "direct.example.com" in (service_dir / "Caddyfile").read_text(encoding="utf-8")
+        old_fp = (service_dir / ".cert_loaded").read_text(encoding="utf-8").strip()
+
+        # Re-provision: the operator changed the hostname and a fresh valid cert
+        # landed on disk under the new hostname (cert issuance itself is out of
+        # scope here, as elsewhere in this file which pre-seeds via write_valid_cert).
+        write_valid_cert(certs_dir, "renamed.example.com")
+        svc.hostname = "renamed.example.com"
+        db_session.commit()
+
+        second = reconcile_service(db_session, svc, socket_path=FAKE_SOCKET)
+
+        assert second["error"] is None
+        # New host -> rendered config differs -> a reload is issued.
+        assert second["caddy_reloaded"] is True
+        assert (certs_dir / "renamed.example.com").is_dir()
+        new_caddyfile = (service_dir / "Caddyfile").read_text(encoding="utf-8")
+        assert "renamed.example.com" in new_caddyfile
+        assert "direct.example.com" not in new_caddyfile
+        # The served-cert fingerprint now tracks the new hostname's certificate.
+        new_cert = certs_dir / "renamed.example.com" / "current" / "fullchain.pem"
+        new_fp = (service_dir / ".cert_loaded").read_text(encoding="utf-8").strip()
+        assert new_fp == hashlib.sha256(new_cert.read_bytes()).hexdigest()
+        assert new_fp != old_fp
+
 
 class _FakeCFResponse:
     """Minimal stand-in for an ``httpx2.Response`` (only what cloudflare_adapter reads)."""

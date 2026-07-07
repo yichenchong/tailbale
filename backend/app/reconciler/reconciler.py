@@ -12,74 +12,14 @@ from datetime import UTC, datetime
 
 from sqlalchemy.orm import Session
 
-from app.database import commit_with_lock, db_write_section, rollback_with_lock
-from app.events.event_emitter import emit_event
+from app.database import rollback_with_lock
 from app.locks import forget_reconcile_lock, service_reconcile_lock
 from app.models.service import Service
-from app.models.service_status import ServiceStatus
 from app.reconciler import steps
+from app.reconciler.errors import ReconcileError
+from app.reconciler.status import _persist_status, _update_phase
 
 logger = logging.getLogger(__name__)
-
-
-_UNSET = object()
-
-
-class ReconcileError(Exception):
-    """Raised when reconciliation hits a non-recoverable failure."""
-
-
-def _load_or_create_status(db: Session, service_id: str) -> ServiceStatus:
-    status = db.get(ServiceStatus, service_id)
-    if status is None:
-        status = ServiceStatus(service_id=service_id, phase="pending")
-        db.add(status)
-    return status
-
-
-def _persist_status(
-    db: Session,
-    service_id: str,
-    *,
-    phase: str | object = _UNSET,
-    message: str | None | object = _UNSET,
-    edge_container_id: str | None | object = _UNSET,
-    tailscale_ip: str | None | object = _UNSET,
-    health_checks: dict | object = _UNSET,
-    last_probe_at: datetime | None | object = _UNSET,
-    last_reconciled_at: datetime | None | object = _UNSET,
-    event: dict | None = None,
-) -> None:
-    with service_reconcile_lock(service_id), db_write_section(db):
-        status = _load_or_create_status(db, service_id)
-        if phase is not _UNSET:
-            status.phase = phase
-        if message is not _UNSET:
-            status.message = message
-        if edge_container_id is not _UNSET:
-            status.edge_container_id = edge_container_id
-        if tailscale_ip is not _UNSET:
-            status.tailscale_ip = tailscale_ip
-        if health_checks is not _UNSET:
-            status.health_checks = health_checks
-        if last_probe_at is not _UNSET:
-            status.last_probe_at = last_probe_at
-        if last_reconciled_at is not _UNSET:
-            status.last_reconciled_at = last_reconciled_at
-        if event is not None:
-            emit_event(
-                db,
-                event.get("service_id", service_id),
-                event["kind"],
-                event["message"],
-                level=event.get("level", "info"),
-                details=event.get("details"),
-            )
-        commit_with_lock(db)
-
-
-def _update_phase(db: Session, service_id: str, phase: str, message: str | None = None) -> None:
-    _persist_status(db, service_id, phase=phase, message=message)
 
 
 def reconcile_service(

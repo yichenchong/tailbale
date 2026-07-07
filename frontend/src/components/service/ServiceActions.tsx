@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import {
   Loader2,
@@ -13,6 +13,7 @@ import {
   AlertTriangle,
 } from "lucide-react"
 import { api, type ServiceItem, type EdgeVersionResponse } from "@/lib/api"
+import { errorMessage } from "@/lib/utils"
 
 /**
  * Lifecycle action bar + confirmation flows for a service: enable/disable (with a
@@ -53,6 +54,45 @@ export function ServiceActions({
   const [confirmRecreate, setConfirmRecreate] = useState(false)
   const [confirmForceRenew, setConfirmForceRenew] = useState(false)
   const [renewing, setRenewing] = useState(false)
+  const dialogRef = useRef<HTMLDivElement | null>(null)
+  const forceRenewTriggerRef = useRef<HTMLElement | null>(null)
+
+  // Focus management for the force-renew dialog (WCAG 2.4.3): on open, remember
+  // the element that triggered it and move focus into the dialog; trap Tab
+  // within it and close on Escape; on close, restore focus to the trigger.
+  useEffect(() => {
+    if (!confirmForceRenew) return
+    forceRenewTriggerRef.current = document.activeElement as HTMLElement | null
+    const focusables = () =>
+      dialogRef.current?.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+      )
+    focusables()?.[0]?.focus()
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault()
+        setConfirmForceRenew(false)
+        return
+      }
+      if (e.key !== "Tab") return
+      const items = focusables()
+      if (!items || items.length === 0) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => {
+      document.removeEventListener("keydown", onKeyDown)
+      forceRenewTriggerRef.current?.focus()
+    }
+  }, [confirmForceRenew])
 
   const runAction = async (action: () => Promise<unknown>) => {
     clearActionMsg()
@@ -60,7 +100,7 @@ export function ServiceActions({
       await action()
       void refresh({ background: true })
     } catch (e) {
-      showActionMsg(e instanceof Error ? e.message : String(e))
+      showActionMsg(errorMessage(e))
     }
   }
 
@@ -75,7 +115,7 @@ export function ServiceActions({
         applyServiceUpdate(svc)
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
     }
   }
 
@@ -90,7 +130,7 @@ export function ServiceActions({
       await api.services.remove(id ?? "", { cleanupDns })
       navigate("/services")
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       setDeleting(false)
     }
   }
@@ -111,7 +151,7 @@ export function ServiceActions({
         void refresh({ background: true })
       }
     } catch (e) {
-      showActionMsg(e instanceof Error ? e.message : String(e))
+      showActionMsg(errorMessage(e))
     } finally {
       setRenewing(false)
     }
@@ -126,7 +166,7 @@ export function ServiceActions({
       showActionMsg(r.message)
       void refresh({ background: true })
     } catch (e) {
-      showActionMsg(e instanceof Error ? e.message : String(e))
+      showActionMsg(errorMessage(e))
     } finally {
       setRenewing(false)
     }
@@ -234,6 +274,7 @@ export function ServiceActions({
           refused (needs_force): the cert is healthy and far from expiry. */}
       {confirmForceRenew && (
         <div
+          ref={dialogRef}
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
           role="dialog"
           aria-modal="true"

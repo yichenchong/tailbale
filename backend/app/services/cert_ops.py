@@ -6,15 +6,13 @@ expiry cert unless forced, otherwise drive ``renewal_task.process_service_cert``
 Exceptions propagate to the router, which maps them to a generic 500.
 """
 
-from datetime import UTC, datetime, timedelta
-
 from sqlalchemy.orm import Session
 
 from app import secrets, settings_store
 from app.certs import renewal_task
 from app.models.certificate import Certificate
 from app.models.service import Service
-from app.timeutil import as_utc
+from app.timeutil import as_utc, days_from_now, iso
 
 
 def renew_cert(db: Session, svc: Service, *, force: bool) -> dict:
@@ -52,13 +50,11 @@ def renew_cert(db: Session, svc: Service, *, force: bool) -> dict:
         expires_utc = as_utc(expires_at)
         window_days = settings_store.get_positive_int_setting(db, "cert_renewal_window_days")
         # Schema bounds cert_renewal_window_days at write, but a legacy/directly-set
-        # huge value would overflow `timedelta(days=window_days)` and 500 this
-        # manual-renew endpoint. An unbounded window means "renew eagerly", so an
-        # overflow is correctly NOT far_healthy (fall through to a real renewal).
-        try:
-            far_healthy = expires_utc - datetime.now(UTC) > timedelta(days=window_days)
-        except OverflowError:
-            far_healthy = False
+        # huge value overflows the representable date range (days_from_now -> None).
+        # An unbounded window means "renew eagerly", so a None cutoff is correctly
+        # NOT far_healthy (fall through to a real renewal).
+        window_cutoff = days_from_now(window_days)
+        far_healthy = window_cutoff is not None and expires_utc > window_cutoff
 
     if far_healthy and not force:
         return {
@@ -98,6 +94,6 @@ def renew_cert(db: Session, svc: Service, *, force: bool) -> dict:
         "performed": True,
         "needs_force": False,
         "message": f"Certificate processed for {svc.hostname}",
-        "expires_at": cert.expires_at.isoformat() if cert and cert.expires_at else None,
+        "expires_at": iso(cert.expires_at if cert else None),
         "last_failure": cert.last_failure if cert else None,
     }

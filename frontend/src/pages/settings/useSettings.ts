@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { setConfiguredTimezone } from "@/lib/useTimezone"
+import { errorMessage } from "@/lib/utils"
 import {
   api,
   type AllSettings,
@@ -113,7 +114,7 @@ export function useSettings(): UseSettingsResult {
       setTestResult({ service, result })
     } catch (e) {
       if (seq !== testSeqRef.current) return
-      setTestResult({ service, result: { success: false, message: e instanceof Error ? e.message : String(e) } })
+      setTestResult({ service, result: { success: false, message: errorMessage(e) } })
     } finally {
       if (seq === testSeqRef.current) setTestingService(null)
     }

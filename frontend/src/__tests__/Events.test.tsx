@@ -360,4 +360,35 @@ describe("Events page", () => {
       fetchMock.mock.calls.some((c: unknown[]) => String(c[0]).includes("offset=50"))
     ).toBe(true)
   })
+
+  it("gives the search box an accessible name", async () => {
+    vi.stubGlobal("fetch", mockFetch(mockEvents))
+    const { default: Events } = await import("@/pages/Events")
+    renderRoute(<Events />)
+    expect(
+      screen.getByLabelText("Search event messages")
+    ).toBeInTheDocument()
+  })
+
+  it("gives the level and kind filters accessible names", async () => {
+    vi.stubGlobal("fetch", mockFetch(mockEvents))
+    const { default: Events } = await import("@/pages/Events")
+    renderRoute(<Events />)
+    expect(screen.getByLabelText("Filter by level")).toBeInTheDocument()
+    expect(screen.getByLabelText("Filter by kind")).toBeInTheDocument()
+  })
+
+  it("marks every table column header with scope=col", async () => {
+    vi.stubGlobal("fetch", mockFetch(mockEvents))
+    const { default: Events } = await import("@/pages/Events")
+    renderRoute(<Events />)
+    await waitFor(() => {
+      expect(
+        screen.getByText("Certificate issued for nextcloud.example.com")
+      ).toBeInTheDocument()
+    })
+    const headers = screen.getAllByRole("columnheader")
+    expect(headers).toHaveLength(5)
+    headers.forEach((h) => expect(h).toHaveAttribute("scope", "col"))
+  })
 })

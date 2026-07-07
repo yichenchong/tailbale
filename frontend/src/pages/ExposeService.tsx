@@ -11,6 +11,7 @@ import {
   SERVICE_NAME_LENGTH_MESSAGE,
   UPSTREAM_PORT_MESSAGE,
 } from "@/lib/validation"
+import { errorMessage } from "@/lib/utils"
 
 function parsePortsParam(portsJson: string): ContainerPort[] {
   try {
@@ -74,7 +75,7 @@ export default function ExposeService() {
       })
       .catch((e) => {
         if (cancelled) return
-        setSettingsError(e instanceof Error ? e.message : String(e))
+        setSettingsError(errorMessage(e))
       })
     return () => {
       cancelled = true
@@ -198,7 +199,7 @@ export default function ExposeService() {
       // Redirect straight to the service detail page
       navigate(`/services/${encodeURIComponent(svc.id)}`)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      setError(errorMessage(e))
       submittingRef.current = false
       setSaving(false)
     }

@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import docker
 from docker.types import Mount
 
+from app import secrets
 from app.edge.docker_client import close_client, connect, docker_client
 from app.edge.image_builder import EDGE_IMAGE, ensure_edge_image
+from app.edge.tailscale_device import _delete_tailscale_device, _get_tailscale_node_id
 from app.version import __version__
 
 if TYPE_CHECKING:
@@ -116,6 +119,30 @@ def _find_edge_container_for_use(
         raise
 
 
+@contextmanager
+def edge_container(
+    service_id: str, edge_container_name: str, socket_path: str | None = None
+) -> Iterator[
+    tuple[docker.DockerClient | None, docker.models.containers.Container | None]
+]:
+    """Yield ``(client, container)`` for an edge container, closing the client on exit.
+
+    Mirrors :func:`app.edge.docker_client.docker_client`: it opens a client via
+    :func:`_find_edge_container_for_use`, yields it alongside the located
+    container (which may be ``None`` when absent), and guarantees
+    :func:`close_client` even when the body raises. This is the single
+    client-lifecycle primitive shared by the edge lifecycle, Tailscale, and
+    Caddy-admin helpers.
+    """
+    client, container = _find_edge_container_for_use(
+        service_id, edge_container_name, socket_path
+    )
+    try:
+        yield client, container
+    finally:
+        close_client(client)
+
+
 def create_edge_container(
     service: Service,
     ts_authkey: str,
@@ -187,90 +214,34 @@ def start_edge(
     service_id: str, edge_container_name: str, socket_path: str | None = None
 ) -> None:
     """Start an existing edge container."""
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
+    with edge_container(service_id, edge_container_name, socket_path) as (_client, container):
         if not container:
             raise RuntimeError(f"Edge container not found for service {service_id}")
         container.start()
         logger.info("Started edge container %s", edge_container_name)
-    finally:
-        if client is not None:
-            close_client(client)
 
 
 def stop_edge(
     service_id: str, edge_container_name: str, socket_path: str | None = None
 ) -> None:
     """Stop an edge container."""
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
+    with edge_container(service_id, edge_container_name, socket_path) as (_client, container):
         if not container:
             logger.info("Edge container not found for service %s, nothing to stop", service_id)
             return
         container.stop(timeout=10)
         logger.info("Stopped edge container %s", edge_container_name)
-    finally:
-        if client is not None:
-            close_client(client)
 
 
 def restart_edge(
     service_id: str, edge_container_name: str, socket_path: str | None = None
 ) -> None:
     """Restart an edge container."""
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
+    with edge_container(service_id, edge_container_name, socket_path) as (_client, container):
         if not container:
             raise RuntimeError(f"Edge container not found for service {service_id}")
         container.restart(timeout=10)
         logger.info("Restarted edge container %s", edge_container_name)
-    finally:
-        if client is not None:
-            close_client(client)
-
-
-def _get_tailscale_node_id(
-    container: docker.models.containers.Container,
-) -> str | None:
-    """Extract the Tailscale node ID from inside a running edge container."""
-    try:
-        exit_code, output = container.exec_run(
-            "tailscale status --json",
-            environment={"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"},
-        )
-        if exit_code != 0:
-            return None
-        status = json.loads(output.decode("utf-8", errors="replace"))
-        return status.get("Self", {}).get("ID")
-    except Exception:
-        return None
-
-
-def _delete_tailscale_device(node_id: str, api_key: str) -> bool:
-    """Delete a device from the tailnet via the Tailscale API.
-
-    Uses ``DELETE /api/v2/device/{nodeId}`` with Basic auth.
-    Returns True on success (200/2xx), False on any failure.
-    """
-    import httpx2
-
-    try:
-        resp = httpx2.delete(
-            f"https://api.tailscale.com/api/v2/device/{node_id}",
-            auth=(api_key, ""),
-            timeout=10.0,
-        )
-        if resp.is_success:
-            logger.info("Deleted Tailscale device %s via API", node_id)
-            return True
-        logger.warning(
-            "Tailscale API device deletion returned %d for node %s: %s",
-            resp.status_code, node_id, resp.text[:200],
-        )
-        return False
-    except Exception:
-        logger.info("Tailscale API device deletion failed for node %s", node_id, exc_info=True)
-        return False
 
 
 def remove_edge(
@@ -298,8 +269,7 @@ def remove_edge(
     a later opaque 409 name conflict; by default it is logged and swallowed
     (best-effort).
     """
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
+    with edge_container(service_id, edge_container_name, socket_path) as (_client, container):
         if not container:
             logger.info("Edge container not found for service %s, nothing to remove", service_id)
             return
@@ -310,9 +280,7 @@ def remove_edge(
         if delete_device and container.status == "running":
             node_id = _get_tailscale_node_id(container)
             if node_id:
-                from app.secrets import TAILSCALE_API_KEY, read_secret
-
-                api_key = read_secret(TAILSCALE_API_KEY)
+                api_key = secrets.read_secret(secrets.TAILSCALE_API_KEY)
                 if api_key:
                     _delete_tailscale_device(node_id, api_key)
                 else:
@@ -334,9 +302,6 @@ def remove_edge(
             if raise_on_error:
                 raise
             return
-    finally:
-        if client is not None:
-            close_client(client)
 
 
 def recreate_edge(
@@ -387,14 +352,10 @@ def get_edge_logs(
     socket_path: str | None = None,
 ) -> str:
     """Fetch recent logs from an edge container."""
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
+    with edge_container(service_id, edge_container_name, socket_path) as (_client, container):
         if not container:
             return ""
         return container.logs(tail=tail, timestamps=True).decode("utf-8", errors="replace")
-    finally:
-        if client is not None:
-            close_client(client)
 
 
 def _wait_for_running(
@@ -418,165 +379,3 @@ def _wait_for_running(
         time.sleep(poll_interval)
     logger.warning("Timed out waiting for container %s to be running (status=%s)", container.name, container.status)
     return False
-
-
-def _is_retryable_exec_conflict(exc: Exception) -> bool:
-    """Return True when Docker rejects exec because the container is mid-restart."""
-    if not isinstance(exc, docker.errors.APIError):
-        return False
-
-    message = str(exc).lower()
-    if "wait until the container is running" in message:
-        return True
-    return "is restarting" in message or "is paused" in message
-
-
-def reload_caddy(
-    service_id: str,
-    edge_container_name: str,
-    socket_path: str | None = None,
-    max_retries: int = 5,
-    retry_delay: float = 2.0,
-) -> str:
-    """Execute ``caddy reload`` inside the edge container. Returns exec output.
-
-    Retries several times because Caddy's admin API (:2019) may not be
-    ready immediately after the container starts.
-    """
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
-        if not container:
-            raise RuntimeError(f"Edge container not found for service {service_id}")
-
-        if not _wait_for_running(container):
-            raise RuntimeError(
-                f"Edge container {edge_container_name} is not running "
-                f"(status={container.status}), cannot reload Caddy"
-            )
-
-        last_result = ""
-        last_error: docker.errors.APIError | None = None
-        exit_code: int | None = None
-        for attempt in range(max_retries):
-            try:
-                exit_code, output = container.exec_run(
-                    "caddy reload --config /etc/caddy/Caddyfile --force"
-                )
-            except docker.errors.APIError as exc:
-                if not _is_retryable_exec_conflict(exc):
-                    raise
-
-                last_error = exc
-                if attempt < max_retries - 1:
-                    logger.info(
-                        "Container %s rejected Caddy reload while restarting, retrying (%d/%d)...",
-                        edge_container_name, attempt + 1, max_retries,
-                    )
-                    _wait_for_running(container, timeout=10.0, poll_interval=0.5)
-                    time.sleep(retry_delay)
-                    continue
-                break
-
-            last_result = output.decode("utf-8", errors="replace")
-            # A real exec result supersedes any earlier transient restart
-            # conflict, so the final error reflects the actual reload failure
-            # (e.g. a bad config) instead of the stale "never stabilized" path.
-            last_error = None
-            if exit_code == 0:
-                logger.info("Reloaded Caddy in edge container %s", edge_container_name)
-                return last_result
-
-            # "connection refused" means the admin API isn't up yet — retry
-            if "connection refused" in last_result and attempt < max_retries - 1:
-                logger.info(
-                    "Caddy admin API not ready in %s, retrying (%d/%d)...",
-                    edge_container_name, attempt + 1, max_retries,
-                )
-                time.sleep(retry_delay)
-                continue
-
-            # Any other failure — don't retry
-            break
-
-        if last_error is not None:
-            raise RuntimeError(
-                f"Caddy reload never reached a stable running container for {edge_container_name}: {last_error}"
-            ) from last_error
-
-        if exit_code is None:
-            raise RuntimeError("Caddy reload failed: no reload attempts were made")
-        raise RuntimeError(f"Caddy reload failed (exit {exit_code}): {last_result}")
-    finally:
-        if client is not None:
-            close_client(client)
-
-
-def detect_tailscale_ip(
-    service_id: str,
-    edge_container_name: str,
-    socket_path: str | None = None,
-    max_retries: int = 10,
-    retry_delay: float = 2.0,
-) -> str | None:
-    """Detect the Tailscale IPv4 address assigned to an edge container.
-
-    Retries with backoff since Tailscale auth can take a few seconds.
-    Returns the IP string or None if detection fails.
-    """
-    client, container = _find_edge_container_for_use(service_id, edge_container_name, socket_path)
-    try:
-        if not container:
-            return None
-
-        # Wait for the container to be running before attempting exec.
-        if not _wait_for_running(container):
-            logger.warning(
-                "Container %s not running (status=%s), skipping IP detection",
-                edge_container_name, container.status,
-            )
-            return None
-
-        for attempt in range(max_retries):
-            try:
-                # Re-check state on each retry — container may have restarted.
-                container.reload()
-                if container.status != "running" and not _wait_for_running(container, timeout=10.0):
-                    logger.info("Container %s left running state on attempt %d", edge_container_name, attempt + 1)
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
-                    continue
-
-                ts_env = {"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"}
-
-                # Try `tailscale ip -4` first
-                exit_code, output = container.exec_run(
-                    "tailscale ip -4", environment=ts_env,
-                )
-                if exit_code == 0:
-                    ip = output.decode("utf-8", errors="replace").strip()
-                    if ip and ip.startswith("100."):
-                        logger.info("Detected Tailscale IP %s for %s", ip, edge_container_name)
-                        return ip
-
-                # Fallback: parse `tailscale status --json`
-                exit_code, output = container.exec_run(
-                    "tailscale status --json", environment=ts_env,
-                )
-                if exit_code == 0:
-                    status = json.loads(output.decode("utf-8", errors="replace"))
-                    ts_ips = status.get("Self", {}).get("TailscaleIPs", [])
-                    for addr in ts_ips:
-                        if addr.startswith("100."):
-                            logger.info("Detected Tailscale IP %s for %s (via status)", addr, edge_container_name)
-                            return addr
-            except Exception:
-                logger.info("Attempt %d failed for %s", attempt + 1, edge_container_name, exc_info=True)
-
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-
-        logger.warning("Failed to detect Tailscale IP for %s after %d attempts", edge_container_name, max_retries)
-        return None
-    finally:
-        if client is not None:
-            close_client(client)

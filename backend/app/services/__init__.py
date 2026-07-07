@@ -22,6 +22,7 @@ from app.services.edge_ops import (
     update_edge_job,
 )
 from app.services.errors import (
+    DockerUnavailable,
     HostnameChangeError,
     HostnameInUse,
     HostnameSuffixInvalid,
@@ -29,9 +30,11 @@ from app.services.errors import (
     ServiceError,
     ServiceNotFound,
     TailscaleAuthKeyMissing,
+    UpstreamApiError,
 )
 
 __all__ = [
+    "DockerUnavailable",
     "HostnameChangeError",
     "HostnameInUse",
     "HostnameSuffixInvalid",
@@ -40,6 +43,7 @@ __all__ = [
     "ServiceError",
     "ServiceNotFound",
     "TailscaleAuthKeyMissing",
+    "UpstreamApiError",
     # Operations
     "create_service",
     "delete_service_record",

@@ -7,7 +7,7 @@
 
 /**
  * Slug used to derive edge container / network / ts-hostname names from a
- * SERVICE NAME. Mirrors the backend's `_slugify` (backend/app/services/service_ops.py):
+ * SERVICE NAME. Mirrors the backend's `_slugify` (backend/app/services/crud.py):
  *
  *     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
  *     return slug or "service"

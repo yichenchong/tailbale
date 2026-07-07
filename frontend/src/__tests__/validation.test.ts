@@ -16,7 +16,7 @@ import {
  * either copy is caught here. Backend source is cited per block.
  */
 
-describe("slugify (mirrors _slugify, backend/app/services/service_ops.py:57-59)", () => {
+describe("slugify (mirrors _slugify, backend/app/services/crud.py)", () => {
   // re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "service"
   it("lowercases and replaces runs of non-alphanumerics with a single dash", () => {
     expect(slugify("My Service")).toBe("my-service")

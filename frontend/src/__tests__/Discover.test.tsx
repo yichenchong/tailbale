@@ -358,4 +358,25 @@ describe("Discover page", () => {
       await Promise.resolve()
     })
   })
+
+  it("gives the container search box an accessible name", async () => {
+    vi.stubGlobal("fetch", mockFetchResponses([makeContainer()], []))
+    const { default: Discover } = await import("@/pages/Discover")
+    renderRoute(<Discover />)
+    expect(
+      screen.getByLabelText("Search containers by name or image")
+    ).toBeInTheDocument()
+  })
+
+  it("marks every table column header with scope=col", async () => {
+    vi.stubGlobal("fetch", mockFetchResponses([makeContainer()], []))
+    const { default: Discover } = await import("@/pages/Discover")
+    renderRoute(<Discover />)
+    await waitFor(() => {
+      expect(screen.getByText("nextcloud")).toBeInTheDocument()
+    })
+    const headers = screen.getAllByRole("columnheader")
+    expect(headers).toHaveLength(6)
+    headers.forEach((h) => expect(h).toHaveAttribute("scope", "col"))
+  })
 })

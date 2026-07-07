@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -19,6 +18,7 @@ from app.edge.container_manager import find_edge_container
 from app.edge.docker_client import close_client, connect
 from app.models.dns_record import DnsRecord
 from app.settings_store import get_positive_int_setting
+from app.timeutil import days_from_now
 
 if TYPE_CHECKING:
     from sqlalchemy.orm import Session
@@ -27,7 +27,27 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Checks whose failure means "error" status
+# Every subcheck name, in the order the result dict presents them. This is the
+# single source of truth for *which* checks exist: both the happy-path result
+# and the Docker-unreachable fallback are built from it (via ``dict.fromkeys``),
+# so a new check can never be enumerated in one path and silently forgotten in
+# the other.
+ALL_CHECK_NAMES: tuple[str, ...] = (
+    "upstream_container_present",
+    "upstream_network_connected",
+    "edge_container_present",
+    "edge_container_running",
+    "tailscale_ready",
+    "tailscale_ip_present",
+    "cert_present",
+    "cert_not_expiring",
+    "dns_record_present",
+    "dns_matches_ip",
+    "caddy_config_present",
+    "https_probe_ok",
+)
+
+# Checks whose failure means "error" status.
 CRITICAL_CHECKS = frozenset({
     "upstream_container_present",
     "upstream_network_connected",
@@ -39,13 +59,10 @@ CRITICAL_CHECKS = frozenset({
     "caddy_config_present",
 })
 
-# Checks whose failure means "warning" (unless a critical already failed)
-WARNING_CHECKS = frozenset({
-    "cert_not_expiring",
-    "dns_record_present",
-    "dns_matches_ip",
-    "https_probe_ok",
-})
+# Everything else is a "warning" (surfaced only when no critical already failed).
+# Derived from the registry so a newly added check is classified automatically
+# and the two sets can never disagree about the universe of checks.
+WARNING_CHECKS = frozenset(ALL_CHECK_NAMES) - CRITICAL_CHECKS
 
 
 def run_health_checks(
@@ -58,8 +75,6 @@ def run_health_checks(
     live_dns: bool = False,
 ) -> dict[str, bool]:
     """Run all health subchecks for *service*.  Returns {name: bool}."""
-    checks: dict[str, bool] = {}
-
     try:
         client = connect(socket_path)
     except Exception:
@@ -67,28 +82,22 @@ def run_health_checks(
         # Docker is unreachable, but the filesystem- and DB-backed subchecks do
         # not need it: report them accurately instead of forcing False, so a
         # transient daemon outage does not misreport an on-disk cert or a stored
-        # DNS record as failing. ``cert_present``/``caddy_config_present`` were
-        # already computed offline here; ``cert_not_expiring`` reads the very
-        # same cert file and ``dns_record_present`` is a pure DB read, so leaving
-        # them hardcoded False was an inconsistency. Only the Docker-dependent
-        # checks (and the IP-dependent DNS match, which needs the live Tailscale
-        # IP) stay False; the aggregate is "error" regardless.
-        dns_record_present, dns_matches_ip = _check_dns(db, service, None)
-        return {
-            "upstream_container_present": False,
-            "upstream_network_connected": False,
-            "edge_container_present": False,
-            "edge_container_running": False,
-            "tailscale_ready": False,
-            "tailscale_ip_present": False,
-            "cert_present": _check_cert_present(service, certs_dir),
-            "cert_not_expiring": _cert_not_expiring_subcheck(db, service, certs_dir),
-            "dns_record_present": dns_record_present,
-            "dns_matches_ip": dns_matches_ip,
-            "caddy_config_present": _check_caddy_config(service, generated_dir),
-            "https_probe_ok": False,
-        }
+        # DNS record as failing. Every check defaults to False from the registry
+        # (so the fallback can never omit a check the happy path returns); only
+        # the offline (disk/DB) subchecks are overridden here. ``dns_matches_ip``
+        # still needs the live Tailscale IP (Docker-only) so it stays False, but
+        # ``live_dns`` is honored — a manual full check gets the same live
+        # Cloudflare presence accuracy it would with Docker up.
+        checks: dict[str, bool] = dict.fromkeys(ALL_CHECK_NAMES, False)
+        checks["cert_present"] = _check_cert_present(service, certs_dir)
+        checks["cert_not_expiring"] = _cert_not_expiring_subcheck(db, service, certs_dir)
+        dns_record_present, dns_matches_ip = _check_dns(db, service, None, live=live_dns)
+        checks["dns_record_present"] = dns_record_present
+        checks["dns_matches_ip"] = dns_matches_ip
+        checks["caddy_config_present"] = _check_caddy_config(service, generated_dir)
+        return checks
 
+    checks = dict.fromkeys(ALL_CHECK_NAMES, False)
     try:
         # --- Upstream container ---
         checks["upstream_container_present"] = _check_upstream_present(client, service)
@@ -242,7 +251,13 @@ def _check_cert_not_expiring(
         expiry = get_cert_expiry(cert_path)
         if expiry is None:
             return False
-        return expiry > datetime.now(UTC) + timedelta(days=renewal_window_days)
+        threshold = days_from_now(renewal_window_days)
+        if threshold is None:
+            # Window so large the threshold overflows the representable range;
+            # no expiry can exceed it, so the cert reads as expiring — matching
+            # the prior behavior where the OverflowError was caught as False.
+            return False
+        return expiry > threshold
     except Exception:
         return False
 
@@ -325,6 +340,45 @@ def _log_https_probe_failure(
     )
 
 
+def _probe_failure_reason(
+    exit_code: int, output: bytes | None
+) -> tuple[str, str | None] | None:
+    """Classify a curl HTTPS-probe exec result; ``None`` means healthy.
+
+    Single source for the five-way classification split out of
+    ``_check_https_probe`` so the decision is testable without a live container
+    and cannot drift from the boolean view in ``_classify_probe_result``. On
+    failure returns ``(reason, http_code)`` where *reason* is the log message and
+    *http_code* is the parsed status (``None`` when there is no meaningful code to
+    surface). Branches, in order:
+
+    * non-zero curl exit — connection/TLS failure (curl exits 0 for any HTTP
+      response, non-zero only for network/TLS errors)
+    * status not exactly three digits (covers empty/truncated output)
+    * ``"000"`` — curl connected but received no HTTP response
+    * ``5xx`` — Caddy served but the upstream is broken
+    """
+    if exit_code != 0:
+        return "curl returned non-zero", None
+    raw = (output or b"").decode("utf-8", errors="replace").strip()
+    http_code = raw[-3:] if len(raw) >= 3 else raw
+    if len(http_code) != 3 or not http_code.isdigit():
+        return "curl did not return a valid HTTP status", None
+    if http_code == "000":
+        return "no HTTP response received", http_code
+    if http_code.startswith("5"):
+        return "upstream returned 5xx", http_code
+    return None
+
+
+def _classify_probe_result(exit_code: int, output: bytes | None) -> bool:
+    """Return ``True`` iff the curl probe indicates Caddy is serving HTTPS.
+
+    Boolean view of :func:`_probe_failure_reason` (a passing probe is one with no
+    failure reason). A 2xx/3xx/4xx response counts as serving — a 4xx means the
+    upstream requires auth, not that Caddy is down.
+    """
+    return _probe_failure_reason(exit_code, output) is None
 
 
 def _check_https_probe(
@@ -388,49 +442,20 @@ def _check_https_probe(
             environment={"HOME": "/tmp"},
         )
 
-        if exit_code != 0:
-            _log_https_probe_failure(
-                service,
-                "curl returned non-zero",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                exit_code=exit_code,
-                output=output,
-            )
-            return False
-
-        raw = (output or b"").decode("utf-8", errors="replace").strip()
-        http_code = raw[-3:] if len(raw) >= 3 else raw
-        if len(http_code) != 3 or not http_code.isdigit():
-            _log_https_probe_failure(
-                service,
-                "curl did not return a valid HTTP status",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                output=output,
-            )
-            return False
-        if http_code == "000":
-            _log_https_probe_failure(
-                service,
-                "no HTTP response received",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                http_code=http_code,
-                output=output,
-            )
-            return False
-        if http_code.startswith("5"):
-            _log_https_probe_failure(
-                service,
-                "upstream returned 5xx",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                http_code=http_code,
-                output=output,
-            )
-            return False
-        return True
+        failure = _probe_failure_reason(exit_code, output)
+        if failure is None:
+            return True
+        reason, http_code = failure
+        _log_https_probe_failure(
+            service,
+            reason,
+            tailscale_ip=tailscale_ip,
+            container_status=container.status,
+            exit_code=exit_code or None,
+            http_code=http_code,
+            output=output,
+        )
+        return False
 
     except Exception:
         logger.warning("HTTPS probe exec failed for %s", service.edge_container_name, exc_info=True)

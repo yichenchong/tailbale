@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { api, type ServiceItem } from "@/lib/api"
 import { useTimezone } from "@/lib/useTimezone"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 import { formatCertExpiry } from "@/lib/certStatus"
 import { phaseStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
@@ -42,7 +42,7 @@ export default function Services() {
       await action()
       void refresh()
     } catch (e) {
-      showActionMsg(e instanceof Error ? e.message : String(e))
+      showActionMsg(errorMessage(e))
     }
   }
 
@@ -56,7 +56,7 @@ export default function Services() {
       await api.services.remove(svc.id, { cleanupDns: true })
       void refresh()
     } catch (e) {
-      showActionMsg(e instanceof Error ? e.message : String(e))
+      showActionMsg(errorMessage(e))
     }
   }
 
@@ -114,13 +114,13 @@ export default function Services() {
           <table className="min-w-full divide-y divide-zinc-200">
             <thead className="bg-zinc-50">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Service</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Hostname</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Upstream</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Edge IP</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Cert Expiry</th>
-                <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Actions</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Service</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Hostname</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Upstream</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Edge IP</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Cert Expiry</th>
+                <th scope="col" className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100 bg-white">
@@ -172,6 +172,8 @@ export default function Services() {
                           }}
                           className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
                           aria-label="Actions"
+                          aria-haspopup="true"
+                          aria-expanded={openMenuId === svc.id}
                         >
                           <MoreVertical className="h-4 w-4" />
                         </button>

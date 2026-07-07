@@ -477,7 +477,12 @@ class TestRetryOrphanCleanup:
 
         resp = client.post(f"/api/jobs/{job_id}/retry")
         assert resp.status_code == 502
-        assert "timed out" in resp.json()["detail"]
+        detail = resp.json()["detail"]
+        # AR-R3-2: the 502 detail is a static, non-leaking string — str(exc) no
+        # longer reaches the client (it still lands in the persisted job.message
+        # asserted below and is logged server-side).
+        assert detail == "Cloudflare API error"
+        assert "timed out" not in detail
 
         # Delete was attempted with the short cleanup timeout, then failed.
         assert mock_delete.call_args.kwargs["timeout"] == CF_CLEANUP_TIMEOUT

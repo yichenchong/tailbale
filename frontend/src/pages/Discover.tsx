@@ -105,6 +105,7 @@ export default function Discover() {
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSearch()}
             placeholder="Search by name or image..."
+            aria-label="Search containers by name or image"
             className="w-full rounded-md border border-zinc-300 py-2 pl-9 pr-3 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
           />
         </div>
@@ -152,12 +153,12 @@ export default function Discover() {
               <table className="min-w-full divide-y divide-zinc-200">
                 <thead className="bg-zinc-50">
                   <tr>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
-                    <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
-                    <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
+                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
+                    <th scope="col" className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-zinc-100 bg-white">

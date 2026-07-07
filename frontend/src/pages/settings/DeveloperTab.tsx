@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useId, useRef, useState } from "react"
 import { Loader2, XCircle } from "lucide-react"
 import { api, type MainLogsResponse } from "@/lib/api"
 
@@ -10,6 +10,8 @@ export function DeveloperTab() {
   const logsSeqRef = useRef(0)
 
   const working = workingAction !== null
+  const resetSetupDescId = useId()
+  const resetAllDescId = useId()
 
   const runReset = async (kind: "reset-setup-complete" | "reset-all") => {
     const warning =
@@ -70,6 +72,7 @@ export function DeveloperTab() {
           <button
             onClick={loadLogs}
             disabled={loadingLogs}
+            aria-busy={loadingLogs}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50"
           >
             {loadingLogs ? <><Loader2 className="h-4 w-4 animate-spin" /> Loading logs...</> : "Refresh logs"}
@@ -92,12 +95,14 @@ export function DeveloperTab() {
 
       <div className="rounded-md border border-zinc-200 p-4">
         <h3 className="text-sm font-semibold text-zinc-800">Reset setup_complete</h3>
-        <p className="mt-1 text-sm text-zinc-500">
+        <p id={resetSetupDescId} className="mt-1 text-sm text-zinc-500">
           Sends the app back to the setup wizard without deleting users, services, or secrets.
         </p>
         <button
           onClick={() => runReset("reset-setup-complete")}
           disabled={working}
+          aria-busy={workingAction === "reset-setup-complete"}
+          aria-describedby={resetSetupDescId}
           className="mt-3 rounded-md border border-amber-300 px-4 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
         >
           {workingAction === "reset-setup-complete" ? "Working..." : "Reset setup_complete"}
@@ -106,12 +111,14 @@ export function DeveloperTab() {
 
       <div className="rounded-md border border-red-200 p-4">
         <h3 className="text-sm font-semibold text-red-800">Reset all</h3>
-        <p className="mt-1 text-sm text-zinc-500">
+        <p id={resetAllDescId} className="mt-1 text-sm text-zinc-500">
           Attempts to remove every service cleanly, then clears the current user, settings, and stored secrets.
         </p>
         <button
           onClick={() => runReset("reset-all")}
           disabled={working}
+          aria-busy={workingAction === "reset-all"}
+          aria-describedby={resetAllDescId}
           className="mt-3 rounded-md bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50"
         >
           {workingAction === "reset-all" ? "Working..." : "Reset all"}

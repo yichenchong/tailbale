@@ -55,9 +55,9 @@ export function HealthChecksPanel({
             {Object.entries(healthChecks).map(([key, ok]) => (
               <div key={key} className="flex items-center gap-2 text-sm" title={!ok ? CHECK_SUGGESTIONS[key] : undefined}>
                 {ok ? (
-                  <CheckCircle2 className="h-4 w-4 text-green-500" />
+                  <CheckCircle2 role="img" aria-label="Passing" className="h-4 w-4 text-green-500" />
                 ) : (
-                  <XCircle className="h-4 w-4 text-red-500" />
+                  <XCircle role="img" aria-label="Failing" className="h-4 w-4 text-red-500" />
                 )}
                 <span className="text-zinc-700">{CHECK_LABELS[key] || key}</span>
               </div>

@@ -1,3 +1,4 @@
+import { useId } from "react"
 import { cn } from "@/lib/utils"
 
 export function Field({
@@ -9,6 +10,7 @@ export function Field({
   hint,
   error,
   autoComplete,
+  describedById,
 }: {
   label: string
   value: string
@@ -18,17 +20,29 @@ export function Field({
   hint?: string
   error?: string
   autoComplete?: string
+  /** Extra element id(s) to append to `aria-describedby` (e.g. a SecretStatus). */
+  describedById?: string
 }) {
+  const id = useId()
+  const inputId = `${id}-input`
+  const noteId = `${id}-note`
+  const note = error ?? hint
+  const describedBy =
+    [note ? noteId : undefined, describedById].filter(Boolean).join(" ") || undefined
   return (
-    <label className="block">
-      <span className="text-sm font-medium text-zinc-700">{label}</span>
+    <div>
+      <label htmlFor={inputId} className="block text-sm font-medium text-zinc-700">
+        {label}
+      </label>
       <input
+        id={inputId}
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         autoComplete={autoComplete}
         aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy}
         className={cn(
           "mt-1 block w-full rounded-md border px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1",
           error
@@ -37,10 +51,10 @@ export function Field({
         )}
       />
       {error ? (
-        <p className="mt-1 text-xs text-red-600">{error}</p>
+        <p id={noteId} className="mt-1 text-xs text-red-600">{error}</p>
       ) : (
-        hint && <p className="mt-1 text-xs text-zinc-400">{hint}</p>
+        hint && <p id={noteId} className="mt-1 text-xs text-zinc-400">{hint}</p>
       )}
-    </label>
+    </div>
   )
 }

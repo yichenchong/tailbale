@@ -5,11 +5,18 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from app import secrets
+from app.adapters import cloudflare_adapter
 from app.adapters.cloudflare_adapter import CF_CLEANUP_TIMEOUT
 from app.auth import get_current_user
 from app.database import commit_with_lock, db_write_section, get_db
 from app.events.event_emitter import emit_event
+from app.locks import lifecycle_then_global_ops
+from app.models.dns_record import DnsRecord
 from app.models.job import Job
+from app.services.errors import UpstreamApiError
+from app.settings_store import get_setting
+from app.timeutil import iso
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +37,8 @@ def _job_to_dict(job: Job) -> dict:
         "progress": job.progress,
         "message": job.message,
         "details": job.details,
-        "created_at": job.created_at.isoformat() if job.created_at else None,
-        "updated_at": job.updated_at.isoformat() if job.updated_at else None,
+        "created_at": iso(job.created_at),
+        "updated_at": iso(job.updated_at),
     }
 
 
@@ -115,8 +122,6 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
     hostname = details.get("hostname")
     zone_id = details.get("zone_id")
     if not zone_id:
-        from app.settings_store import get_setting
-
         zone_id = get_setting(db, "cf_zone_id")
 
     if not record_id or not hostname or not zone_id:
@@ -125,18 +130,16 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             detail="Job is missing record_id, hostname, or zone_id in details",
         )
 
-    # This job acts on a DNS record whose service is already deleted, so there is
-    # no per-service reconcile lock to take. Serialize service-less/global ops via
-    # lifecycle_then_global_ops, which takes _SERVICE_LIFECYCLE_MUTEX then
-    # _GLOBAL_OPS_MUTEX — the documented tier-1 -> tier-2 (reconcile-slot) order.
-    from app.locks import lifecycle_then_global_ops
-    from app.secrets import CLOUDFLARE_TOKEN, read_secret
-    cf_token = read_secret(CLOUDFLARE_TOKEN)
+    cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
     if not cf_token:
         raise HTTPException(
             status_code=422,
             detail="Cloudflare API token is not configured",
         )
+    # This job acts on a DNS record whose service is already deleted, so there is
+    # no per-service reconcile lock to take. Serialize service-less/global ops via
+    # lifecycle_then_global_ops, which takes _SERVICE_LIFECYCLE_MUTEX then
+    # _GLOBAL_OPS_MUTEX — the documented tier-1 -> tier-2 (reconcile-slot) order.
     with lifecycle_then_global_ops():
         with db_write_section(db):
             job = db.get(Job, job_id, populate_existing=True)
@@ -148,8 +151,6 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             commit_with_lock(db)
 
         try:
-            from app.adapters.cloudflare_adapter import delete_a_record, list_a_records
-
             # Locate our SPECIFIC orphaned record by record_id among ALL A records
             # for the hostname. find_record() returns only the lowest-id match, so
             # if the hostname carries several A records and the orphan is not the
@@ -157,14 +158,13 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             # would fail and we'd wrongly report "cleaned up" and drop the job while
             # the orphaned record survives in Cloudflare. Matching record_id
             # explicitly across the full record set avoids that silent orphan leak.
-            records = list_a_records(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
+            records = cloudflare_adapter.list_a_records(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
             existing = next((r for r in records if r.get("id") == record_id), None)
 
             if existing is not None:
                 # Guard against deleting a record a service has since reclaimed:
                 # reconcile_dns reuses the same Cloudflare record id when a hostname
                 # is re-exposed, so this id may now belong to a live service.
-                from app.models.dns_record import DnsRecord
                 owner = db.query(DnsRecord).filter(DnsRecord.record_id == record_id).first()
                 if owner is not None:
                     with db_write_section(db):
@@ -183,7 +183,7 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                         "message": f"DNS record for '{hostname}' is now in use by an active service; orphan job cleared",
                     }
                 # Record still exists and is orphaned — delete it
-                delete_a_record(cf_token, zone_id, record_id, timeout=CF_CLEANUP_TIMEOUT)
+                cloudflare_adapter.delete_a_record(cf_token, zone_id, record_id, timeout=CF_CLEANUP_TIMEOUT)
                 with db_write_section(db):
                     current_job = db.get(Job, job_id, populate_existing=True)
                     if current_job is None:
@@ -229,7 +229,7 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
                         level="warning",
                     )
                     commit_with_lock(db)
-            raise HTTPException(status_code=502, detail=f"Cloudflare API error: {error_msg}") from exc
+            raise UpstreamApiError("Cloudflare API error") from exc
 
 
 @router.delete("/{job_id}", status_code=204)

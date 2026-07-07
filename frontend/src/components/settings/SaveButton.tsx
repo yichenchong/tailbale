@@ -6,6 +6,7 @@ export function SaveButton({ saving, onClick, label, disabled }: { saving: boole
     <button
       onClick={handleClick}
       disabled={saving || disabled}
+      aria-busy={saving}
       className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
     >
       {saving ? "Saving..." : label ?? "Save"}

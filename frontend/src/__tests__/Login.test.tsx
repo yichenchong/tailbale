@@ -185,6 +185,12 @@ describe("Login page", () => {
       resolve({ ok: true, status: 200, json: () => Promise.resolve({ user: { id: "u1", username: "admin", display_name: null, role: "admin" } }) })
     })
   })
+
+  it("renders inside a main landmark", async () => {
+    const { default: Login } = await import("@/pages/Login")
+    renderRoute(<Login />)
+    expect(screen.getByRole("main")).toBeInTheDocument()
+  })
 })
 
 describe("Login page does not fetch dashboard summary", () => {

@@ -16,7 +16,19 @@ import time
 from datetime import UTC, datetime, timedelta
 
 from app.backoff import capped_exponential
-from app.database import commit_with_lock, db_write_section, rollback_with_lock, session_scope
+from app.database import (
+    SessionLocal,
+    commit_with_lock,
+    db_write_section,
+    rollback_with_lock,
+    session_scope,
+)
+from app.events.event_emitter import emit_event
+from app.health.health_checker import aggregate_status, run_health_checks
+from app.locks import forget_reconcile_lock, service_reconcile_lock
+from app.models.service import Service
+from app.models.service_status import ServiceStatus
+from app.settings_store import get_runtime_paths
 
 logger = logging.getLogger(__name__)
 
@@ -97,14 +109,6 @@ def _probe_retry_loop_guarded(service_id: str, socket_path: str | None) -> None:
 
 def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
     """Worker that runs in a background thread."""
-    from app.database import SessionLocal
-    from app.events.event_emitter import emit_event
-    from app.health.health_checker import aggregate_status, run_health_checks
-    from app.locks import forget_reconcile_lock, service_reconcile_lock
-    from app.models.service import Service
-    from app.models.service_status import ServiceStatus
-    from app.settings_store import get_runtime_paths
-
     now = lambda: datetime.now(UTC)  # noqa: E731
 
     for attempt in range(MAX_RETRIES):
@@ -245,10 +249,6 @@ def _update_retry_state(service_id: str, attempt: int, delay: int) -> bool:
     Returns False when the retry loop should stop because the service no
     longer exists, is disabled, or has no status row to update.
     """
-    from app.locks import forget_reconcile_lock, service_reconcile_lock
-    from app.models.service import Service
-    from app.models.service_status import ServiceStatus
-
     with session_scope() as db:
         try:
             with service_reconcile_lock(service_id), db_write_section(db):
@@ -281,9 +281,6 @@ def _update_retry_state(service_id: str, attempt: int, delay: int) -> bool:
 
 def _clear_retry_state(service_id: str) -> None:
     """Clear retry tracking fields when retries are done."""
-    from app.locks import forget_reconcile_lock, service_reconcile_lock
-    from app.models.service_status import ServiceStatus
-
     with session_scope() as db:
         try:
             with service_reconcile_lock(service_id), db_write_section(db):
