@@ -307,6 +307,34 @@ class TestLogin:
         set_cookie = "; ".join(resp.headers.get_list("set-cookie"))
         assert "secure" not in set_cookie.lower()
 
+    def test_login_secure_cookie_follows_first_forwarded_proto_hop(self, auth_client):
+        """X-Forwarded-Proto may carry the whole proxy chain (client-facing hop
+        first). The Secure flag must follow the FIRST hop — the protocol the
+        browser actually used — not any later internal hop. A regression that
+        compared the entire header string (rather than splitting on ',') would
+        misclassify both of these."""
+        _setup_user(auth_client)
+        # Client reached the edge over HTTPS; a later internal hop was plain HTTP.
+        auth_client.cookies.clear()
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "securepassword123"},
+            headers={"X-Forwarded-Proto": "https, http"},
+        )
+        assert resp.status_code == 200
+        assert "secure" in "; ".join(resp.headers.get_list("set-cookie")).lower()
+
+        # Client reached the edge over plain HTTP; a later hop was HTTPS. The
+        # cookie must NOT be Secure, or the browser drops it on the HTTP client.
+        auth_client.cookies.clear()
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "securepassword123"},
+            headers={"X-Forwarded-Proto": "http, https"},
+        )
+        assert resp.status_code == 200
+        assert "secure" not in "; ".join(resp.headers.get_list("set-cookie")).lower()
+
     def test_login_cookie_is_httponly_lax_and_api_scoped(self, auth_client):
         """The session cookie must be HttpOnly (no JS access -> blunts XSS theft),
         SameSite=Lax (blunts cross-site CSRF on the cookie), and scoped to /api so

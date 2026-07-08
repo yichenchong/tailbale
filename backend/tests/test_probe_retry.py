@@ -151,6 +151,60 @@ class TestUpdateRetryState:
         with patch.object(database_module, "SessionLocal", TestSession):
             assert probe_retry._update_retry_state("svc_missing", 1, 15) is False
 
+    def test_unexpected_error_logged_at_warning_and_keeps_retrying(self, db_session, caplog):
+        # A DB/lock error while persisting the retry state is the same
+        # unexpected-failure class the main loop deliberately logs at WARNING. It
+        # MUST surface at WARNING (visible under a production WARNING+ filter) and
+        # the loop keeps going (returns True) instead of silently stalling with an
+        # invisible failure. Pre-fix this was logged at INFO.
+        import logging as _logging
+
+        svc = _create_service(db_session)
+        TestSession = sessionmaker(bind=db_session.get_bind())
+
+        def _boom(_service_id):
+            raise RuntimeError("lock acquisition blew up")
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry, "service_reconcile_lock", _boom),
+            caplog.at_level(_logging.WARNING, logger="app.reconciler.probe_retry"),
+        ):
+            assert probe_retry._update_retry_state(svc.id, 1, 15) is True
+
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == _logging.WARNING and "Failed to update retry state" in r.getMessage()
+        ]
+        assert warnings, "retry-state write failures must be logged at WARNING, not INFO"
+
+
+class TestClearRetryState:
+    def test_unexpected_error_logged_at_warning(self, db_session, caplog):
+        # A swallowed clear leaves the probe-retry fields set forever, so the UI
+        # shows a pending retry that never comes. That failure MUST be visible at
+        # WARNING under a production WARNING+ filter. Pre-fix it was logged at INFO.
+        import logging as _logging
+
+        svc = _create_service(db_session)
+        TestSession = sessionmaker(bind=db_session.get_bind())
+
+        def _boom(_service_id):
+            raise RuntimeError("lock acquisition blew up")
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry, "service_reconcile_lock", _boom),
+            caplog.at_level(_logging.WARNING, logger="app.reconciler.probe_retry"),
+        ):
+            probe_retry._clear_retry_state(svc.id)
+
+        warnings = [
+            r for r in caplog.records
+            if r.levelno == _logging.WARNING and "Failed to clear retry state" in r.getMessage()
+        ]
+        assert warnings, "retry-state clear failures must be logged at WARNING, not INFO"
+
 
 # ---------------------------------------------------------------------------
 # _probe_retry_loop: stop conditions + bounded retries + last_probe_at

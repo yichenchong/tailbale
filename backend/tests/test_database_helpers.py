@@ -168,7 +168,7 @@ def _legacy_engine(tmp_path):
 
     The full schema is created, then the indexes newer model revisions added
     are dropped so the database resembles one created before ``index=True`` was
-    added to the models (Event ``service_id``/``created_at``, the Job
+    added to the models (Event ``service_id``/``kind``/``created_at``, the Job
     ``service_id``/``status``/``kind``/``created_at`` filters/ordering indexes,
     ``certificate.expires_at`` and ``service_status.phase``).
     """
@@ -182,6 +182,7 @@ def _legacy_engine(tmp_path):
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
         conn.execute(_text("DROP INDEX IF EXISTS ix_events_service_id"))
+        conn.execute(_text("DROP INDEX IF EXISTS ix_events_kind"))
         conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_service_id"))
         conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_status"))
         conn.execute(_text("DROP INDEX IF EXISTS ix_jobs_kind"))
@@ -227,6 +228,53 @@ def test_run_migrations_backfills_job_status_kind_created_at_indexes(tmp_path):
         assert "ix_jobs_status" in after
         assert "ix_jobs_kind" in after
         assert "ix_jobs_created_at" in after
+    finally:
+        engine.dispose()
+
+
+def test_run_migrations_backfills_events_kind_index(tmp_path):
+    """events.py filters ``GET /api/events`` on ``Event.kind`` (routers/events.py
+    ``query.filter(Event.kind == kind)``); the model declares ``kind`` with
+    ``index=True`` so fresh DBs get ``ix_events_kind`` from create_all. A DB
+    created before that index was added must have it backfilled too, or the kind
+    filter degrades to a full scan of the unbounded-growth events table. This is
+    the analogue of ``ix_jobs_kind`` (which IS backfilled)."""
+    from app.database import run_migrations
+
+    engine = _legacy_engine(tmp_path)
+    try:
+        assert "ix_events_kind" not in _index_names(engine, "events")
+
+        run_migrations(engine)
+
+        assert "ix_events_kind" in _index_names(engine, "events")
+    finally:
+        engine.dispose()
+
+
+def test_index_migrations_cover_every_core_model_index(tmp_path):
+    """Structural guard for the model<->migration pairing on the unbounded-growth
+    / dashboard hot-path tables. run_migrations only backfills the indexes it
+    enumerates, while create_all indexes every ``index=True`` column — so a
+    legacy production DB silently misses any model index absent from the backfill
+    list. Dropping every such index and running the migration must restore ALL of
+    them, so adding ``index=True`` to a core model without a backfill entry fails
+    loudly here (this is exactly how the missing ``ix_events_kind`` slipped in)."""
+    from app.database import run_migrations
+    from app.models.certificate import Certificate
+    from app.models.event import Event
+    from app.models.job import Job
+    from app.models.service_status import ServiceStatus
+
+    engine = _legacy_engine(tmp_path)
+    try:
+        run_migrations(engine)
+        for model in (Event, Job, Certificate, ServiceStatus):
+            table = model.__tablename__
+            have = _index_names(engine, table)
+            want = {ix.name for ix in model.__table__.indexes}
+            missing = want - have
+            assert not missing, f"{table} missing backfilled indexes: {missing}"
     finally:
         engine.dispose()
 

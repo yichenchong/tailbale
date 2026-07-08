@@ -342,6 +342,32 @@ class TestListContainers:
         ]
 
     @patch("app.routers.discovery.docker.DockerClient")
+    def test_container_empty_host_port_normalized_to_none(self, mock_docker_cls, client):
+        # A stopped/unassigned published port can surface a binding with an empty
+        # HostPort ("") in `docker inspect` (discovery lists stopped containers
+        # when running_only=false). Empty string is not a real host port; the
+        # `host_port: str | None` field must report None ("unpublished"), never a
+        # blank string the expose form would treat as a usable port.
+        mock_client = MagicMock()
+        mock_docker_cls.return_value = mock_client
+
+        container = _make_mock_container(
+            id="c1",
+            name="stopped",
+            status="exited",
+            state="exited",
+            ports={"80/tcp": [{"HostIp": "0.0.0.0", "HostPort": ""}]},
+        )
+        mock_client.containers.list.return_value = [container]
+
+        resp = client.get("/api/discovery/containers?running_only=false")
+        data = resp.json()
+
+        assert data["containers"][0]["ports"] == [
+            {"container_port": "80", "host_port": None, "protocol": "tcp"}
+        ]
+
+    @patch("app.routers.discovery.docker.DockerClient")
     def test_uses_base_url_when_socket_path_configured(self, mock_docker_cls, client):
         """A configured docker_socket_path is passed verbatim as base_url."""
         mock_client = MagicMock()

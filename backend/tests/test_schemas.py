@@ -143,6 +143,14 @@ class TestPortAndNameValidators:
         with pytest.raises(ValidationError):
             _make_create(upstream_scheme="ftp")
 
+    def test_name_max_length_boundary(self):
+        # max_length=128: 128 chars OK, 129 rejected. Strip (mode="before") runs
+        # first, so surrounding whitespace does not count toward the limit.
+        assert len(_make_create(name="a" * 128).name) == 128
+        assert _make_create(name="  " + "a" * 128 + "  ").name == "a" * 128
+        with pytest.raises(ValidationError):
+            _make_create(name="a" * 129)
+
 
 # ---------------------------------------------------------------------------
 # ServiceUpdate null-rejection for non-nullable fields
@@ -205,6 +213,18 @@ class TestGeneralSettingsIntValidation:
     @pytest.mark.parametrize("field", _INT_FIELDS)
     def test_coerces_clean_numeric_string(self, field):
         assert getattr(GeneralSettingsUpdate(**{field: "42"}), field) == 42
+
+    def test_cert_window_is_capped_but_retention_window_is_not(self):
+        # Deliberate asymmetry (settings.py): cert_renewal_window_days is capped
+        # at le=10000 (~27y) so `now + timedelta(days=window)` stays clear of the
+        # OverflowError that would 500 the manual /renew-cert path, while
+        # event_retention_days is intentionally left uncapped (ge=1 only) because
+        # its consumer (events/retention_task) has defined saturating overflow
+        # semantics. Pin both so neither cap drifts.
+        assert GeneralSettingsUpdate(cert_renewal_window_days=10000).cert_renewal_window_days == 10000
+        with pytest.raises(ValidationError):
+            GeneralSettingsUpdate(cert_renewal_window_days=10001)
+        assert GeneralSettingsUpdate(event_retention_days=10**7).event_retention_days == 10**7
 
 
 # ---------------------------------------------------------------------------

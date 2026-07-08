@@ -39,8 +39,9 @@ def _parse_ports(container) -> list[ContainerPortInfo]:
         port_num, _, proto = container_port.partition("/")
         host_port = None
         for binding in bindings or ():
-            host_port = binding.get("HostPort")
-            if host_port:
+            candidate = binding.get("HostPort")
+            if candidate:
+                host_port = candidate
                 break
         ports.append(ContainerPortInfo(
             container_port=port_num,

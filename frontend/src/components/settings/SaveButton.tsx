@@ -4,6 +4,7 @@ export function SaveButton({ saving, onClick, label, disabled }: { saving: boole
   }
   return (
     <button
+      type="button"
       onClick={handleClick}
       disabled={saving || disabled}
       aria-busy={saving}

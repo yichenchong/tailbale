@@ -42,7 +42,7 @@ from app.fsutil import fsync_directory_strict, fsync_file
 
 logger = logging.getLogger(__name__)
 
-# lego stores certs under .lego/certificates/ by default
+# Name of the lego ACME client binary, resolved on PATH.
 LEGO_BINARY = "lego"
 
 # DNS-01 challenges require DNS propagation (lego polls for ~60s by default)

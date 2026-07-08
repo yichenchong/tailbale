@@ -21,8 +21,11 @@ logger = logging.getLogger(__name__)
 #   - routers/services.py           manual Caddy reload / edge restart endpoints
 #   - routers/jobs.py               orphaned-DNS cleanup job outcomes
 #   - adapters/dns_reconciler.py    DNS record create/update/remove/cleanup
-#   - reconciler/reconciler.py      edge/tailscale/caddy/reconcile/dns-failure
-#                                   event dicts threaded through ``_persist_status``
+#   - reconciler/steps.py           edge_started / tailscale_ip_acquired /
+#                                   caddy_reloaded / reconcile_completed /
+#                                   dns_update_failed event dicts threaded
+#                                   through ``_persist_status``
+#   - reconciler/reconciler.py      reconcile_failed
 #   - reconciler/probe_retry.py     probe retry phase transitions
 #   - certs/renewal_task.py         cert issue/renew/fail
 #
@@ -36,7 +39,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "service_disabled",
         "service_deleted",
         "service_snippet_changed",
-        # Edge container / proxy lifecycle (reconciler/reconciler.py,
+        # Edge container / proxy lifecycle (reconciler/steps.py,
         # routers/services.py, services/edge_ops.py)
         "edge_started",
         "edge_restarted",
@@ -48,7 +51,7 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "cert_issued",
         "cert_renewed",
         "cert_failed",
-        # DNS records (adapters/dns_reconciler.py, reconciler/reconciler.py)
+        # DNS records (adapters/dns_reconciler.py, reconciler/steps.py)
         "dns_created",
         "dns_updated",
         "dns_removed",
@@ -60,7 +63,8 @@ EVENT_KINDS: frozenset[str] = frozenset(
         "dns_orphan_resolved",
         "dns_orphan_retry_failed",
         "dns_orphan_dismissed",
-        # Reconciliation (reconciler/probe_retry.py, reconciler/reconciler.py)
+        # Reconciliation (reconciler/probe_retry.py, reconciler/steps.py,
+        # reconciler/reconciler.py)
         "probe_retry_phase_change",
         "reconcile_completed",
         "reconcile_failed",

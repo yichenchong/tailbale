@@ -208,6 +208,7 @@ def reconcile_dns(
             db.add(dns_record)
             flush_with_lock(db)
 
+        dns_record.hostname = hostname
         dns_record.record_id = record_id
         dns_record.value = tailscale_ip
 

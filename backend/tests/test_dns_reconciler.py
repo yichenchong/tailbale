@@ -229,6 +229,38 @@ class TestReconcileDns:
         assert dns.value == "100.64.0.1"
         mock_update.assert_not_called()
 
+    @patch("app.adapters.dns_reconciler.update_a_record")
+    @patch("app.adapters.dns_reconciler.list_a_records")
+    def test_resyncs_stale_hostname_on_existing_row(self, mock_list, mock_update, db_session):
+        """reconcile_dns mirrors the service's DNS state into the local row. A row
+        whose hostname drifted from service.hostname (e.g. one that survived a
+        CF-unconfigured hostname change) must be re-synced to the CURRENT hostname,
+        never left stale while record_id/value already point at the new hostname's
+        Cloudflare record -- otherwise the local mirror lies about which name the
+        record serves."""
+        from app.adapters.cloudflare_adapter import ownership_comment
+        from app.adapters.dns_reconciler import reconcile_dns
+
+        svc = _create_service(db_session)  # hostname testapp.example.com
+        # Pre-existing row still carrying a STALE hostname from a prior name.
+        dns = DnsRecord(
+            service_id=svc.id, hostname="old.example.com", record_id="r1", value="100.64.0.1"
+        )
+        db_session.add(dns)
+        db_session.commit()
+
+        # CF already holds the correct, owned record for the CURRENT hostname -> no
+        # remote change; only the local mirror needs to converge.
+        mock_list.return_value = [
+            {"id": "r1", "content": "100.64.0.1", "comment": ownership_comment(svc.id)}
+        ]
+        reconcile_dns(db_session, svc, "100.64.0.1", "cf-token", "zone1")
+
+        row = db_session.get(DnsRecord, svc.id)
+        assert row.hostname == "testapp.example.com"  # resynced to service.hostname
+        assert row.record_id == "r1"
+        mock_update.assert_not_called()  # no remote write was needed
+
     @patch("app.adapters.dns_reconciler.create_a_record")
     @patch("app.adapters.dns_reconciler.list_a_records")
     def test_reconcile_is_idempotent(self, mock_list, mock_create, db_session):

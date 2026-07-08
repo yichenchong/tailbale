@@ -89,3 +89,46 @@ class TestRenewCertHealthyNeedsForce:
         # force=true bypasses the healthy-noop and runs the pipeline with force=True.
         mock_process.assert_called_once()
         assert mock_process.call_args.kwargs.get("force") is True
+
+
+class TestRenewCertForceReportsFailureHonestly:
+    """When a forced renewal RUNS but the cert pipeline fails internally,
+    process_service_cert SWALLOWS the error (records last_failure, emits
+    cert_failed, returns normally without raising). cert_ops must report that
+    honestly - success:False + a failure message - not the "Certificate
+    processed" success message the frontend surfaces to the operator verbatim."""
+
+    @patch("app.certs.renewal_task.process_service_cert")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_force_renew_internal_failure_reports_failure(
+        self, mock_secret, mock_process, client, db_session
+    ):
+        svc_id = _create_service(
+            client, name="App", hostname="app.example.com"
+        ).json()["id"]
+
+        # Mimic process_service_cert's swallow: it stamps last_failure on the
+        # cert row and returns normally (no raise), exactly as the real failure
+        # path does when lego/DNS errors out.
+        def fake_process(db, svc, *, force):
+            cert = db.get(Certificate, svc.id)
+            if cert is None:
+                cert = Certificate(service_id=svc.id, hostname=svc.hostname)
+                db.add(cert)
+            cert.last_failure = "DNS challenge failed"
+            db.commit()
+
+        mock_process.side_effect = fake_process
+
+        resp = client.post(f"/api/services/{svc_id}/renew-cert?force=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        mock_process.assert_called_once()
+        # The pipeline DID run (performed) but FAILED; the response must say so.
+        # Pre-fix: success:True + message "Certificate processed ..." (a lie the
+        # frontend showed the operator verbatim while last_failure was ignored).
+        assert data["performed"] is True
+        assert data["success"] is False
+        assert data["last_failure"] == "DNS challenge failed"
+        assert "failed" in data["message"].lower()
+        assert "DNS challenge failed" in data["message"]

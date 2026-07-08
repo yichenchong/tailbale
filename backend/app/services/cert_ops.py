@@ -25,6 +25,10 @@ def renew_cert(db: Session, svc: Service, *, force: bool) -> dict:
     ``process_service_cert`` cannot run the DNS-01 challenge and skips, so a
     renewal is reported as not performed. When the cert is healthy and far from
     expiry, renewing is refused (``needs_force``) unless *force* is set.
+    When the pipeline runs but the cert operation itself fails,
+    ``process_service_cert`` records the error and returns WITHOUT raising, so
+    the failure is reported (``success: False`` + the error message) rather than
+    a bare "processed" message the frontend would surface verbatim as success.
     Exceptions propagate to the router, which maps them to a generic 500 (logged
     on ``app.routers.services``).
     """
@@ -89,11 +93,26 @@ def renew_cert(db: Session, svc: Service, *, force: bool) -> dict:
 
     renewal_task.process_service_cert(db, svc, force=True)
     cert = db.get(Certificate, svc.id)
+    last_failure = cert.last_failure if cert else None
+    if last_failure:
+        # process_service_cert SWALLOWS a cert-operation failure (a lego/DNS
+        # error): it records last_failure, emits cert_failed, then returns
+        # normally without re-raising (renewal_task.py). The frontend shows this
+        # message verbatim, so a plain "Certificate processed" would tell the
+        # operator a renewal that actually failed had succeeded. Report honestly.
+        return {
+            "success": False,
+            "performed": True,
+            "needs_force": False,
+            "message": f"Certificate renewal for {svc.hostname} failed: {last_failure}",
+            "expires_at": iso(cert.expires_at if cert else None),
+            "last_failure": last_failure,
+        }
     return {
         "success": True,
         "performed": True,
         "needs_force": False,
         "message": f"Certificate processed for {svc.hostname}",
         "expires_at": iso(cert.expires_at if cert else None),
-        "last_failure": cert.last_failure if cert else None,
+        "last_failure": None,
     }

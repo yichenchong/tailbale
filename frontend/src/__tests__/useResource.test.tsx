@@ -92,6 +92,40 @@ describe("useResource", () => {
     expect(result.current.loading).toBe(false)
   })
 
+  it("clears a prior error up front on a foreground refresh, before it resolves", async () => {
+    // The foreground counterpart of the failed-background case above. A
+    // foreground load owns the spinner AND clears any prior error immediately,
+    // so a retry after a failure shows a clean loading state rather than the
+    // stale red banner lingering until the retry actually resolves.
+    const fail = deferred<string>()
+    const ok = deferred<string>()
+    const fetcher = vi
+      .fn()
+      .mockReturnValueOnce(fail.promise) // mount: fails, sets the error
+      .mockReturnValueOnce(ok.promise) // foreground refresh: clears it up front
+
+    const { result } = renderHook(() => useResource(fetcher))
+    await act(async () => {
+      fail.reject(new Error("boom"))
+      await fail.promise.catch(() => {})
+    })
+    expect(result.current.error).toBe("boom")
+
+    act(() => {
+      void result.current.refresh()
+    })
+    // Error is gone the instant the foreground load starts, not only on success.
+    expect(result.current.error).toBeNull()
+    expect(result.current.loading).toBe(true)
+
+    await act(async () => {
+      ok.resolve("A")
+      await ok.promise
+    })
+    expect(result.current.error).toBeNull()
+    expect(result.current.data).toBe("A")
+  })
+
   it("clears loading when a background refresh supersedes an in-flight foreground load", async () => {
     // Models the real Dashboard/Discover race: the user clicks Refresh
     // (foreground, raises the spinner) and the 30s poll (background) fires while

@@ -143,7 +143,7 @@ export default function Discover() {
         ) : (
           <>
             {error && (
-              <div className="mb-3 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800">
+              <div role="status" className="mb-3 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800">
                 {lastRefresh
                   ? `Couldn't refresh \u2014 showing data from ${formatTime(lastRefresh, tz)}`
                   : "Couldn't refresh \u2014 showing cached data"}

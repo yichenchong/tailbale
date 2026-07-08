@@ -1,5 +1,6 @@
 # ruff: noqa: E402
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -50,7 +51,6 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.to_thread(ensure_edge_image)
         except Exception:
-            import logging
             logging.getLogger(__name__).warning(
                 "Could not build edge image at startup — will retry on first service reconcile",
                 exc_info=True,

@@ -566,6 +566,7 @@ describe("ExposeService page", () => {
     await waitFor(() => {
       expect(screen.getByRole("button", { name: /Creating/ })).toBeDisabled()
     })
+    expect(screen.getByRole("button", { name: /Creating/ })).toHaveAttribute("aria-busy", "true")
 
     // A second submit while that POST is still in flight must be ignored.
     fireEvent.submit(form)

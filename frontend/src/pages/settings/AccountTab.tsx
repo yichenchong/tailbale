@@ -69,6 +69,7 @@ export function AccountTab() {
             error={confirmPassword.length > 0 && newPassword !== confirmPassword ? "Passwords do not match." : undefined}
           />
           <button
+            type="button"
             onClick={handleChangePassword}
             disabled={!canSubmit}
             aria-busy={saving}

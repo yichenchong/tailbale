@@ -46,13 +46,17 @@ export function GeneralTab({
   // server is authoritative), so the page never relies on this gate being
   // exhaustive. We mirror the backend constraints only for inline feedback + to
   // skip an obviously-doomed PUT: base_domain -> Field(min_length=1); acme_email
-  // -> isEmailLike (same shape the backend enforces); numeric fields -> Field(ge=1).
+  // -> isEmailLike (same shape the backend enforces); numeric fields -> Field(ge=1),
+  // with cert_renewal_window_days additionally capped at Field(le=10000) server-side.
   // Layers on top of the per-field dirty guard above without touching it.
   const baseDomainValid = isNonBlank(values.base_domain)
   const acmeEmailValid = isEmailLike(values.acme_email)
   const reconcileValid = isPositiveInt(values.reconcile_interval_seconds)
   const healthValid = isPositiveInt(values.health_check_interval_seconds)
-  const renewalValid = isPositiveInt(values.cert_renewal_window_days)
+  // cert_renewal_window_days mirrors the backend Field(ge=1, le=10000); the upper
+  // bound stops an obviously-doomed PUT (backend 422s "less than or equal to 10000").
+  const renewalValid =
+    isPositiveInt(values.cert_renewal_window_days) && Number(values.cert_renewal_window_days) <= 10000
   const retentionValid = isPositiveInt(values.event_retention_days)
   const formValid =
     baseDomainValid && acmeEmailValid && reconcileValid && healthValid && renewalValid && retentionValid
@@ -98,7 +102,7 @@ export function GeneralTab({
         onChange={bind("cert_renewal_window_days")}
         type="number"
         hint="Renew certs this many days before expiry"
-        error={renewalValid ? undefined : "Must be a whole number of at least 1"}
+        error={renewalValid ? undefined : "Must be a whole number from 1 to 10000"}
       />
       <Field
         label="Keep event log for (days)"

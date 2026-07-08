@@ -537,6 +537,42 @@ class TestProcessServiceCert:
             == 0
         )
 
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_overflowing_renewal_window_renews_eagerly(
+        self, mock_secret, mock_renew, db_session
+    ):
+        """A cert_renewal_window_days so large it overflows the representable
+        date range (days_from_now -> None) makes the cutoff effectively infinite,
+        so ANY real expiry is 'within window': the cert must renew eagerly rather
+        than be treated as far-healthy. Without the ``window_cutoff is None``
+        guard the comparison ``expiry_utc <= None`` would raise TypeError and
+        abort processing. Mirrors the cert_ops (manual-endpoint) overflow test."""
+        from app.certs.renewal_task import process_service_cert
+        from app.settings_store import set_setting
+
+        mock_secret.return_value = "cf-token"
+        mock_renew.return_value = (MagicMock(), False)
+        certs_root = self._tmp_certs_root(db_session, set_setting)
+
+        svc = _create_service(db_session)
+        # A healthy matching pair far from expiry: under the default 30-day
+        # window this takes the healthy-skip path (no ACME). The overflowing
+        # window must instead force a renewal.
+        _write_real_pair(certs_root / svc.hostname, matching=True)
+
+        # 10**9 days exceeds timedelta's ceiling -> days_from_now returns None.
+        set_setting(db_session, "cert_renewal_window_days", str(10**9))
+        db_session.commit()
+
+        process_service_cert(db_session, svc)
+
+        # The None cutoff drove a renewal instead of the healthy skip.
+        mock_renew.assert_called_once()
+        assert (
+            db_session.query(Event).filter(Event.kind == "cert_renewed").count() == 1
+        )
+
     @staticmethod
     def _tmp_certs_root(db_session, set_setting):
         import tempfile

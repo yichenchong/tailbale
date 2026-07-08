@@ -1,8 +1,11 @@
 """Service CRUD: create / update / disable / delete + response mapping + slugs.
 
 Split out of the former ``service_ops`` god-module (AR1). Holds the service-row
-mutators — the only code that acquires the tier-1 ``_SERVICE_LIFECYCLE_MUTEX`` —
-plus the slug derivation and ``to_response`` shaping the router reuses.
+mutators — the service-lifecycle acquirers of the tier-1
+``_SERVICE_LIFECYCLE_MUTEX`` (the service-less orphan-DNS cleanup retry in
+``routers/jobs.py`` and the developer reset sweep in ``routers/settings.py`` also
+take it, always tier-1 first) — plus the slug derivation and ``to_response``
+shaping the router reuses.
 
 Lock acquisition order is preserved verbatim (tier-1 lifecycle mutex FIRST, then
 the tier-2 per-service reconcile lock, then the tier-3 DB write lock via
@@ -374,7 +377,19 @@ def _emit_update_events(
 ) -> None:
     """Emit the generic update event plus a dedicated snippet-delta audit event."""
     if changes:
-        emit_event(db, svc.id, "service_updated", f"Service '{svc.name}' updated", details=changes)
+        # The raw custom_caddy_snippet is an admin-injected Caddy-config / SSRF
+        # tamper vector; the dedicated service_snippet_changed event below records
+        # its delta as sha256+len rather than persisting the raw text into the
+        # audit log. Mirror that here so the generic update event never duplicates
+        # the raw snippet (which would also bloat the event log with a large
+        # snippet on every edit that includes it).
+        audit_changes = changes
+        if "custom_caddy_snippet" in changes:
+            audit_changes = {
+                k: ("<redacted: see service_snippet_changed>" if k == "custom_caddy_snippet" else v)
+                for k, v in changes.items()
+            }
+        emit_event(db, svc.id, "service_updated", f"Service '{svc.name}' updated", details=audit_changes)
 
     if snippet_in_update:
         new_snippet = svc.custom_caddy_snippet
@@ -622,6 +637,17 @@ def delete_service_record(db: Session, svc: Service, *, cleanup_dns: bool) -> No
 
 
 def _delete_service_record_locked(db: Session, svc: Service, *, cleanup_dns: bool) -> None:
+    # Re-read under the lifecycle+reconcile lock, mirroring update_service /
+    # disable_service (both take populate_existing=True inside the lock). The
+    # router loaded ``svc`` BEFORE this path acquired the lock, so a hostname
+    # change that committed while we blocked would leave svc.hostname stale — and
+    # the filesystem teardown below keys the served cert dir + lego artifacts off
+    # it, silently leaking the CURRENT hostname's cert state (and re-removing the
+    # already-gone old one). A racing delete that removed the row leaves nothing
+    # to tear down.
+    svc = db.get(Service, svc.id, populate_existing=True)
+    if svc is None:
+        return
     socket = resolve_socket(db)
     with contextlib.suppress(Exception):
         container_manager.remove_edge(svc.id, svc.edge_container_name, socket)

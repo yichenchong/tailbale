@@ -1161,3 +1161,124 @@ class TestStringPathAcceptance:
             annotation_r = str(sig_recreate.parameters[param_name].annotation)
             assert "str" in annotation_r and "Path" in annotation_r, \
                 f"recreate_edge.{param_name} should accept str | Path"
+
+
+# ---------------------------------------------------------------------------
+# Tailscale control-plane leaf (admin-API device delete + node-id extraction)
+# ---------------------------------------------------------------------------
+
+
+class TestTailscaleDeviceControlPlane:
+    """Direct coverage of the control-plane leaf, otherwise exercised only
+    indirectly via remove_edge (which stubs both functions out)."""
+
+    def test_get_node_id_returns_self_id(self):
+        from app.edge.tailscale_device import _get_tailscale_node_id
+
+        container = MagicMock()
+        container.exec_run.return_value = (0, json.dumps({"Self": {"ID": "n123abc"}}).encode())
+        assert _get_tailscale_node_id(container) == "n123abc"
+
+    def test_get_node_id_none_on_nonzero_exit(self):
+        from app.edge.tailscale_device import _get_tailscale_node_id
+
+        container = MagicMock()
+        container.exec_run.return_value = (1, b"tailscale not up")
+        assert _get_tailscale_node_id(container) is None
+
+    def test_get_node_id_none_when_self_missing(self):
+        from app.edge.tailscale_device import _get_tailscale_node_id
+
+        container = MagicMock()
+        container.exec_run.return_value = (0, json.dumps({}).encode())
+        assert _get_tailscale_node_id(container) is None
+
+    def test_get_node_id_none_on_invalid_json(self):
+        from app.edge.tailscale_device import _get_tailscale_node_id
+
+        container = MagicMock()
+        container.exec_run.return_value = (0, b"not json{{{")
+        assert _get_tailscale_node_id(container) is None
+
+    @patch("app.edge.tailscale_device.httpx2.delete")
+    def test_delete_device_returns_true_on_success(self, mock_delete):
+        from app.edge.tailscale_device import _delete_tailscale_device
+
+        resp = MagicMock()
+        resp.is_success = True
+        mock_delete.return_value = resp
+
+        assert _delete_tailscale_device("n123", "tskey-api-x") is True
+        # Basic auth: API key as username, empty password.
+        assert mock_delete.call_args.kwargs["auth"] == ("tskey-api-x", "")
+
+    @patch("app.edge.tailscale_device.httpx2.delete")
+    def test_delete_device_returns_false_on_http_error(self, mock_delete):
+        from app.edge.tailscale_device import _delete_tailscale_device
+
+        resp = MagicMock()
+        resp.is_success = False
+        resp.status_code = 404
+        resp.text = "device not found"
+        mock_delete.return_value = resp
+
+        assert _delete_tailscale_device("n123", "tskey-api-x") is False
+
+    @patch("app.edge.tailscale_device.httpx2.delete")
+    def test_delete_device_returns_false_on_exception(self, mock_delete):
+        from app.edge.tailscale_device import _delete_tailscale_device
+
+        mock_delete.side_effect = RuntimeError("network down")
+        assert _delete_tailscale_device("n123", "tskey-api-x") is False
+
+
+# ---------------------------------------------------------------------------
+# edge_container client-lifecycle primitive
+# ---------------------------------------------------------------------------
+
+
+class TestEdgeContainerLifecycle:
+    """The single client-lifecycle primitive must close the Docker client on
+    both normal exit and body exceptions; _find_edge_container_for_use must
+    close it when the lookup faults after connect succeeds."""
+
+    def test_closes_client_on_normal_exit(self):
+        from app.edge.container_manager import edge_container
+
+        fake_client = MagicMock()
+        with (
+            patch("app.edge.container_manager.connect", return_value=fake_client),
+            patch("app.edge.container_manager._find_edge_container", return_value=MagicMock()),
+            edge_container("svc_123", "edge_test") as (client, container),
+        ):
+            assert client is fake_client
+            assert container is not None
+        fake_client.close.assert_called_once()
+
+    def test_closes_client_on_body_exception(self):
+        from app.edge.container_manager import edge_container
+
+        fake_client = MagicMock()
+        with (
+            patch("app.edge.container_manager.connect", return_value=fake_client),
+            patch("app.edge.container_manager._find_edge_container", return_value=MagicMock()),
+            pytest.raises(ValueError, match="boom"),
+            edge_container("svc_123", "edge_test"),
+        ):
+            raise ValueError("boom")
+        fake_client.close.assert_called_once()
+
+    def test_for_use_closes_client_when_lookup_raises_after_connect(self):
+        from app.edge.container_manager import _find_edge_container_for_use
+
+        fake_client = MagicMock()
+        with (
+            patch("app.edge.container_manager.connect", return_value=fake_client),
+            patch(
+                "app.edge.container_manager._find_edge_container",
+                side_effect=docker.errors.APIError("daemon boom"),
+            ),
+            pytest.raises(docker.errors.APIError, match="daemon boom"),
+        ):
+            _find_edge_container_for_use("svc_123", "edge_test")
+        fake_client.close.assert_called_once()

@@ -146,6 +146,7 @@ def run_migrations(target_engine: Engine | None = None) -> None:
     _INDEX_MIGRATIONS: list[tuple[str, str, str]] = [
         (Event.__tablename__, f"ix_{Event.__tablename__}_service_id", "service_id"),
         (Event.__tablename__, f"ix_{Event.__tablename__}_created_at", "created_at"),
+        (Event.__tablename__, f"ix_{Event.__tablename__}_kind", "kind"),
         (Job.__tablename__, f"ix_{Job.__tablename__}_service_id", "service_id"),
         (Job.__tablename__, f"ix_{Job.__tablename__}_status", "status"),
         (Job.__tablename__, f"ix_{Job.__tablename__}_kind", "kind"),

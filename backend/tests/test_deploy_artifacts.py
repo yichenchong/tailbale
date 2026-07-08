@@ -112,6 +112,16 @@ def test_edge_dockerfile_pins_caddy_and_tailscale():
     assert 'caddy_arch="armv7"' in dockerfile
     assert 'caddy_arch="armv6"' in dockerfile
 
+def test_edge_dockerfile_removes_build_tools():
+    """curl/tar are only needed to fetch+unpack Caddy at build time. They must
+    not linger in the runtime edge image (attack surface + size), mirroring the
+    root Dockerfile which purges curl. They are installed as a removable
+    ``.build-deps`` virtual package and deleted in the same layer."""
+    dockerfile = (ROOT / "edge" / "Dockerfile").read_text(encoding="utf-8")
+
+    assert "--virtual .build-deps curl tar" in dockerfile
+    assert "apk del .build-deps" in dockerfile
+
 def test_env_example_documents_login_rate_limit_settings():
     """.env.example must document the login brute-force settings that
     config.py exposes as overridable Settings fields (LOGIN_MAX_FAILURES /

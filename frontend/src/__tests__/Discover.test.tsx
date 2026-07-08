@@ -240,11 +240,15 @@ describe("Discover page", () => {
       await Promise.resolve()
     })
 
-    // The list is preserved AND the staleness is now visible.
+    // The list is preserved AND the staleness is now visible AND announced.
     await waitFor(() => {
       expect(screen.getByText(/Couldn't refresh/)).toBeInTheDocument()
     })
     expect(screen.getByText("nextcloud")).toBeInTheDocument()
+    // The warning surfaces asynchronously after a background poll with no focus
+    // change, so it MUST live in a polite live region (role="status") — otherwise
+    // screen-reader users are never told the data went stale (WCAG 4.1.3).
+    expect(screen.getByRole("status")).toHaveTextContent(/Couldn't refresh/)
   })
 
   it("does not flash the empty-state over a prior error during a background poll", async () => {

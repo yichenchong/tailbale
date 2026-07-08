@@ -261,6 +261,7 @@ describe("Setup wizard", () => {
       expect(screen.getByText("Saving...")).toBeInTheDocument()
     })
     expect(screen.getByText("Back").closest("button")).toBeDisabled()
+    expect(screen.getByText("Saving...").closest("button")).toHaveAttribute("aria-busy", "true")
   })
 
   it("advances to Domain step after account creation", async () => {

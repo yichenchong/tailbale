@@ -74,6 +74,18 @@ export default function Dashboard() {
         </div>
       </div>
 
+      {/* A failed background poll (or manual refresh) keeps the last-good data on
+          screen; surface the staleness instead of silently presenting it as
+          current. Polite live region (role="status") so it announces to
+          assistive tech when it appears without a focus change (WCAG 4.1.3). */}
+      {error && (
+        <div role="status" className="mt-4 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800">
+          {lastRefresh
+            ? `Couldn't refresh \u2014 showing data from ${fmtTime(lastRefresh, tz)}`
+            : "Couldn't refresh \u2014 showing cached data"}
+        </div>
+      )}
+
       {/* Summary cards */}
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Card icon={Activity} label="Total Services" value={s.total} color="text-zinc-700" bg="bg-zinc-50" />
@@ -89,7 +101,7 @@ export default function Dashboard() {
             <ShieldAlert className="h-4 w-4" /> Upcoming Cert Expiries
           </h2>
           {data.expiring_certs.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-400">No certificates expiring within 30 days.</p>
+            <p className="mt-3 text-sm text-zinc-400">No certificates approaching expiry.</p>
           ) : (
             <ul className="mt-3 space-y-2">
               {data.expiring_certs.map((c) => {

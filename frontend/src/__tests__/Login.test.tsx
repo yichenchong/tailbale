@@ -144,6 +144,9 @@ describe("Login page", () => {
     await waitFor(() => {
       expect(screen.getByText("Signing in...")).toBeInTheDocument()
     })
+    // The submit button announces its in-flight state to assistive tech
+    // (aria-busy), matching the settings Save/Test buttons.
+    expect(screen.getByText("Signing in...").closest("button")).toHaveAttribute("aria-busy", "true")
   })
 
   it("ignores a synchronous double-fire of the login submit (ref-based in-flight guard)", async () => {

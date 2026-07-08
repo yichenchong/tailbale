@@ -2127,3 +2127,94 @@ class TestLegoCertArtifactCleanup:
         svc = _create_service(client, name="App", hostname="app.example.com").json()
         resp = client.delete(f"/api/services/{svc['id']}")
         assert resp.status_code == 204
+
+class TestDeleteRefreshesStaleService:
+    """delete_service_record must tear down the CURRENT service row, not the
+    pre-lock snapshot the router loaded. update_service/disable_service both
+    re-fetch with populate_existing under the lifecycle lock; delete must too.
+    A hostname change that commits between the router's fetch and the delete's
+    lock acquisition would otherwise leave delete keying its cert-dir / lego
+    teardown off the STALE old hostname — silently leaking the current
+    hostname's cert state while re-removing the already-gone old one."""
+
+    @patch("app.edge.network_manager.remove_network")
+    @patch("app.edge.container_manager.remove_edge")
+    def test_delete_uses_current_hostname_not_stale_snapshot(
+        self, mock_re, mock_rn, client, db_session, tmp_data_dir
+    ):
+        from sqlalchemy import text
+
+        from app import services as service_layer
+        from app.settings_store import set_setting
+
+        custom_certs = str(tmp_data_dir / "certs")
+        set_setting(db_session, "cert_root", custom_certs)
+        db_session.commit()
+
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # Seed served cert dirs for BOTH the old snapshot hostname and the one a
+        # concurrent rename switched the row to.
+        old_dir = Path(custom_certs) / "app.example.com"
+        old_dir.mkdir(parents=True)
+        (old_dir / "fullchain.pem").write_text("old")
+        new_dir = Path(custom_certs) / "new.example.com"
+        new_dir.mkdir(parents=True)
+        (new_dir / "fullchain.pem").write_text("new")
+
+        # Load the ORM object (old hostname), then simulate the concurrent rename
+        # having committed WHILE the delete blocked on the lock: mutate the row via
+        # raw SQL in this session's open transaction so the ORM object stays stale.
+        stale_svc = db_session.get(Service, svc_id)
+        db_session.execute(
+            text("UPDATE services SET hostname = :h WHERE id = :id"),
+            {"h": "new.example.com", "id": svc_id},
+        )
+        assert stale_svc.hostname == "app.example.com"  # object still stale
+
+        service_layer.delete_service_record(db_session, stale_svc, cleanup_dns=False)
+
+        # The delete must clean up the CURRENT hostname's cert dir; pre-fix it
+        # used the stale snapshot and left new_dir behind (removing old_dir).
+        assert not new_dir.exists(), "delete must remove the current hostname's cert dir"
+
+
+class TestUpdateEventRedactsSnippet:
+    """The dedicated service_snippet_changed audit event records the snippet
+    delta as sha256+len precisely so the raw admin-injected snippet (a Caddy-
+    config / SSRF tamper vector) never lands in the event log. The generic
+    service_updated event must not undo that by persisting the raw snippet in
+    its details."""
+
+    def test_service_updated_details_redact_raw_snippet(self, client, db_session):
+        import hashlib
+
+        from app.models.event import Event
+
+        snippet = "header X-Frame-Options DENY"
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(
+            f"/api/services/{svc_id}",
+            json={"name": "Renamed", "custom_caddy_snippet": snippet},
+        )
+        assert resp.status_code == 200
+
+        updated = (
+            db_session.query(Event)
+            .filter(Event.kind == "service_updated", Event.service_id == svc_id)
+            .one()
+        )
+        details = updated.details
+        # The non-sensitive field is still recorded verbatim...
+        assert details["name"] == "Renamed"
+        # ...but the raw snippet must NOT be persisted in the generic event.
+        assert details["custom_caddy_snippet"] == "<redacted: see service_snippet_changed>"
+        assert snippet not in str(details)
+
+        # The dedicated event still carries the sha256 audit trail.
+        snippet_evt = (
+            db_session.query(Event)
+            .filter(Event.kind == "service_snippet_changed", Event.service_id == svc_id)
+            .one()
+        )
+        assert snippet_evt.details["new_sha256"] == hashlib.sha256(snippet.encode()).hexdigest()

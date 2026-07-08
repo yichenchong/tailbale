@@ -10,7 +10,7 @@ def _cf_response(success=True, result=None, errors=None):
     mock = MagicMock()
     mock.json.return_value = {
         "success": success,
-        "result": result or {},
+        "result": result if result is not None else {},
         "errors": errors or [],
     }
     return mock

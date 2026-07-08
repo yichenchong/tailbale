@@ -4,6 +4,8 @@ import re
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.edge.caddy_snippet import validate_caddy_snippet
+
 _HOSTNAME_RE = re.compile(
     r"^[a-z0-9]([a-z0-9\-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9\-]*[a-z0-9])?)*$"
 )
@@ -54,15 +56,11 @@ def _validate_container_name(v: str) -> str:
 def _validate_caddy_snippet(v: str) -> str:
     """Validate a rendered custom Caddy snippet for site-block containment.
 
-    The snippet-containment lexer lives in the edge subsystem; import it lazily
-    here so this schema (transport/contract) layer does not pull the 12KB edge
-    module in at import time. The dependency is deferred to the single moment a
-    snippet is actually validated, and only the stable ``validate_caddy_snippet``
-    facade is imported — never edge internals. Request-time 422 behavior is
-    identical to a module-level import (validation still runs during parsing).
+    Delegates to the edge subsystem's ``validate_caddy_snippet`` facade, which
+    lexes the snippet in its rendered form to guarantee it cannot break out of
+    its per-service ``host { }`` block. Only the stable facade is imported —
+    never the edge module's internal lexer/renderer wiring.
     """
-    from app.edge.caddy_snippet import validate_caddy_snippet
-
     return validate_caddy_snippet(v)
 
 

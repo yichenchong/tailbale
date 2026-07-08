@@ -202,7 +202,10 @@ def find_record(
 
     Reuses :func:`list_a_records`; on multiple matches it picks the lowest id
     deterministically (stable across calls) and warns. Signature/behavior preserved
-    for callers that need a single record (jobs.py orphan cleanup, health checks).
+    for callers that need a single record (the live Cloudflare DNS health check and
+    the service-detail endpoint). The jobs.py orphan-cleanup path deliberately uses
+    :func:`list_a_records` instead, since it must locate a SPECIFIC record id among
+    all matches rather than the lowest-id pick.
     """
     results = list_a_records(token, zone_id, hostname, record_type, timeout=timeout)
     if not results:

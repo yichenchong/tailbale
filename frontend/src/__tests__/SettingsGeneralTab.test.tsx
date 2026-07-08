@@ -387,8 +387,25 @@ describe("SettingsGeneralTab numeric validation", () => {
     // Zero the renewal window (value "30" -> "0"); 0 < 1 is invalid.
     fireEvent.change(screen.getByDisplayValue("30"), { target: { value: "0" } })
 
-    expect(screen.getByText("Must be a whole number of at least 1")).toBeInTheDocument()
+    expect(screen.getByText("Must be a whole number from 1 to 10000")).toBeInTheDocument()
     expect(screen.getByText("Save")).toBeDisabled()
+  })
+
+  it("shows an error and disables Save when the cert renewal window exceeds the backend cap (le=10000)", async () => {
+    const { GeneralTab } = await import("@/pages/settings/GeneralTab")
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<GeneralTab settings={general} onSave={onSave} saving={false} version={null} />)
+
+    // The backend caps cert_renewal_window_days at Field(le=10000); a larger value
+    // passes a naive ">= 1" check but 422s server-side ("less than or equal to
+    // 10000"). The client must mirror the upper bound and block the doomed PUT.
+    fireEvent.change(screen.getByDisplayValue("30"), { target: { value: "20000" } })
+
+    expect(screen.getByText("Must be a whole number from 1 to 10000")).toBeInTheDocument()
+    const saveBtn = screen.getByText("Save")
+    expect(saveBtn).toBeDisabled()
+    fireEvent.click(saveBtn)
+    expect(onSave).not.toHaveBeenCalled()
   })
 
   it("shows an error and disables Save for a fractional value the int field would reject", async () => {

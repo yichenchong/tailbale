@@ -167,15 +167,22 @@ def _client_host(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def _too_many_attempts(retry_after: int) -> HTTPException:
+    """Build the shared 429 lockout response so the detail message and the
+    ``Retry-After`` header stay identical across the pre-check (``retry_after``)
+    and the failure-recording (``record_failure``) paths."""
+    return HTTPException(
+        status_code=429,
+        detail="Too many failed login attempts. Try again later.",
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 def _reject_failed_login(client: str) -> None:
     """Record a failed attempt and raise 401, or 429 once the client is locked."""
     retry_after = _login_rate_limiter.record_failure(client)
     if retry_after is not None:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many failed login attempts. Try again later.",
-            headers={"Retry-After": str(retry_after)},
-        )
+        raise _too_many_attempts(retry_after)
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 def _user_response(user: User) -> UserResponse:
@@ -217,11 +224,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
     # probing the (deliberately slow) bcrypt path.
     retry_after = _login_rate_limiter.retry_after(client)
     if retry_after is not None:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many failed login attempts. Try again later.",
-            headers={"Retry-After": str(retry_after)},
-        )
+        raise _too_many_attempts(retry_after)
 
     user = db.query(User).filter(User.username == _normalize_username(body.username)).first()
     if not user or not user.is_active:

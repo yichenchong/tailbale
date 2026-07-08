@@ -14,10 +14,18 @@ from typing import TYPE_CHECKING
 
 import docker
 
+# ``cloudflare_adapter`` and ``cert_manager`` are imported as modules (not their
+# symbols) so tests — here and in the reconciler suite, which drives the health
+# path through ``reconcile_service`` — can patch ``find_record`` / ``get_cert_expiry``
+# at the source module and have the patch take effect: the attribute is resolved
+# at call time rather than bound once at import.
+from app.adapters import cloudflare_adapter
+from app.certs import cert_manager
 from app.edge.container_manager import find_edge_container
 from app.edge.docker_client import close_client, connect
 from app.models.dns_record import DnsRecord
-from app.settings_store import get_positive_int_setting
+from app.secrets import CLOUDFLARE_TOKEN, read_secret
+from app.settings_store import get_positive_int_setting, get_setting
 from app.timeutil import days_from_now
 
 if TYPE_CHECKING:
@@ -158,9 +166,6 @@ def _check_dns(db: Session, service: Service, current_ip: str | None, *, live: b
         return db_record_present, db_matches_ip
 
     try:
-        from app.secrets import CLOUDFLARE_TOKEN, read_secret
-        from app.settings_store import get_setting
-
         cf_token = read_secret(CLOUDFLARE_TOKEN)
         zone_id = get_setting(db, "cf_zone_id")
     except Exception:
@@ -171,9 +176,7 @@ def _check_dns(db: Session, service: Service, current_ip: str | None, *, live: b
         return db_record_present, db_matches_ip
 
     try:
-        from app.adapters.cloudflare_adapter import find_record
-
-        live_record = find_record(cf_token, zone_id, service.hostname, "A")
+        live_record = cloudflare_adapter.find_record(cf_token, zone_id, service.hostname, "A")
     except Exception:
         logger.warning("Live Cloudflare DNS health check failed for %s", service.hostname, exc_info=True)
         return db_record_present, False
@@ -246,9 +249,7 @@ def _check_cert_not_expiring(
     if not cert_path.exists():
         return False
     try:
-        from app.certs.cert_manager import get_cert_expiry
-
-        expiry = get_cert_expiry(cert_path)
+        expiry = cert_manager.get_cert_expiry(cert_path)
         if expiry is None:
             return False
         threshold = days_from_now(renewal_window_days)

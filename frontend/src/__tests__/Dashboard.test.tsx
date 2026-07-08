@@ -114,7 +114,7 @@ describe("Dashboard page", () => {
     renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(
-        screen.getByText("No certificates expiring within 30 days.")
+        screen.getByText("No certificates approaching expiry.")
       ).toBeInTheDocument()
     })
   })
@@ -422,6 +422,42 @@ describe("Dashboard page", () => {
     })
 
     // Prior data persists; the error never takes over the page.
+    expect(screen.getByText("13")).toBeInTheDocument()
+    expect(screen.queryByText("refresh failed")).not.toBeInTheDocument()
+  })
+
+  it("announces a stale-data warning when a refresh fails while data is on screen", async () => {
+    // A polling page that silently swallows a failed poll presents stale data as
+    // current. Parity with Discover/Services: keep the last-good data AND show a
+    // polite live-region (role="status") notice so the staleness is announced.
+    const initial = { ...mockSummary, services: { total: 13, healthy: 0, warning: 0, error: 0 } }
+    let dashboardCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ general: { timezone: "UTC" } }) })
+      }
+      dashboardCalls++
+      if (dashboardCalls === 1) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(initial) })
+      }
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ detail: "refresh failed" }) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("13")).toBeInTheDocument()
+    })
+    // No warning while the data is fresh.
+    expect(screen.queryByText(/Couldn't refresh/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText("Refresh"))
+
+    // The stale-data warning surfaces in a polite live region; data persists and
+    // the raw error text never leaks into the page.
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(/Couldn't refresh/)
+    })
     expect(screen.getByText("13")).toBeInTheDocument()
     expect(screen.queryByText("refresh failed")).not.toBeInTheDocument()
   })

@@ -69,7 +69,9 @@ export function formatCertExpiry(
   tz: string,
 ): { text: string; style: string } {
   const status = certStatus(iso)
-  if (!iso || status.urgency === "none") return { text: "—", style: status.color }
+  // `certStatus` already collapses BOTH a missing and an unparseable `iso` to
+  // urgency "none", so that check alone is the single, sufficient sentinel gate.
+  if (status.urgency === "none") return { text: "—", style: status.color }
   // Urgent states (expired/soon) are emphasized; a comfortably-valid cert is not.
   const weight = status.urgency === "ok" ? "" : " font-medium"
   return { text: formatDate(iso, tz), style: `${status.color}${weight}` }

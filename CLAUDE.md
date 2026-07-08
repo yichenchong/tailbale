@@ -83,8 +83,8 @@ HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build 
 3. **Edge container per service**: Isolated Docker network shared with upstream container. Caddy reverse-proxies to upstream via Docker DNS. TLS via mounted Let's Encrypt certs.
 
 ### Auth Flow
-- Initial setup creates the single admin `User` via `/api/auth/setup`
-- JWT token stored as `access_token` cookie; all routes except `/api/auth/*` require it
+- Initial setup creates the single admin `User` via `/api/auth/setup-user`
+- JWT token stored as `access_token` cookie; every route requires it except the public ones: `/api/health`, `/api/version`, the static SPA, and the pre-auth auth routes (`/api/auth/status`, `/api/auth/login`, `/api/auth/setup-user`, plus `/api/auth/setup-progress` until setup completes)
 - `get_current_user` FastAPI dependency used on protected endpoints
 
 ### Frontend Patterns

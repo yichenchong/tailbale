@@ -276,6 +276,26 @@ class TestHealthCheckAll:
             db_session, svc.id, socket_path="unix:///custom.sock"
         )
 
+    def test_warning_phase_also_escalates_to_full_reconcile(self, db_session):
+        # The sweep escalates on ANY non-healthy phase, not just "error": the
+        # contract is "anything other than healthy is escalated" (a warning such
+        # as a missing/mismatched DNS record is a real drift a full reconcile can
+        # repair). Pins that a regression narrowing this to `phase == "error"`
+        # would leave warning-phase services un-repaired between hourly sweeps.
+        svc = _create_service(db_session)
+        with (
+            patch("app.health.health_checker.run_health_checks", return_value={"ok": False}),
+            patch("app.health.health_checker.aggregate_status", return_value="warning"),
+            patch("app.reconciler.reconcile_loop._persist_status") as mock_persist,
+            patch.object(loop_mod, "reconcile_one") as mock_reconcile,
+        ):
+            count = loop_mod.health_check_all(db_session, socket_path=None)
+
+        assert count == 1
+        assert mock_persist.call_args.kwargs["phase"] == "warning"
+        assert mock_persist.call_args.kwargs["event"] is None
+        mock_reconcile.assert_called_once_with(db_session, svc.id, socket_path=None)
+
     def test_only_sweeps_enabled_services(self, db_session):
         _create_service(db_session, name="On", enabled=True)
         _create_service(db_session, name="Off", enabled=False)

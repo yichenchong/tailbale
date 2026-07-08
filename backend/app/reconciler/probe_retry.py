@@ -109,7 +109,6 @@ def _probe_retry_loop_guarded(service_id: str, socket_path: str | None) -> None:
 
 def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
     """Worker that runs in a background thread."""
-    now = lambda: datetime.now(UTC)  # noqa: E731
 
     for attempt in range(MAX_RETRIES):
         delay = _compute_delay(attempt)
@@ -182,7 +181,7 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                     )
                     continue
 
-                status.last_probe_at = now()
+                status.last_probe_at = datetime.now(UTC)
 
                 # Persist the new aggregate phase whenever it changes. A probe
                 # retry runs a FULL health check, so the phase can move either
@@ -275,7 +274,12 @@ def _update_retry_state(service_id: str, attempt: int, delay: int) -> bool:
                 commit_with_lock(db)
                 return True
         except Exception:
-            logger.info("Failed to update retry state for %s", service_id, exc_info=True)
+            # WARNING, not INFO: this is the same unexpected-failure class (DB /
+            # lock errors) the main loop deliberately logs at WARNING. At INFO it
+            # vanishes under a typical WARNING+ production filter, hiding a
+            # persistently failing retry-state write (the UI never sees the next
+            # retry time) even though the loop keeps going.
+            logger.warning("Failed to update retry state for %s", service_id, exc_info=True)
             return True
 
 
@@ -295,4 +299,8 @@ def _clear_retry_state(service_id: str) -> None:
                     # registry stays bounded by live + in-flight ids.
                     forget_reconcile_lock(service_id)
         except Exception:
-            logger.info("Failed to clear retry state for %s", service_id, exc_info=True)
+            # WARNING, not INFO (see the main loop's matching rationale): a
+            # swallowed clear leaves the probe-retry fields set forever, so the UI
+            # shows a pending retry that will never come — invisible under a
+            # WARNING+ production filter if logged at INFO.
+            logger.warning("Failed to clear retry state for %s", service_id, exc_info=True)
