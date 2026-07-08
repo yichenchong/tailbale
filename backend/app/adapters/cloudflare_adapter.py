@@ -135,6 +135,40 @@ def _check_response(resp: httpx2.Response, action: str) -> dict:
         raise CloudflareAPIError(action, resp.text)
     return data
 
+def _request(
+    method: str,
+    path: str,
+    *,
+    token: str,
+    timeout: float,
+    action: str,
+    json: dict[str, Any] | None = None,
+    params: dict[str, Any] | None = None,
+) -> dict:
+    """Issue a single Cloudflare API request and return the checked response body."""
+    kwargs: dict[str, Any] = {
+        "headers": _headers(token),
+        "timeout": timeout,
+    }
+    if json is not None:
+        kwargs["json"] = json
+    if params is not None:
+        kwargs["params"] = params
+
+    url = f"{CF_API_BASE}{path}"
+    match method:
+        case "GET":
+            resp = httpx2.get(url, **kwargs)
+        case "POST":
+            resp = httpx2.post(url, **kwargs)
+        case "PATCH":
+            resp = httpx2.patch(url, **kwargs)
+        case "DELETE":
+            resp = httpx2.delete(url, **kwargs)
+        case _:
+            raise ValueError(f"Unsupported Cloudflare request method: {method}")
+    return _check_response(resp, action)
+
 
 def ownership_comment(service_id: str) -> str:
     """Ownership marker stamped into the Cloudflare record ``comment`` field for the
@@ -165,13 +199,14 @@ def list_a_records(
     the bounded-stall cap by issuing N requests under the lifecycle lock).
     """
     params = {"type": record_type, "name": hostname, "per_page": CF_FIND_PER_PAGE}
-    resp = httpx2.get(
-        f"{CF_API_BASE}/zones/{zone_id}/dns_records",
-        headers=_headers(token),
+    data = _request(
+        "GET",
+        f"/zones/{zone_id}/dns_records",
+        token=token,
         params=params,
         timeout=timeout,
+        action="find_record",
     )
-    data = _check_response(resp, "find_record")
     results = data.get("result") or []
     if not isinstance(results, list):
         results = []
@@ -244,13 +279,14 @@ def create_a_record(
     }
     if comment is not None:
         body["comment"] = comment
-    resp = httpx2.post(
-        f"{CF_API_BASE}/zones/{zone_id}/dns_records",
-        headers=_headers(token),
+    data = _request(
+        "POST",
+        f"/zones/{zone_id}/dns_records",
+        token=token,
         json=body,
         timeout=timeout,
+        action="create_a_record",
     )
-    data = _check_response(resp, "create_a_record")
     # Coerce a present-but-null ``result`` to {}: Cloudflare normally returns the
     # created record, but ``data.get("result", {})`` only falls back when the key
     # is ABSENT — a literal ``"result": null`` would yield None and make the
@@ -279,13 +315,14 @@ def update_a_record(
     }
     if comment is not None:
         body["comment"] = comment
-    resp = httpx2.patch(
-        f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record_id}",
-        headers=_headers(token),
+    data = _request(
+        "PATCH",
+        f"/zones/{zone_id}/dns_records/{record_id}",
+        token=token,
         json=body,
         timeout=timeout,
+        action="update_a_record",
     )
-    data = _check_response(resp, "update_a_record")
     result = data.get("result") or {}
     logger.info("Updated A record %s to %s", record_id, ip)
     return result
@@ -295,10 +332,11 @@ def delete_a_record(
     token: str, zone_id: str, record_id: str, timeout: float = CF_DEFAULT_TIMEOUT
 ) -> None:
     """Delete a DNS record by ID."""
-    resp = httpx2.delete(
-        f"{CF_API_BASE}/zones/{zone_id}/dns_records/{record_id}",
-        headers=_headers(token),
+    _request(
+        "DELETE",
+        f"/zones/{zone_id}/dns_records/{record_id}",
+        token=token,
         timeout=timeout,
+        action="delete_a_record",
     )
-    _check_response(resp, "delete_a_record")
     logger.info("Deleted DNS record %s", record_id)

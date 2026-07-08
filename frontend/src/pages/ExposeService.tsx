@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef, type FormEvent } from "react"
+import { useCallback, useState, useEffect, useMemo, useRef, type FormEvent } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
 import { api, type AllSettings, type ContainerPort, type AppProfile } from "@/lib/api"
 import { Loader2, ArrowLeft, CheckCircle, Info } from "lucide-react"
@@ -12,6 +12,8 @@ import {
   UPSTREAM_PORT_MESSAGE,
 } from "@/lib/validation"
 import { errorMessage } from "@/lib/utils"
+import { useResource } from "@/lib/useResource"
+import { useLatestRequest } from "@/lib/useLatestRequest"
 
 function parsePortsParam(portsJson: string): ContainerPort[] {
   try {
@@ -35,8 +37,8 @@ export default function ExposeService() {
   // button/label UI.
   const submittingRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
-  const [settings, setSettings] = useState<AllSettings | null>(null)
-  const [settingsError, setSettingsError] = useState<string | null>(null)
+  const settingsFetcher = useCallback(() => api.settings.all(), [])
+  const { data: settings, error: settingsError } = useResource<AllSettings>(settingsFetcher)
 
   // App profile state
   const [detectedProfile, setDetectedProfile] = useState<string | null>(null)
@@ -63,24 +65,8 @@ export default function ExposeService() {
   const [customSnippet, setCustomSnippet] = useState("")
   const [enabled, setEnabled] = useState(true)
   const [appProfile, setAppProfile] = useState<string | null>(null)
+  const profileRequest = useLatestRequest()
 
-  useEffect(() => {
-    let cancelled = false
-    api.settings
-      .all()
-      .then((data) => {
-        if (cancelled) return
-        setSettings(data)
-        setSettingsError(null)
-      })
-      .catch((e) => {
-        if (cancelled) return
-        setSettingsError(errorMessage(e))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [])
 
   useEffect(() => {
     setName(containerName)
@@ -94,7 +80,7 @@ export default function ExposeService() {
   }, [containerId, containerName, containerImage, availablePorts])
 
   useEffect(() => {
-    let cancelled = false
+    const token = profileRequest.next()
     setDetectedProfile(null)
     setProfileData(null)
     setAppProfile(null)
@@ -104,7 +90,7 @@ export default function ExposeService() {
       api.profiles
         .detect(containerImage)
         .then((res) => {
-          if (cancelled) return
+          if (!profileRequest.isCurrent(token)) return
           if (res.detected_profile && res.profile) {
             setDetectedProfile(res.detected_profile)
             setProfileData(res.profile)
@@ -124,9 +110,9 @@ export default function ExposeService() {
         .catch(() => {})
     }
     return () => {
-      cancelled = true
+      profileRequest.invalidate()
     }
-  }, [containerId, containerImage, availablePorts])
+  }, [containerId, containerImage, availablePorts, profileRequest])
 
   const baseDomain = settings?.general.base_domain || "example.com"
   const normalizedName = name.trim()

@@ -15,6 +15,55 @@ def _cf_response(success=True, result=None, errors=None):
     }
     return mock
 
+class TestRequestHelper:
+    @patch("app.adapters.cloudflare_adapter.httpx2.post")
+    def test_composes_post_request_and_checks_action(self, mock_post):
+        from app.adapters import cloudflare_adapter as cf
+
+        response = _cf_response(result={"id": "r1"})
+        mock_post.return_value = response
+
+        with patch(
+            "app.adapters.cloudflare_adapter._check_response", return_value={"ok": True}
+        ) as mock_check:
+            result = cf._request(
+                "POST",
+                "/zones/z1/dns_records",
+                token="cf-token",
+                json={"name": "app.example.com"},
+                timeout=12.5,
+                action="create_a_record",
+            )
+
+        assert result == {"ok": True}
+        mock_post.assert_called_once_with(
+            f"{cf.CF_API_BASE}/zones/z1/dns_records",
+            headers=cf._headers("cf-token"),
+            json={"name": "app.example.com"},
+            timeout=12.5,
+        )
+        mock_check.assert_called_once_with(response, "create_a_record")
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.delete")
+    def test_omits_absent_optional_kwargs(self, mock_delete):
+        from app.adapters import cloudflare_adapter as cf
+
+        response = _cf_response(result={"id": "r1"})
+        mock_delete.return_value = response
+
+        with patch("app.adapters.cloudflare_adapter._check_response", return_value={}):
+            cf._request(
+                "DELETE",
+                "/zones/z1/dns_records/r1",
+                token="cf-token",
+                timeout=10.0,
+                action="delete_a_record",
+            )
+
+        call_kwargs = mock_delete.call_args.kwargs
+        assert "json" not in call_kwargs
+        assert "params" not in call_kwargs
+
 
 class TestSharedErrorHandling:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")

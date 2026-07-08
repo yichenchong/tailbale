@@ -2,6 +2,7 @@ import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api } from "@/lib/api"
 import { useStaticFavicon } from "@/lib/useFavicon"
+import { errorMessage } from "@/lib/utils"
 import { Loader2, LogIn } from "lucide-react"
 
 export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
@@ -32,7 +33,7 @@ export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
       onLogin?.()
       navigate("/")
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed")
+      setError(errorMessage(err, "Login failed"))
     } finally {
       submittingRef.current = false
       setLoading(false)

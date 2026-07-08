@@ -43,6 +43,15 @@ class TestReloadEndpoint:
         assert resp.status_code == 404
 
     @patch("app.edge.caddy_admin.reload_caddy")
+    def test_reload_disabled_service_rejected(self, mock_reload, client):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+
+        resp = client.post(f"/api/services/{svc_id}/reload")
+
+        assert resp.status_code == 409
+        mock_reload.assert_not_called()
+
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_emits_event(self, mock_reload, client, db_session):
         from app.models.event import Event
 
@@ -160,6 +169,17 @@ class TestEdgeLogsEndpoint:
         assert resp.status_code == 200
         assert resp.json()["logs"] == ""
 
+    @patch("app.edge.container_manager.get_edge_logs")
+    def test_logs_disabled_service_allowed(self, mock_logs, client):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+        mock_logs.return_value = "disabled service logs"
+
+        resp = client.get(f"/api/services/{svc_id}/logs/edge")
+
+        assert resp.status_code == 200
+        assert resp.json()["logs"] == "disabled service logs"
+        mock_logs.assert_called_once()
+
     def test_logs_nonexistent_service(self, client):
         resp = client.get("/api/services/svc_nonexistent/logs/edge")
         assert resp.status_code == 404
@@ -190,3 +210,16 @@ class TestEdgeLogsEndpoint:
         resp = client.get(f"/api/services/{svc_id}/logs/edge")
         assert resp.status_code == 503
         assert resp.json()["detail"] == "Docker is unavailable"
+
+
+class TestEdgeVersionEndpoint:
+    @patch("app.edge.container_manager.get_edge_version")
+    def test_edge_version_disabled_service_allowed(self, mock_version, client):
+        svc_id = _create_service(client, enabled=False).json()["id"]
+        mock_version.return_value = "edge-test-version"
+
+        resp = client.get(f"/api/services/{svc_id}/edge-version")
+
+        assert resp.status_code == 200
+        assert resp.json()["edge_version"] == "edge-test-version"
+        assert resp.json()["up_to_date"] is False

@@ -278,7 +278,7 @@ class TestHealthCheckFullDockerSocket:
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         sentinel = "tcp://canonical-daemon:2375"
         with (
-            patch("app.routers.services.resolve_socket", return_value=sentinel),
+            patch("app.services.edge_ops.resolve_socket", return_value=sentinel),
             patch(
                 "app.health.health_checker.run_health_checks", return_value={"ok": True}
             ) as mock_rhc,
@@ -307,7 +307,7 @@ class TestHealthCheckFullDockerSocket:
         secret = "GET https://api.cloudflare.com/client/v4/zones/zone-abc123/dns_records failed"
         mock_find.side_effect = RuntimeError(secret)
 
-        with caplog.at_level(logging.ERROR, logger="app.routers.services"):
+        with caplog.at_level(logging.ERROR, logger="app.health.health_checker"):
             resp = client.post(f"/api/services/{svc_id}/health-check-full")
 
         assert resp.status_code == 200

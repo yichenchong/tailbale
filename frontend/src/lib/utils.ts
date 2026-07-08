@@ -7,11 +7,10 @@ export function cn(...inputs: ClassValue[]) {
 
 /**
  * Coerce a thrown value (`unknown` in a catch clause) to a display string.
- * Centralizes the `e instanceof Error ? e.message : String(e)` idiom that was
- * copy-pasted across ~18 catch handlers (pages, forms, hooks). One home means a
- * future change to error presentation (e.g. special-casing a typed API error)
- * happens in a single place.
+ * With a fallback, non-Error values use the fallback; without one, the legacy
+ * single-argument behavior (`Error.message` else `String(e)`) is preserved.
  */
-export function errorMessage(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+export function errorMessage(e: unknown, fallback = ""): string {
+  if (e instanceof Error) return e.message
+  return fallback || String(e)
 }

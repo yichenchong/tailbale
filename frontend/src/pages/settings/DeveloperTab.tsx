@@ -1,13 +1,21 @@
-import { useEffect, useId, useRef, useState } from "react"
+import { useCallback, useId, useState } from "react"
 import { Loader2, XCircle } from "lucide-react"
 import { api, type MainLogsResponse } from "@/lib/api"
+import { useResource } from "@/lib/useResource"
+import { errorMessage } from "@/lib/utils"
 
 export function DeveloperTab() {
   const [workingAction, setWorkingAction] = useState<"reset-setup-complete" | "reset-all" | null>(null)
-  const [loadingLogs, setLoadingLogs] = useState(false)
-  const [error, setError] = useState("")
+  const [actionError, setActionError] = useState("")
   const [logs, setLogs] = useState<MainLogsResponse | null>(null)
-  const logsSeqRef = useRef(0)
+  const logsFetcher = useCallback(() => api.settings.mainLogs(), [])
+  const { loading: loadingLogs, error: logsError, refresh: refreshLogs, setError: setLogsError } = useResource(logsFetcher, {
+    immediate: false,
+    mapError: (e) => errorMessage(e, "Failed to load tailBale logs"),
+    onData: (data) => {
+      setLogs(data)
+    },
+  })
 
   const working = workingAction !== null
   const resetSetupDescId = useId()
@@ -22,38 +30,25 @@ export function DeveloperTab() {
     if (!window.confirm(warning)) return
 
     setWorkingAction(kind)
-    setError("")
+    setActionError("")
+    setLogsError(null)
     try {
       await api.settings.developerReset(kind)
       window.location.assign("/setup")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Developer reset failed")
+      setActionError(errorMessage(e, "Developer reset failed"))
       setWorkingAction(null)
     }
   }
 
-  const loadLogs = async () => {
-    const seq = ++logsSeqRef.current
-    setLoadingLogs(true)
-    setError("")
+  const loadLogs = useCallback(async () => {
     setLogs(null)
-    try {
-      const data = await api.settings.mainLogs()
-      if (seq !== logsSeqRef.current) return
-      setLogs(data)
-    } catch (e) {
-      if (seq !== logsSeqRef.current) return
-      setError(e instanceof Error ? e.message : "Failed to load tailBale logs")
-    } finally {
-      if (seq === logsSeqRef.current) setLoadingLogs(false)
-    }
-  }
+    setActionError("")
+    setLogsError(null)
+    await refreshLogs()
+  }, [refreshLogs, setLogsError])
 
-  useEffect(() => {
-    return () => {
-      logsSeqRef.current += 1
-    }
-  }, [])
+  const error = actionError || logsError || ""
 
   return (
     <div className="space-y-4">

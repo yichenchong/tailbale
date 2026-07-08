@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type EdgeVersionResponse } from "@/lib/api"
+import { useResource } from "@/lib/useResource"
 import { useTimezone, formatDate } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
 import { phaseStyle } from "@/lib/statusStyles"
@@ -29,8 +30,14 @@ export default function ServiceDetail() {
   const [actionMsg, setActionMsg] = useState<string | null>(null)
   const [edgeVersion, setEdgeVersion] = useState<EdgeVersionResponse | null>(null)
   const [updatingEdge, setUpdatingEdge] = useState(false)
-  const edgeVersionSeq = useRef(0)
   const actionMsgTimerRef = useRef<number | null>(null)
+  const edgeVersionFetcher = useCallback(() => api.services.edgeVersion(id ?? ""), [id])
+  const { refresh: refreshEdgeVersion } = useResource(edgeVersionFetcher, {
+    immediate: false,
+    onData: (v) => {
+      setEdgeVersion(v)
+    },
+  })
 
   const clearActionMsgTimer = useCallback(() => {
     if (actionMsgTimerRef.current !== null) {
@@ -53,13 +60,9 @@ export default function ServiceDetail() {
   const clearActionMsg = useCallback(() => setActionMsg(null), [])
 
   const loadEdgeVersion = useCallback(async () => {
-    const seq = ++edgeVersionSeq.current
     setEdgeVersion(null)
-    try {
-      const v = await api.services.edgeVersion(id ?? "")
-      if (seq === edgeVersionSeq.current) setEdgeVersion(v)
-    } catch { /* ignore */ }
-  }, [id])
+    await refreshEdgeVersion()
+  }, [refreshEdgeVersion])
 
   const handleUpdateEdge = useCallback(async () => {
     setUpdatingEdge(true)
@@ -83,9 +86,6 @@ export default function ServiceDetail() {
 
   useEffect(() => {
     void loadEdgeVersion()
-    return () => {
-      edgeVersionSeq.current += 1
-    }
   }, [loadEdgeVersion])
 
   useEffect(() => () => clearActionMsgTimer(), [clearActionMsgTimer])

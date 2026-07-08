@@ -71,7 +71,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         setStep(firstIncompleteStep(progress))
       })
       .catch((e) => {
-        setError(e instanceof Error ? e.message : "Failed to load setup progress")
+        setError(errorMessage(e, "Failed to load setup progress"))
       })
       .finally(() => setInitializing(false))
   }, [])

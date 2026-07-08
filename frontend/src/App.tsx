@@ -13,6 +13,7 @@ import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
 import { api } from "@/lib/api"
 import { useDynamicFavicon } from "@/lib/useFavicon"
+import { errorMessage } from "@/lib/utils"
 
 /** Wrapper that enables favicon polling only for authenticated routes. */
 function AuthenticatedLayout() {
@@ -37,7 +38,7 @@ function App() {
             const progress = await api.auth.setupProgress()
             setSetupUserExists(progress.user_exists)
           } catch (err) {
-            setBootError(err instanceof Error ? err.message : "Unable to load setup progress")
+            setBootError(errorMessage(err, "Unable to load setup progress"))
             setSetupUserExists(true)
           }
         } else {
@@ -45,7 +46,7 @@ function App() {
         }
       })
       .catch((err) => {
-        setBootError(err instanceof Error ? err.message : "Unable to load app status")
+        setBootError(errorMessage(err, "Unable to load app status"))
         setSetupComplete(false)
         setAuthenticated(false)
         setSetupUserExists(false)

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 
 describe("cn utility", () => {
   it("merges class names", () => {
@@ -22,5 +22,23 @@ describe("cn utility", () => {
 
   it("handles empty input", () => {
     expect(cn()).toBe("")
+  })
+})
+
+describe("errorMessage utility", () => {
+  it("preserves Error.message for single-argument callers", () => {
+    expect(errorMessage(new Error("Boom"))).toBe("Boom")
+  })
+
+  it("preserves non-Error stringification without a fallback", () => {
+    expect(errorMessage(404)).toBe("404")
+  })
+
+  it("uses a fallback for non-Error thrown values when supplied", () => {
+    expect(errorMessage({ detail: "hidden" }, "Fallback message")).toBe("Fallback message")
+  })
+
+  it("still prefers Error.message over a fallback", () => {
+    expect(errorMessage(new Error("Specific"), "Generic")).toBe("Specific")
   })
 })

@@ -43,7 +43,7 @@ def iso(dt: datetime | None) -> str | None:
     """Serialize *dt* to ISO-8601, or ``None`` when *dt* is ``None``.
 
     The single home for the ``dt.isoformat() if dt else None`` wire-format idiom
-    duplicated across every response shaper (``services/crud.to_response``,
+    duplicated across every response shaper (``services/mapping.to_response``,
     ``routers/{events,jobs,dashboard,services}``, ``services/cert_ops``). Storage
     is naive UTC (``NaiveUTCDateTime``) and the wire format is deliberately the
     naive ``.isoformat()`` — the frontend's ``parseBackendDate`` relies on the

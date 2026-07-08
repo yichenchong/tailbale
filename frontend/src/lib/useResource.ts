@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
+import { errorMessage } from "@/lib/utils"
 
 export interface UseResourceOptions<T> {
   /**
@@ -46,8 +47,7 @@ export interface UseResourceResult<T> {
   setError: (value: string | null) => void
 }
 
-const defaultMapError = (err: unknown): string =>
-  err instanceof Error ? err.message : String(err)
+const defaultMapError = (err: unknown): string => errorMessage(err)
 
 /**
  * Shared fetch / loading / error / race-guard / poll machine.

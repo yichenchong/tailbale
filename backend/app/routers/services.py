@@ -8,16 +8,13 @@ and map results / failures to HTTP responses. The error-mapping shells
 (``edge_action`` / ``_run_edge_job``) and their ``app.routers.services`` logger
 stay here so the no-leak tests keep asserting against this module.
 
-Edge / reconcile / health / secret dependencies are imported at module top as
-*modules* and called module-qualified (``container_manager.restart_edge(...)``,
-``secrets.read_secret(...)``). The test suite patches those symbols at their
-source module, and module-qualified access re-resolves the attribute on the
-module object at call time, so a patch is honored without hiding the dependency
-behind a per-call ``from X import name``.
+Only upstream Docker validation remains in this router because
+``_validate_upstream`` is a deliberate test patch point. Edge / reconcile /
+health / secret orchestration lives behind the service facade; tests patch those
+dependencies at their source modules.
 """
 
 import asyncio
-import contextlib
 import functools
 import logging
 from typing import NoReturn
@@ -27,16 +24,10 @@ import requests
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app import secrets
 from app import services as service_layer
-from app.adapters import cloudflare_adapter
 from app.auth import get_current_user
-from app.database import commit_with_lock, db_write_section, get_db
-from app.edge import caddy_admin, container_manager
+from app.database import get_db
 from app.edge.docker_client import docker_client, resolve_socket
-from app.events.event_emitter import emit_event
-from app.health import health_checker
-from app.locks import service_reconcile_lock
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
@@ -55,8 +46,7 @@ from app.services.errors import (
     ServiceError,
     ServiceNotFound,
 )
-from app.settings_store import get_runtime_paths, get_setting
-from app.version import __version__
+from app.settings_store import get_setting
 
 logger = logging.getLogger(__name__)
 
@@ -325,28 +315,14 @@ def _get_service_or_404(service_id: str, db: Session) -> Service:
 @edge_action(failure_detail="Failed to reload Caddy config")
 def reload_service(service_id: str, db: Session = Depends(get_db)):
     """Reload Caddy config inside edge container."""
-
-    with service_reconcile_lock(service_id):
-        svc = service_layer.get_enabled_service_for_edge_action(service_id, db)
-        output = caddy_admin.reload_caddy(svc.id, svc.edge_container_name, resolve_socket(db))
-        with db_write_section(db):
-            emit_event(db, svc.id, "caddy_reloaded", f"Caddy reloaded for '{svc.name}'")
-            commit_with_lock(db)
-        return {"success": True, "message": "Caddy config reloaded", "output": output}
+    return service_layer.reload_caddy_action(db, service_id)
 
 
 @router.post("/{service_id}/restart-edge")
 @edge_action(failure_detail="Failed to restart edge container")
 def restart_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
     """Restart edge container."""
-
-    with service_reconcile_lock(service_id):
-        svc = service_layer.get_enabled_service_for_edge_action(service_id, db)
-        container_manager.restart_edge(svc.id, svc.edge_container_name, resolve_socket(db))
-        with db_write_section(db):
-            emit_event(db, svc.id, "edge_restarted", f"Edge container restarted for '{svc.name}'")
-            commit_with_lock(db)
-    return {"success": True, "message": "Edge container restarted"}
+    return service_layer.restart_edge_action(db, service_id)
 
 
 @router.post("/{service_id}/recreate-edge")
@@ -434,11 +410,7 @@ def get_edge_logs(
 ):
     """Get edge container logs."""
 
-    svc = _get_service_or_404(service_id, db)
-    logs = container_manager.get_edge_logs(
-        svc.id, svc.edge_container_name, tail=tail, socket_path=resolve_socket(db)
-    )
-    return {"logs": logs}
+    return service_layer.get_edge_logs(db, service_id, tail)
 
 
 @router.post("/{service_id}/health-check-full")
@@ -448,74 +420,14 @@ def full_health_check(service_id: str, db: Session = Depends(get_db)):
     This is manual-only (not part of the reconcile loop) to avoid API rate limits.
     """
 
-    svc = _get_service_or_404(service_id, db)
-    runtime = get_runtime_paths(db)
-
-    # Run standard health checks. DNS uses DB state here; the single live
-    # Cloudflare lookup below overrides it so we don't query Cloudflare twice.
-    # resolve_socket mirrors the reconciler/probe socket resolution (configured
-    # path or None -> from_env, honoring DOCKER_HOST), keeping full-health-check
-    # pointed at the same daemon as the rest of the app.
-    checks = health_checker.run_health_checks(
-        db, svc,
-        runtime["generated_dir"], runtime["certs_dir"],
-        resolve_socket(db),
-    )
-
-    # Extended: live Cloudflare DNS verification
-    extended: dict[str, object] = {}
-    cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
-    zone_id = get_setting(db, "cf_zone_id")
-    status = db.get(ServiceStatus, svc.id)
-    current_ip = status.tailscale_ip if status else None
-
-    if cf_token and zone_id:
-        try:
-            live_record = cloudflare_adapter.find_record(cf_token, zone_id, svc.hostname, "A")
-            extended["cf_record_exists"] = live_record is not None
-            if live_record:
-                extended["cf_record_ip"] = live_record.get("content")
-                extended["cf_ip_matches_tailscale"] = bool(
-                    current_ip and live_record.get("content") == current_ip
-                )
-            else:
-                extended["cf_record_ip"] = None
-                extended["cf_ip_matches_tailscale"] = False
-            # Reflect the live DNS state in the standard checks using the single
-            # lookup above (this is the manual endpoint's live-verification path).
-            checks["dns_record_present"] = live_record is not None
-            checks["dns_matches_ip"] = bool(
-                live_record and current_ip and live_record.get("content") == current_ip
-            )
-        except Exception as e:
-            logger.exception(
-                "Live Cloudflare DNS verification failed for service %s", service_id
-            )
-            extended["cf_error"] = f"Cloudflare verification failed ({type(e).__name__})"
-    else:
-        extended["cf_error"] = "Cloudflare token or zone ID not configured"
-
-    return {
-        "checks": checks,
-        "extended": extended,
-        "tailscale_ip": current_ip,
-    }
+    return service_layer.full_health_check(db, service_id)
 
 
 @router.get("/{service_id}/edge-version")
 def get_edge_version_endpoint(service_id: str, db: Session = Depends(get_db)):
     """Check the version of a service's edge container vs the orchestrator version."""
 
-    svc = _get_service_or_404(service_id, db)
-    edge_version = None
-    with contextlib.suppress(Exception):
-        edge_version = container_manager.get_edge_version(svc.id, svc.edge_container_name, resolve_socket(db))
-
-    return {
-        "orchestrator_version": __version__,
-        "edge_version": edge_version,
-        "up_to_date": edge_version == __version__,
-    }
+    return service_layer.get_edge_version(db, service_id)
 
 
 @router.post("/{service_id}/update-edge")

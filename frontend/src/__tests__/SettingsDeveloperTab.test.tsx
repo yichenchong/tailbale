@@ -205,6 +205,37 @@ describe("SettingsDeveloperTab", () => {
     })
     expect(screen.queryByText(/Container:/)).not.toBeInTheDocument()
   })
+
+  it("clears previous main logs when a later refresh fails", async () => {
+    let calls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/settings/developer/main-logs")) {
+        calls += 1
+        if (calls === 1) {
+          return Promise.resolve({
+            ok: true,
+            json: () => Promise.resolve({ container: "tailbale", logs: "old logs\n" }),
+          })
+        }
+        return Promise.resolve({
+          ok: false,
+          status: 502,
+          json: () => Promise.resolve({ detail: "new log failure" }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    render(<DeveloperTab />)
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh logs" }))
+    await waitFor(() => expect(screen.getByText(/old logs/)).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh logs" }))
+    expect(screen.queryByText(/old logs/)).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByText("new log failure")).toBeInTheDocument())
+    expect(screen.queryByText(/Container:/)).not.toBeInTheDocument()
+  })
 })
 
 describe("SettingsDeveloperTab a11y contract", () => {

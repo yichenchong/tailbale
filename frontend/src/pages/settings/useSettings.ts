@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
+import { useLatestRequest } from "@/lib/useLatestRequest"
 import { setConfiguredTimezone } from "@/lib/useTimezone"
 import { errorMessage } from "@/lib/utils"
 import {
@@ -32,10 +33,10 @@ export interface UseSettingsResult {
 }
 
 /**
- * Settings-page data machine: load (with a stale-response guard), save (with a
- * last-writer-wins guard + timezone-cache sync), and connection-test (with its
- * own sequence guard). Extracted verbatim from the former SettingsPage
- * controller so the page becomes a thin tab router.
+ * Settings-page data machine: load (with a shared stale-response guard), save
+ * (with a last-writer-wins invalidation + timezone-cache sync), and
+ * connection-test (with its own shared request guard). Extracted from the
+ * former SettingsPage controller so the page becomes a thin tab router.
  */
 export function useSettings(): UseSettingsResult {
   const [settings, setSettings] = useState<AllSettings | null>(null)
@@ -45,11 +46,11 @@ export function useSettings(): UseSettingsResult {
   const [testingService, setTestingService] = useState<string | null>(null)
   const [version, setVersion] = useState<string | null>(null)
   const [error, setError] = useState("")
-  const loadSeqRef = useRef(0)
-  const testSeqRef = useRef(0)
+  const loadRequest = useLatestRequest()
+  const testRequest = useLatestRequest()
 
   const load = useCallback(async () => {
-    const seq = ++loadSeqRef.current
+    const token = loadRequest.next()
     setLoading(true)
     setError("")
     try {
@@ -57,32 +58,29 @@ export function useSettings(): UseSettingsResult {
         api.settings.all(),
         api.meta.version().catch(() => null),
       ])
-      if (seq !== loadSeqRef.current) return
+      if (!loadRequest.isCurrent(token)) return
       setSettings(data)
       if (ver) setVersion(ver.version)
     } catch (e) {
-      if (seq !== loadSeqRef.current) return
-      setError(e instanceof Error ? e.message : "Failed to load settings")
+      if (!loadRequest.isCurrent(token)) return
+      setError(errorMessage(e, "Failed to load settings"))
     } finally {
-      if (seq === loadSeqRef.current) setLoading(false)
+      if (loadRequest.isCurrent(token)) setLoading(false)
     }
-  }, [])
+  }, [loadRequest])
 
   const applySettingsUpdate = useCallback((data: AllSettings) => {
-    // A save is the authoritative latest write. Bump the load sequence so any
-    // load still in flight (mount/poll/refresh) is discarded instead of
-    // clobbering this fresh state. Keep the shared timezone cache in sync so
-    // timestamps across the app reflect a changed timezone without a reload.
-    loadSeqRef.current += 1
+    // A save is the authoritative latest write. Invalidate any load still in
+    // flight (mount/poll/refresh) so it is discarded instead of clobbering this
+    // fresh state. Keep the shared timezone cache in sync so timestamps across
+    // the app reflect a changed timezone without a reload.
+    loadRequest.invalidate()
     setSettings(data)
     if (data.general?.timezone) setConfiguredTimezone(data.general.timezone)
-  }, [])
+  }, [loadRequest])
 
   useEffect(() => {
     void load()
-    return () => {
-      loadSeqRef.current += 1
-    }
   }, [load])
 
   const save = useCallback(
@@ -94,7 +92,7 @@ export function useSettings(): UseSettingsResult {
         const data = await api.settings.update(section, body)
         applySettingsUpdate(data)
       } catch (e) {
-        setError(e instanceof Error ? e.message : "Failed to save settings")
+        setError(errorMessage(e, "Failed to save settings"))
         throw e
       } finally {
         setSavingSection(null)
@@ -104,21 +102,21 @@ export function useSettings(): UseSettingsResult {
   )
 
   const runTest = useCallback(async (service: SettingsTestService) => {
-    const seq = ++testSeqRef.current
+    const token = testRequest.next()
     setTestingService(service)
     setTestResult(null)
     setError("")
     try {
       const result = await api.settings.test(service)
-      if (seq !== testSeqRef.current) return
+      if (!testRequest.isCurrent(token)) return
       setTestResult({ service, result })
     } catch (e) {
-      if (seq !== testSeqRef.current) return
+      if (!testRequest.isCurrent(token)) return
       setTestResult({ service, result: { success: false, message: errorMessage(e) } })
     } finally {
-      if (seq === testSeqRef.current) setTestingService(null)
+      if (testRequest.isCurrent(token)) setTestingService(null)
     }
-  }, [])
+  }, [testRequest])
 
   return {
     settings,

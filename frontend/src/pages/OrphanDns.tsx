@@ -2,7 +2,7 @@ import { useCallback, useState } from "react"
 import { api, type OrphanJob, type JobsResponse } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 import { jobStatusStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { usePagination } from "@/lib/usePagination"
@@ -39,7 +39,7 @@ export default function OrphanDns() {
   )
   const { data, loading, error, refresh, setError } = useResource(fetcher, {
     onData,
-    mapError: (e) => (e instanceof Error ? e.message : "Failed to load orphan records"),
+    mapError: (e) => (errorMessage(e, "Failed to load orphan records")),
   })
   const jobs = data?.jobs ?? []
 
@@ -52,7 +52,7 @@ export default function OrphanDns() {
       setSuccessMessage(result.message)
       await refresh({ background: true })
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Retry failed")
+      setError(errorMessage(e, "Retry failed"))
     } finally {
       setActionLoading((prev) => {
         const next = { ...prev }
@@ -75,7 +75,7 @@ export default function OrphanDns() {
       setSuccessMessage(`Orphan record for '${hostname}' dismissed`)
       await refresh({ background: true })
     } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : "Dismiss failed")
+      setError(errorMessage(e, "Dismiss failed"))
     } finally {
       setActionLoading((prev) => {
         const next = { ...prev }

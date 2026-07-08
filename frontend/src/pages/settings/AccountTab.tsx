@@ -2,6 +2,7 @@ import { useState } from "react"
 import { CheckCircle, XCircle } from "lucide-react"
 import { api } from "@/lib/api"
 import { Field } from "@/components/settings/Field"
+import { errorMessage } from "@/lib/utils"
 
 export function AccountTab() {
   const [currentPassword, setCurrentPassword] = useState("")
@@ -31,7 +32,7 @@ export function AccountTab() {
       setNewPassword("")
       setConfirmPassword("")
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to change password")
+      setError(errorMessage(e, "Failed to change password"))
     } finally {
       setSaving(false)
     }

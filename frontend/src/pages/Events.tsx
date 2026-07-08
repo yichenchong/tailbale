@@ -2,7 +2,7 @@ import { Fragment, useCallback, useEffect, useState } from "react"
 import { api, type EventItem, type EventsResponse } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { usePagination } from "@/lib/usePagination"
@@ -48,7 +48,7 @@ export default function Events() {
   )
   const { data, loading, error } = useResource(fetcher, {
     onData,
-    mapError: (e) => (e instanceof Error ? e.message : "Failed to load events"),
+    mapError: (e) => (errorMessage(e, "Failed to load events")),
   })
   const events = data?.events ?? []
 

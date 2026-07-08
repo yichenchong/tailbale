@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback } from "react"
 import { NavLink } from "react-router-dom"
 import {
   LayoutDashboard,
@@ -10,6 +10,7 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 import { api } from "@/lib/api"
+import { useResource } from "@/lib/useResource"
 
 const navItems = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
@@ -21,20 +22,9 @@ const navItems = [
 ]
 
 export function Sidebar() {
-  const [version, setVersion] = useState<string | null>(null)
-
-  useEffect(() => {
-    let active = true
-    api.meta
-      .version()
-      .then((r) => {
-        if (active) setVersion(r.version)
-      })
-      .catch(() => {})
-    return () => {
-      active = false
-    }
-  }, [])
+  const versionFetcher = useCallback(() => api.meta.version(), [])
+  const { data: versionData } = useResource(versionFetcher)
+  const version = versionData?.version ?? null
 
   return (
     <aside className="flex h-screen w-56 flex-col border-r border-zinc-200 bg-zinc-50">

@@ -1,11 +1,11 @@
-"""Service CRUD: create / update / disable / delete + response mapping + slugs.
+"""Service CRUD: create / update / disable / delete.
 
 Split out of the former ``service_ops`` god-module (AR1). Holds the service-row
 mutators — the service-lifecycle acquirers of the tier-1
 ``_SERVICE_LIFECYCLE_MUTEX`` (the service-less orphan-DNS cleanup retry in
 ``routers/jobs.py`` and the developer reset sweep in ``routers/settings.py`` also
-take it, always tier-1 first) — plus the slug derivation and ``to_response``
-shaping the router reuses.
+take it, always tier-1 first). Pure response mapping and service-name derivation
+live in :mod:`app.services.mapping`.
 
 Lock acquisition order is preserved verbatim (tier-1 lifecycle mutex FIRST, then
 the tier-2 per-service reconcile lock, then the tier-3 DB write lock via
@@ -20,7 +20,6 @@ Symbols the test suite patches at their *source* module (``app.edge.*``,
 import contextlib
 import hashlib
 import logging
-import re
 import shutil
 from pathlib import Path
 
@@ -44,103 +43,16 @@ from app.models.job import Job
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler import reconcile_loop
-from app.schemas.services import ServiceResponse, ServiceStatusResponse
+from app.schemas.services import ServiceResponse
 from app.services.errors import (
     HostnameChangeError,
     HostnameInUse,
     HostnameSuffixInvalid,
     ServiceNotFound,
 )
-from app.timeutil import iso
+from app.services.mapping import derive_edge_names, to_response, unique_slug
 
 logger = logging.getLogger(__name__)
-
-
-def _slugify(name: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-    return slug or "service"
-
-
-# Tailscale passes ts_hostname to `tailscale up --hostname=`, which is a single
-# DNS label limited to 63 chars (RFC 1035 §3.1). Longer values are silently
-# truncated/rejected, so the live MagicDNS hostname would diverge from the
-# persisted ts_hostname — risking collisions and cert-hostname confusion.
-# ts_hostname is f"edge-{slug}" (5-char prefix), so the slug must stay within
-# 63 - len("edge-") = 58 chars.
-_MAX_SLUG_LEN = 63 - len("edge-")  # 58
-# Cap the *base* slug at a round 50 chars — comfortably below _MAX_SLUG_LEN and
-# leaving 8 chars of headroom for the "-{n}" uniqueness suffix appended on
-# collisions, so even suffixed slugs stay within the 58-char budget.
-_MAX_BASE_SLUG_LEN = 50
-
-
-def _unique_slug(db: Session, name: str) -> str:
-    """Return a slug derived from *name* that doesn't collide with existing edge
-    names, capped so the derived ts_hostname stays within the DNS-label limit."""
-    base = _slugify(name)[:_MAX_BASE_SLUG_LEN].rstrip("-") or "service"
-    slug = base
-    suffix = 2
-    while (
-        db.query(Service)
-        .filter(
-            (Service.edge_container_name == f"edge_{slug}")
-            | (Service.network_name == f"edge_net_{slug}")
-            | (Service.ts_hostname == f"edge-{slug}")
-        )
-        .first()
-    ):
-        marker = f"-{suffix}"
-        # Trim the base further so a multi-digit suffix can't overflow the budget.
-        slug = f"{base[: _MAX_SLUG_LEN - len(marker)].rstrip('-')}{marker}"
-        suffix += 1
-    return slug
-
-
-def to_response(
-    svc: Service,
-    status: ServiceStatus | None,
-    cert: Certificate | None = None,
-) -> ServiceResponse:
-    """Shape a service (+ optional status/cert) into its API response model.
-
-    Public service-layer API (AR4): the router reuses this for list / get so the
-    N+1-batched shaping lives in one place.
-    """
-    status_resp = None
-    if status:
-        status_resp = ServiceStatusResponse(
-            phase=status.phase,
-            message=status.message,
-            tailscale_ip=status.tailscale_ip,
-            edge_container_id=status.edge_container_id,
-            last_reconciled_at=iso(status.last_reconciled_at),
-            health_checks=status.health_checks,
-            cert_expires_at=iso(cert.expires_at if cert else None),
-            probe_retry_at=iso(status.probe_retry_at),
-            probe_retry_attempt=status.probe_retry_attempt,
-            last_probe_at=iso(status.last_probe_at),
-        )
-    return ServiceResponse(
-        id=svc.id,
-        name=svc.name,
-        enabled=svc.enabled,
-        upstream_container_id=svc.upstream_container_id,
-        upstream_container_name=svc.upstream_container_name,
-        upstream_scheme=svc.upstream_scheme,
-        upstream_port=svc.upstream_port,
-        healthcheck_path=svc.healthcheck_path,
-        hostname=svc.hostname,
-        base_domain=svc.base_domain,
-        edge_container_name=svc.edge_container_name,
-        network_name=svc.network_name,
-        ts_hostname=svc.ts_hostname,
-        preserve_host_header=svc.preserve_host_header,
-        custom_caddy_snippet=svc.custom_caddy_snippet,
-        app_profile=svc.app_profile,
-        status=status_resp,
-        created_at=svc.created_at.isoformat(),
-        updated_at=svc.updated_at.isoformat(),
-    )
 
 
 def _mark_status_disabled(status: ServiceStatus, message: str) -> None:
@@ -184,7 +96,8 @@ def create_service(
         if existing:
             raise HostnameInUse(body.hostname)
 
-        slug = _unique_slug(db, body.name)
+        slug = unique_slug(db, body.name)
+        edge_container_name, network_name, ts_hostname = derive_edge_names(slug)
         svc = Service(
             name=body.name,
             enabled=body.enabled,
@@ -195,9 +108,9 @@ def create_service(
             healthcheck_path=body.healthcheck_path,
             hostname=body.hostname,
             base_domain=configured_domain,
-            edge_container_name=f"edge_{slug}",
-            network_name=f"edge_net_{slug}",
-            ts_hostname=f"edge-{slug}",
+            edge_container_name=edge_container_name,
+            network_name=network_name,
+            ts_hostname=ts_hostname,
             preserve_host_header=body.preserve_host_header,
             custom_caddy_snippet=body.custom_caddy_snippet,
             app_profile=body.app_profile,

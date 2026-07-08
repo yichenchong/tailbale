@@ -1,9 +1,9 @@
-"""Edge-container orchestration: recreate / update-edge + the enabled guard.
+"""Edge-container orchestration and service-layer edge/health actions.
 
 Split out of the former ``service_ops`` god-module (AR1). Holds the operations
-that rebuild a service's edge container, plus
-``get_enabled_service_for_edge_action`` (promoted from private in AR4) that the
-edge-action router endpoints reuse to fetch + guard a service before acting.
+that rebuild, reload, restart, query, and health-check a service's edge
+container, plus ``get_enabled_service_for_edge_action`` (promoted from private
+in AR4) that edge-action endpoints reuse to fetch + guard enabled-only actions.
 
 Docker daemon failures raised by ``container_manager`` / ``image_builder``
 propagate to the router, which maps them to 503 via the shared edge-action
@@ -19,9 +19,10 @@ from sqlalchemy.orm import Session
 
 from app import secrets, settings_store
 from app.database import commit_with_lock, db_write_section, session_scope
-from app.edge import container_manager, image_builder
+from app.edge import caddy_admin, container_manager, image_builder
 from app.edge.docker_client import resolve_socket
 from app.events.event_emitter import emit_event
+from app.health import health_checker
 from app.locks import service_reconcile_lock
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -45,6 +46,36 @@ def get_enabled_service_for_edge_action(service_id: str, db: Session) -> Service
     if not svc.enabled:
         raise ServiceDisabled()
     return svc
+
+
+def get_service_for_edge_query(service_id: str, db: Session) -> Service:
+    """Fetch *service_id* for edge read/query operations without requiring enabled."""
+    svc = db.get(Service, service_id)
+    if not svc:
+        raise ServiceNotFound()
+    return svc
+
+
+def reload_caddy_action(db: Session, service_id: str) -> dict:
+    """Reload Caddy config inside an enabled service's edge container."""
+    with service_reconcile_lock(service_id):
+        svc = get_enabled_service_for_edge_action(service_id, db)
+        output = caddy_admin.reload_caddy(svc.id, svc.edge_container_name, resolve_socket(db))
+        with db_write_section(db):
+            emit_event(db, svc.id, "caddy_reloaded", f"Caddy reloaded for '{svc.name}'")
+            commit_with_lock(db)
+        return {"success": True, "message": "Caddy config reloaded", "output": output}
+
+
+def restart_edge_action(db: Session, service_id: str) -> dict:
+    """Restart an enabled service's edge container."""
+    with service_reconcile_lock(service_id):
+        svc = get_enabled_service_for_edge_action(service_id, db)
+        container_manager.restart_edge(svc.id, svc.edge_container_name, resolve_socket(db))
+        with db_write_section(db):
+            emit_event(db, svc.id, "edge_restarted", f"Edge container restarted for '{svc.name}'")
+            commit_with_lock(db)
+    return {"success": True, "message": "Edge container restarted"}
 
 
 def recreate_edge(db: Session, service_id: str) -> dict:
@@ -127,3 +158,63 @@ def update_edge_job(service_id: str, socket: str | None) -> dict:
             "version": __version__,
             "container_id": container_id,
         }
+
+
+def get_edge_logs(db: Session, service_id: str, tail: int) -> dict:
+    """Return edge-container logs for an existing service, even when disabled."""
+    svc = get_service_for_edge_query(service_id, db)
+    logs = container_manager.get_edge_logs(
+        svc.id, svc.edge_container_name, tail=tail, socket_path=resolve_socket(db)
+    )
+    return {"logs": logs}
+
+
+def full_health_check(db: Session, service_id: str) -> dict:
+    """Run an extensive health check including live Cloudflare DNS verification.
+
+    This is manual-only (not part of the reconcile loop) to avoid API rate limits.
+    """
+    svc = get_service_for_edge_query(service_id, db)
+    runtime = settings_store.get_runtime_paths(db)
+
+    # Standard checks run through the health layer. The manual-only live
+    # Cloudflare lookup below uses the same health-layer predicate that
+    # ``run_health_checks(..., live_dns=True)`` uses, while keeping the endpoint
+    # to one Cloudflare request and returning its extended fields.
+    checks = health_checker.run_health_checks(
+        db,
+        svc,
+        runtime["generated_dir"],
+        runtime["certs_dir"],
+        resolve_socket(db),
+    )
+
+    status = db.get(ServiceStatus, svc.id)
+    current_ip = status.tailscale_ip if status else None
+    dns_record_present, dns_matches_ip, extended = health_checker.check_live_dns(
+        db, svc, current_ip,
+    )
+    checks["dns_record_present"] = dns_record_present
+    checks["dns_matches_ip"] = dns_matches_ip
+
+    return {
+        "checks": checks,
+        "extended": extended,
+        "tailscale_ip": current_ip,
+    }
+
+
+def get_edge_version(db: Session, service_id: str) -> dict:
+    """Return a service edge container's version compared with the orchestrator."""
+    svc = get_service_for_edge_query(service_id, db)
+    edge_version = None
+    with contextlib.suppress(Exception):
+        edge_version = container_manager.get_edge_version(
+            svc.id, svc.edge_container_name, resolve_socket(db)
+        )
+
+    return {
+        "orchestrator_version": __version__,
+        "edge_version": edge_version,
+        "up_to_date": edge_version == __version__,
+    }

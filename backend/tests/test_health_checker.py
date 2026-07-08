@@ -342,7 +342,7 @@ class TestRunHealthChecks:
         )
         assert checks["caddy_config_present"] is False
 
-    @patch("app.health.health_checker._check_https_probe", return_value=True)
+    @patch("app.health.probe.check_https_probe", return_value=True)
     @patch("app.health.health_checker._check_caddy_config", return_value=True)
     @patch("app.health.health_checker._check_cert_not_expiring", return_value=True)
     @patch("app.health.health_checker._check_cert_present", return_value=True)
@@ -392,7 +392,7 @@ class TestRunHealthChecks:
         assert checks["dns_matches_ip"] is False
         mock_find_record.assert_called_once_with("cf-token", "zone123", svc.hostname, "A")
 
-    @patch("app.health.health_checker._check_https_probe", return_value=True)
+    @patch("app.health.probe.check_https_probe", return_value=True)
     @patch("app.health.health_checker._check_caddy_config", return_value=True)
     @patch("app.health.health_checker._check_cert_not_expiring", return_value=True)
     @patch("app.health.health_checker._check_cert_present", return_value=True)
@@ -447,7 +447,7 @@ class TestRunHealthChecks:
         assert checks["dns_matches_ip"] is False
         mock_find_record.assert_called_once_with("cf-token", "zone123", svc.hostname, "A")
 
-    @patch("app.health.health_checker._check_https_probe", return_value=True)
+    @patch("app.health.probe.check_https_probe", return_value=True)
     @patch("app.health.health_checker._check_caddy_config", return_value=True)
     @patch("app.health.health_checker._check_cert_not_expiring", return_value=True)
     @patch("app.health.health_checker._check_cert_present", return_value=True)
@@ -518,7 +518,7 @@ class TestRunHealthChecks:
             patch("app.health.health_checker._check_cert_present", return_value=True),
             patch("app.health.health_checker._check_cert_not_expiring", return_value=True),
             patch("app.health.health_checker._check_caddy_config", return_value=True),
-            patch("app.health.health_checker._check_https_probe", return_value=True) as mock_probe,
+            patch("app.health.probe.check_https_probe", return_value=True) as mock_probe,
         ):
             checks = run_health_checks(
                 db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
@@ -551,7 +551,7 @@ class TestRunHealthChecks:
             patch("app.health.health_checker._check_cert_present", return_value=True),
             patch("app.health.health_checker._check_cert_not_expiring", return_value=True),
             patch("app.health.health_checker._check_caddy_config", return_value=True),
-            patch("app.health.health_checker._check_https_probe", return_value=False) as mock_probe,
+            patch("app.health.probe.check_https_probe", return_value=False) as mock_probe,
         ):
             checks = run_health_checks(
                 db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
@@ -685,18 +685,18 @@ class TestEdgeLookupResilienceOnTransientDaemonFault:
         ready, ip_present, ip = _check_tailscale(client, self._svc(), edge_running=True)
         assert (ready, ip_present, ip) == (True, True, "100.64.0.5")
 
-    def test_check_https_probe_recovers_via_label_search(self):
-        from app.health.health_checker import _check_https_probe
+    def test_https_probe_recovers_via_label_search(self):
+        from app.health.probe import check_https_probe
 
         edge = MagicMock()
         edge.status = "running"
-        # _check_https_probe unpacks ``exit_code, output = container.exec_run(...)``,
+        # check_https_probe unpacks ``exit_code, output = container.exec_run(...)``,
         # so exec_run must return a 2-tuple (unlike _check_tailscale, which reads
         # ``.exit_code``/``.output`` attributes off the result object).
         edge.exec_run.return_value = (0, b"200")
         client = self._client_named_faults_label_finds(edge)
 
-        assert _check_https_probe(self._svc(), "100.64.0.5", client) is True
+        assert check_https_probe(self._svc(), "100.64.0.5", client) is True
 
     def test_notfound_is_not_masked_by_tolerance(self):
         # Tolerance only broadens the *named* lookup; a genuine NotFound with no
@@ -878,7 +878,7 @@ class TestHttpsProbeHealthCheck:
         assert "https_probe_ok" in checks
 
     def test_https_probe_false_when_no_ip(self, db_session, caplog):
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -887,11 +887,11 @@ class TestHttpsProbeHealthCheck:
             base_domain="example.com", edge_container_name="e",
             network_name="n", ts_hostname="ts",
         )
-        assert _check_https_probe(svc, None) is False
+        assert check_https_probe(svc, None) is False
         assert "missing Tailscale IP" in caplog.text
 
     def test_https_probe_false_when_no_client(self, caplog):
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -900,12 +900,12 @@ class TestHttpsProbeHealthCheck:
             base_domain="example.com", edge_container_name="e",
             network_name="n", ts_hostname="ts",
         )
-        assert _check_https_probe(svc, "100.64.0.1", client=None) is False
+        assert check_https_probe(svc, "100.64.0.1", client=None) is False
         assert "Docker client unavailable" in caplog.text
 
     def test_https_probe_success(self):
         """Probe succeeds when curl exits 0 and returns a 2xx status code."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -922,13 +922,13 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"200")
         mock_client.containers.get.return_value = mock_container
 
-        result = _check_https_probe(svc, "100.64.0.1", client=mock_client)
+        result = check_https_probe(svc, "100.64.0.1", client=mock_client)
         assert result is True
         mock_client.containers.get.assert_called_once_with("e")
 
     def test_https_probe_runs_curl_in_edge_container(self):
         """Probe execs curl inside the edge container with the correct Host header."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -944,7 +944,7 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"200")
         mock_client.containers.get.return_value = mock_container
 
-        _check_https_probe(svc, "100.64.0.1", client=mock_client)
+        check_https_probe(svc, "100.64.0.1", client=mock_client)
 
         mock_container.exec_run.assert_called_once()
         cmd = mock_container.exec_run.call_args[0][0]
@@ -954,7 +954,7 @@ class TestHttpsProbeHealthCheck:
 
     def test_https_probe_uses_configured_healthcheck_path(self):
         """Probe targets the service healthcheck path when one is configured."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -971,14 +971,14 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"200")
         mock_client.containers.get.return_value = mock_container
 
-        _check_https_probe(svc, "100.64.0.1", client=mock_client)
+        check_https_probe(svc, "100.64.0.1", client=mock_client)
 
         cmd = mock_container.exec_run.call_args[0][0]
         assert "https://localhost:443/readyz" in cmd
 
     def test_https_probe_5xx_is_failure(self, caplog):
         """curl returning a 5xx status code means the upstream is broken."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -994,13 +994,13 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"502")
         mock_client.containers.get.return_value = mock_container
 
-        assert _check_https_probe(svc, "100.64.0.1", client=mock_client) is False
+        assert check_https_probe(svc, "100.64.0.1", client=mock_client) is False
         assert "upstream returned 5xx" in caplog.text
         assert "http_code=502" in caplog.text
 
     def test_https_probe_4xx_is_success(self):
         """4xx from upstream (e.g. auth required) still means Caddy is serving."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -1017,10 +1017,10 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"401")
         mock_client.containers.get.return_value = mock_container
 
-        assert _check_https_probe(svc, "100.64.0.1", client=mock_client) is True
+        assert check_https_probe(svc, "100.64.0.1", client=mock_client) is True
 
     def test_https_probe_connection_error_is_failure(self, caplog):
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -1036,12 +1036,12 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (7, b"curl: (7) Failed to connect")
         mock_client.containers.get.return_value = mock_container
 
-        assert _check_https_probe(svc, "100.64.0.1", client=mock_client) is False
+        assert check_https_probe(svc, "100.64.0.1", client=mock_client) is False
         assert "curl returned non-zero" in caplog.text
         assert "exit_code=7" in caplog.text
 
     def test_https_probe_container_not_running(self, caplog):
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -1056,13 +1056,13 @@ class TestHttpsProbeHealthCheck:
         mock_container.status = "restarting"
         mock_client.containers.get.return_value = mock_container
 
-        assert _check_https_probe(svc, "100.64.0.1", client=mock_client) is False
+        assert check_https_probe(svc, "100.64.0.1", client=mock_client) is False
         assert "edge container not running" in caplog.text
         assert "container_status=restarting" in caplog.text
 
     def test_https_probe_no_response_is_failure(self, caplog):
         """curl returning '000' (no HTTP response received) fails the probe."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -1078,7 +1078,7 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"000")
         mock_client.containers.get.return_value = mock_container
 
-        assert _check_https_probe(svc, "100.64.0.1", client=mock_client) is False
+        assert check_https_probe(svc, "100.64.0.1", client=mock_client) is False
         assert "no HTTP response received" in caplog.text
         assert "http_code=000" in caplog.text
 
@@ -1087,7 +1087,7 @@ class TestHttpsProbeHealthCheck:
 
         Regression: ``raw[-3:]`` previously left a 2-char numeric string that
         slipped past ``isdigit()`` and was treated as a healthy response."""
-        from app.health.health_checker import _check_https_probe
+        from app.health.probe import check_https_probe
 
         svc = Service(
             name="Test", upstream_container_id="c1",
@@ -1103,7 +1103,7 @@ class TestHttpsProbeHealthCheck:
         mock_container.exec_run.return_value = (0, b"00")
         mock_client.containers.get.return_value = mock_container
 
-        assert _check_https_probe(svc, "100.64.0.1", client=mock_client) is False
+        assert check_https_probe(svc, "100.64.0.1", client=mock_client) is False
         assert "did not return a valid HTTP status" in caplog.text
 
     def test_https_probe_is_warning_check(self):
@@ -1345,7 +1345,7 @@ class TestHealthCheckRegistry:
 
 
 # ---------------------------------------------------------------------------
-# CHR / AR-R3-16b: probe-result classifier extracted from _check_https_probe
+# CHR / AR-R3-16b: probe-result classifier extracted from check_https_probe
 # ---------------------------------------------------------------------------
 
 
@@ -1353,59 +1353,59 @@ class TestClassifyProbeResult:
     """Direct coverage of the 5-branch classifier, testable without a container."""
 
     def test_2xx_is_healthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"200") is True
+        assert classify_probe_result(0, b"200") is True
 
     def test_3xx_is_healthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"301") is True
+        assert classify_probe_result(0, b"301") is True
 
     def test_4xx_is_healthy(self):
         # 4xx (e.g. auth required) still means Caddy is serving the route.
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"401") is True
+        assert classify_probe_result(0, b"401") is True
 
     def test_nonzero_curl_exit_is_unhealthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(7, b"curl: (7) Failed to connect") is False
+        assert classify_probe_result(7, b"curl: (7) Failed to connect") is False
 
     def test_5xx_is_unhealthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"502") is False
+        assert classify_probe_result(0, b"502") is False
 
     def test_no_response_000_is_unhealthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"000") is False
+        assert classify_probe_result(0, b"000") is False
 
     def test_non_three_digit_status_is_unhealthy(self):
         # Regression: a truncated 2-char numeric status must not slip past isdigit().
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"00") is False
+        assert classify_probe_result(0, b"00") is False
 
     def test_empty_output_is_unhealthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"") is False
+        assert classify_probe_result(0, b"") is False
 
     def test_none_output_is_unhealthy(self):
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, None) is False
+        assert classify_probe_result(0, None) is False
 
     def test_status_is_parsed_from_last_three_chars(self):
         # The parser takes the trailing 3 chars, so a trailing numeric code
         # classifies on that suffix and a trailing non-digit run does not.
-        from app.health.health_checker import _classify_probe_result
+        from app.health.probe import classify_probe_result
 
-        assert _classify_probe_result(0, b"xx200") is True
-        assert _classify_probe_result(0, b"200xx") is False
+        assert classify_probe_result(0, b"xx200") is True
+        assert classify_probe_result(0, b"200xx") is False
 
 
 # ---------------------------------------------------------------------------

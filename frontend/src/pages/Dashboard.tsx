@@ -2,7 +2,7 @@ import { useCallback, useState } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/api"
 import { useTimezone, formatDateTime, formatTime as fmtTime } from "@/lib/useTimezone"
-import { cn } from "@/lib/utils"
+import { cn, errorMessage } from "@/lib/utils"
 import { certStatus } from "@/lib/certStatus"
 import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
@@ -26,7 +26,7 @@ export default function Dashboard() {
   const fetcher = useCallback(() => api.dashboard.summary(), [])
   const { data, loading, error, refresh } = useResource(fetcher, {
     pollMs: POLL_INTERVAL,
-    mapError: (e) => (e instanceof Error ? e.message : "Failed to load"),
+    mapError: (e) => (errorMessage(e, "Failed to load")),
     onData: () => setLastRefresh(new Date()),
   })
 
