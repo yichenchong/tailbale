@@ -47,3 +47,25 @@ class TestReconcileEndpoint:
             mock.return_value = {"phase": "healthy", "error": None}
             resp = client.post(f"/api/services/{svc_id}/reconcile")
             assert resp.status_code != 501
+
+    @patch("app.reconciler.reconcile_loop.spawn_reconcile")
+    def test_reconcile_accepts_disabled_service(self, mock_spawn, client):
+        """Manual /reconcile must NOT reject a disabled service the way the edge
+        actions (reload/restart/recreate/update-edge) do. The reconciler
+        intentionally has NO enabled-filter on the manual trigger — it honors a
+        disable by converging to phase='disabled' rather than a 409, so the
+        router guards existence only (_get_service_or_404), never enabled
+        (get_enabled_service_for_edge_action). A regression swapping the guard
+        would 409 before reconcile ever runs.
+        """
+        svc_id = self._create_via_api(client, enabled=False).json()["id"]
+        mock_spawn.return_value = {"phase": "disabled", "error": None}
+
+        resp = client.post(f"/api/services/{svc_id}/reconcile")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["phase"] == "disabled"
+        # The guard passed the disabled service through to reconcile.
+        mock_spawn.assert_called_once()

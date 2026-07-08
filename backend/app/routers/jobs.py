@@ -99,7 +99,8 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
     """Retry an orphaned DNS cleanup job.
 
     Steps:
-    1. Check whether the Cloudflare record still exists (via find_record).
+    1. List the hostname's A records (list_a_records) and locate our SPECIFIC
+       orphan by record_id — not find_record's lowest-id pick, which could miss it.
     2. If it still exists and is still orphaned, delete it from Cloudflare.
     3. If a live service has reclaimed the record id, skip deletion (deleting it
        would cause an outage); if it is already gone, there is nothing to delete.

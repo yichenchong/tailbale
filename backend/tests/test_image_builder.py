@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import docker.errors
 import pytest
 
+from app.edge.image_builder import ensure_edge_image
+
 
 class TestBuildEdgeImage:
     @patch("app.edge.image_builder._EDGE_CONTEXT")
@@ -125,6 +127,51 @@ class TestEnsureEdgeImage:
 
         mock_build.assert_called_once()
         mock_client.images.remove.assert_not_called()
+
+    @patch("app.edge.image_builder._build_edge_image")
+    @patch("app.edge.image_builder.docker.DockerClient")
+    def test_rebuild_cleanup_failure_is_swallowed(self, mock_cls, mock_build):
+        """ED1: removing the superseded old image is best-effort. When the old
+        image is still referenced (e.g. an APIError "image is being used by
+        running container"), ensure_edge_image must still complete — the new
+        image is already built and tagged, so a cleanup failure must not abort
+        startup/reconcile. If _remove_image_if_present re-raised, this fails."""
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_image = MagicMock()
+        mock_image.labels = {"tailbale.version": "0.0.1-old"}
+        mock_image.id = "sha256:old"
+        mock_client.images.get.return_value = mock_image
+        mock_build.return_value = "sha256:new"
+        mock_client.images.remove.side_effect = docker.errors.APIError(
+            "conflict: unable to delete: image is being used by running container"
+        )
+
+        # Must not raise despite the cleanup failure.
+        ensure_edge_image()
+
+        mock_build.assert_called_once()
+        mock_client.images.remove.assert_called_once_with(image="sha256:old", force=True)
+
+    @patch("app.edge.image_builder._build_edge_image")
+    @patch("app.edge.image_builder.docker.DockerClient")
+    def test_rebuild_cleanup_ignores_already_gone_old_image(self, mock_cls, mock_build):
+        """ED2: if the superseded old image was already removed (ImageNotFound),
+        the best-effort cleanup treats it as done and ensure_edge_image completes
+        without surfacing an error."""
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_image = MagicMock()
+        mock_image.labels = {}
+        mock_image.id = "sha256:old"
+        mock_client.images.get.return_value = mock_image
+        mock_build.return_value = "sha256:new"
+        mock_client.images.remove.side_effect = docker.errors.ImageNotFound("gone")
+
+        ensure_edge_image()
+
+        mock_build.assert_called_once()
+        mock_client.images.remove.assert_called_once_with(image="sha256:old", force=True)
 
 
 class TestBuildEdgeImagePrivacy:

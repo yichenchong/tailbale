@@ -5,10 +5,15 @@ import stat
 import pytest
 
 from app.secrets import (
+    CLOUDFLARE_TOKEN,
+    cloudflare_credentials,
     delete_secret,
+    is_valid_ts_api_key,
+    is_valid_ts_auth_key,
     read_secret,
     write_secret,
 )
+from app.settings_store import set_setting
 
 
 class TestSecretStorage:
@@ -186,3 +191,45 @@ class TestSecretStorage:
 
         monkeypatch.setattr("pathlib.Path.unlink", _raise_eacces)
         assert delete_secret("cloudflare_token") is False
+
+
+class TestKeyPrefixValidators:
+    """The Tailscale key-prefix validators are the single source of truth for
+    key-shape checks in setup_state and the settings router; pin their contract."""
+
+    def test_auth_key_accepts_valid_prefix(self):
+        assert is_valid_ts_auth_key("tskey-auth-abc123") is True
+
+    def test_auth_key_rejects_api_prefix(self):
+        # An API key must not satisfy the auth-key check (distinct key types).
+        assert is_valid_ts_auth_key("tskey-api-abc123") is False
+
+    def test_auth_key_rejects_none_and_empty(self):
+        assert is_valid_ts_auth_key(None) is False
+        assert is_valid_ts_auth_key("") is False
+
+    def test_api_key_accepts_valid_prefix(self):
+        assert is_valid_ts_api_key("tskey-api-abc123") is True
+
+    def test_api_key_rejects_auth_prefix(self):
+        assert is_valid_ts_api_key("tskey-auth-abc123") is False
+
+    def test_api_key_rejects_none_and_empty(self):
+        assert is_valid_ts_api_key(None) is False
+        assert is_valid_ts_api_key("") is False
+
+
+class TestCloudflareCredentials:
+    """cloudflare_credentials is the single place answering "are CF creds set?"."""
+
+    def test_returns_none_and_default_when_unset(self, db_session):
+        token, zone_id = cloudflare_credentials(db_session)
+        assert token is None
+        assert zone_id == ""  # cf_zone_id default
+
+    def test_returns_token_and_zone_when_configured(self, db_session):
+        write_secret(CLOUDFLARE_TOKEN, "cf-secret-token")
+        set_setting(db_session, "cf_zone_id", "zone-123")
+        token, zone_id = cloudflare_credentials(db_session)
+        assert token == "cf-secret-token"
+        assert zone_id == "zone-123"

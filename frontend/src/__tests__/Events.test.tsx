@@ -39,7 +39,7 @@ const MOCK_EVENT_KINDS = [
   "caddy_reloaded", "tailscale_ip_acquired",
   "cert_issued", "cert_renewed", "cert_failed",
   "dns_created", "dns_updated", "dns_removed", "dns_update_failed",
-  "dns_cleanup_failed",
+  "dns_cleanup_failed", "dns_duplicate_removed",
   "dns_orphan_created", "dns_orphan_resolved", "dns_orphan_retry_failed",
   "dns_orphan_dismissed",
   "probe_retry_phase_change",

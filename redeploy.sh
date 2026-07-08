@@ -15,6 +15,10 @@ PORT="${PORT:-8080}"
 HOST="${HOST:-0.0.0.0}"
 JWT_EXPIRY_HOURS="${JWT_EXPIRY_HOURS:-24}"
 COOKIE_SECURE="${COOKIE_SECURE:-false}"
+# Login brute-force protection (config.py Settings ints; empty string fails
+# pydantic parse, so use the numeric config defaults like JWT_EXPIRY_HOURS).
+LOGIN_MAX_FAILURES="${LOGIN_MAX_FAILURES:-5}"
+LOGIN_LOCKOUT_SECONDS="${LOGIN_LOCKOUT_SECONDS:-60}"
 CORS_ORIGINS="${CORS_ORIGINS-}"
 DOCKER_SOCKET="${DOCKER_SOCKET:-unix:///var/run/docker.sock}"
 TAILBALE_VERSION="$(<"${SCRIPT_DIR}/VERSION")"
@@ -45,5 +49,7 @@ docker run -d \
   -e HOST="${HOST}" \
   -e JWT_EXPIRY_HOURS="${JWT_EXPIRY_HOURS}" \
   -e COOKIE_SECURE="${COOKIE_SECURE}" \
+  -e LOGIN_MAX_FAILURES="${LOGIN_MAX_FAILURES}" \
+  -e LOGIN_LOCKOUT_SECONDS="${LOGIN_LOCKOUT_SECONDS}" \
   -e CORS_ORIGINS="${CORS_ORIGINS}" \
   tailbale:latest

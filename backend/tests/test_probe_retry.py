@@ -12,6 +12,7 @@ from unittest.mock import patch
 from sqlalchemy.orm import sessionmaker
 
 import app.database as database_module
+from app.locks import _RECONCILE_LOCKS
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -151,6 +152,23 @@ class TestUpdateRetryState:
         with patch.object(database_module, "SessionLocal", TestSession):
             assert probe_retry._update_retry_state("svc_missing", 1, 15) is False
 
+    def test_forgets_lock_when_status_missing_keeps_registry_bounded(self, db_session):
+        # RC1: the status-missing branch (service deleted while its retry outlived
+        # it) MUST drop the registry entry that acquiring the reconcile lock just
+        # (re-)created, so _RECONCILE_LOCKS stays bounded by live + in-flight ids.
+        # Sibling of reconcile_service's / the health sweep's deleted-branch guards,
+        # which the probe-retry state writers previously had no test for. Fails if
+        # forget_reconcile_lock is dropped from this branch (the entry would leak).
+        sid = "svc_urs_missing_forget"
+        TestSession = sessionmaker(bind=db_session.get_bind())
+        assert sid not in _RECONCILE_LOCKS  # clean precondition
+        try:
+            with patch.object(database_module, "SessionLocal", TestSession):
+                assert probe_retry._update_retry_state(sid, 1, 15) is False
+            assert sid not in _RECONCILE_LOCKS
+        finally:
+            _RECONCILE_LOCKS.pop(sid, None)
+
     def test_unexpected_error_logged_at_warning_and_keeps_retrying(self, db_session, caplog):
         # A DB/lock error while persisting the retry state is the same
         # unexpected-failure class the main loop deliberately logs at WARNING. It
@@ -204,6 +222,21 @@ class TestClearRetryState:
             if r.levelno == _logging.WARNING and "Failed to clear retry state" in r.getMessage()
         ]
         assert warnings, "retry-state clear failures must be logged at WARNING, not INFO"
+
+    def test_forgets_lock_when_status_missing_keeps_registry_bounded(self, db_session):
+        # RC2: the no-status-row branch (service + its cascaded status gone) MUST
+        # drop the registry entry acquiring the reconcile lock re-created, mirroring
+        # _update_retry_state's guard, so _RECONCILE_LOCKS stays bounded. Fails if
+        # forget_reconcile_lock is dropped from this branch (the entry would leak).
+        sid = "svc_crs_missing_forget"
+        TestSession = sessionmaker(bind=db_session.get_bind())
+        assert sid not in _RECONCILE_LOCKS  # clean precondition
+        try:
+            with patch.object(database_module, "SessionLocal", TestSession):
+                probe_retry._clear_retry_state(sid)
+            assert sid not in _RECONCILE_LOCKS
+        finally:
+            _RECONCILE_LOCKS.pop(sid, None)
 
 
 # ---------------------------------------------------------------------------
@@ -343,6 +376,36 @@ class TestProbeRetryLoop:
             .first()
         )
         assert clobber_event is None
+
+    def test_status_vanished_mid_probe_forgets_lock_and_stops(self, db_session):
+        # RC3: the in-lock re-read (populate_existing) finds the status row gone —
+        # the service (and its cascaded status) was deleted in the window between
+        # the pre-lock snapshot and re-acquiring the reconcile lock. The loop MUST
+        # drop the registry entry this acquisition re-created and stop, keeping
+        # _RECONCILE_LOCKS bounded. This in-loop forget branch had no coverage;
+        # fails if forget_reconcile_lock is dropped (the entry would leak).
+        svc = _create_service(db_session)
+        sid = svc.id
+
+        def delete_status_mid_probe(db, service, generated_dir, certs_dir, socket_path):
+            # Land the delete inside the (unlocked) health-check window: drop the
+            # status row via the loop's own session so the post-lock re-read with
+            # populate_existing resolves to None.
+            st = db.get(ServiceStatus, service.id)
+            db.delete(st)
+            db.flush()
+            return _checks(https=True)
+
+        try:
+            mock_health, _ = _run_loop(
+                db_session, svc, checks=delete_status_mid_probe, max_retries=1,
+            )
+            # The health check ran once, then the vanished status stopped the loop.
+            assert mock_health.call_count == 1
+            # The registry entry acquiring the lock re-created was forgotten.
+            assert sid not in _RECONCILE_LOCKS
+        finally:
+            _RECONCILE_LOCKS.pop(sid, None)
 
 
 # ---------------------------------------------------------------------------

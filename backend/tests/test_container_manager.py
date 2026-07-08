@@ -6,7 +6,9 @@ from unittest.mock import MagicMock, patch
 import docker.errors
 import pytest
 
+from app.edge import docker_client as dc
 from app.edge.container_manager import _wait_for_running
+from app.edge.docker_client import close_client, connect
 from app.edge.tailscale_ops import detect_tailscale_ip
 
 
@@ -1339,3 +1341,71 @@ class TestWaitForRunning:
         assert _wait_for_running(container, timeout=30.0) is False
         mock_sleep.assert_called_once()
         container.reload.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# docker_client primitives: socket-resolution policy + client lifecycle
+# ---------------------------------------------------------------------------
+
+
+class TestDockerClientPrimitives:
+    """ED3: ``connect``/``close_client``/``docker_client`` are the single
+    daemon-selection + client-lifecycle policy for the whole app, but were only
+    exercised indirectly (network_manager/image_builder patch DockerClient). Pin
+    the two branches that matter: an explicit socket path dials
+    ``DockerClient(base_url=...)`` while a blank one falls through to
+    ``from_env()`` (so DOCKER_HOST is honored), and close is always best-effort."""
+
+    @patch("app.edge.docker_client.docker.DockerClient")
+    def test_connect_without_socket_uses_from_env(self, mock_cls):
+        connect(None)
+
+        mock_cls.from_env.assert_called_once_with()
+        # The base_url constructor path must NOT be taken (that would ignore
+        # DOCKER_HOST and pin the local unix socket).
+        mock_cls.assert_not_called()
+
+    @patch("app.edge.docker_client.docker.DockerClient")
+    def test_connect_with_socket_uses_base_url(self, mock_cls):
+        connect("tcp://10.0.0.1:2375")
+
+        mock_cls.assert_called_once_with(base_url="tcp://10.0.0.1:2375")
+        mock_cls.from_env.assert_not_called()
+
+    def test_close_client_handles_none(self):
+        # No client to close — must be a silent no-op, never an AttributeError.
+        close_client(None)
+
+    def test_close_client_swallows_close_error(self):
+        client = MagicMock()
+        client.close.side_effect = RuntimeError("socket already gone")
+
+        # Best-effort: a failing close must never propagate out of a finally.
+        close_client(client)
+        client.close.assert_called_once()
+
+    def test_close_client_tolerates_missing_close_attr(self):
+        class _NoClose:
+            pass
+
+        # A client-like object without a ``close`` attribute must not blow up.
+        close_client(_NoClose())
+
+    def test_docker_client_closes_on_normal_exit(self):
+        fake = MagicMock()
+        with (
+            patch.object(dc, "connect", return_value=fake),
+            dc.docker_client("unix:///x.sock") as client,
+        ):
+            assert client is fake
+        fake.close.assert_called_once()
+
+    def test_docker_client_closes_on_body_exception(self):
+        fake = MagicMock()
+        with (
+            patch.object(dc, "connect", return_value=fake),
+            pytest.raises(ValueError, match="boom"),
+            dc.docker_client(),
+        ):
+            raise ValueError("boom")
+        fake.close.assert_called_once()

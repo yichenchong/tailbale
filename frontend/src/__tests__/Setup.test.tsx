@@ -350,6 +350,46 @@ describe("Setup wizard", () => {
     expect(nextBtn).not.toBeDisabled()
   })
 
+  it("blocks advancing past Cloudflare and surfaces the error when the connection test fails", async () => {
+    // Step 2 (Cloudflare) runs a connection test as a gate, but ONLY when both
+    // the zone ID and a fresh token are present (unlike Docker's always-run
+    // test). A failing test must keep the wizard on the Cloudflare step, show
+    // the failure, and fire NO advance to the ACME step — the same block-on-fail
+    // contract the Docker step has, on this conditional branch.
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/auth/setup-progress")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ ...FRESH_PROGRESS, user_exists: true, base_domain_set: true }),
+        })
+      }
+      if (String(url).includes("/settings/test/cloudflare")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ success: false, message: "Cloudflare token rejected" }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    }))
+    const { default: Setup } = await import("@/pages/Setup")
+    renderRoute(<Setup />)
+    await waitFor(() => {
+      expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText("abc123..."), { target: { value: "zone123" } })
+    fireEvent.change(screen.getByPlaceholderText("API token..."), { target: { value: "cf-token" } })
+    fireEvent.click(screen.getByText("Next").closest("button")!)
+
+    // The failed test result is surfaced to the user.
+    await waitFor(() => {
+      expect(screen.getByText("Cloudflare token rejected")).toBeInTheDocument()
+    })
+    // Still on the Cloudflare step — the wizard did not advance to ACME Email.
+    expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
+    expect(screen.queryByText("Step 4 of 6: ACME Email")).not.toBeInTheDocument()
+  })
+
   it("disables Next when the Cloudflare Zone ID is whitespace only (FSA1)", async () => {
     // The Zone ID is a plain identifier the backend strips before its
     // min_length=1 check, so a whitespace-only value 422s. The gate must trim

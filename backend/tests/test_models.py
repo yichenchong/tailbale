@@ -727,3 +727,57 @@ class TestTokenVersionMigration:
         # A second pass must not raise (has-column guard) and leave it intact.
         run_migrations(eng)
         assert "token_version" in self._columns(eng, "users")
+
+
+# ---------------------------------------------------------------------------
+# MS1: run_migrations must BACK-FILL the probe-retry columns onto a legacy DB.
+# service_status.probe_retry_at / probe_retry_attempt / last_probe_at were added
+# after the probe-retry feature shipped; create_all only adds them to fresh DBs.
+# These are the only _MIGRATIONS *column* entries with no backfill guard —
+# dropping any of them would leave every upgraded install raising "no such
+# column" on every ServiceStatus read, and no other test would catch it.
+# ---------------------------------------------------------------------------
+
+
+class TestServiceStatusProbeColumnsMigration:
+    """A service_status table created before probe-retry tracking must gain the
+    probe_retry_at / probe_retry_attempt / last_probe_at columns (idempotently)
+    via run_migrations."""
+
+    _PROBE_COLUMNS = ("probe_retry_at", "probe_retry_attempt", "last_probe_at")
+
+    @staticmethod
+    def _legacy_engine():
+        # Build the service_status table WITHOUT the probe columns, mirroring a
+        # DB created before probe-retry tracking existed.
+        eng = create_engine("sqlite:///:memory:")
+        with eng.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE service_status (service_id TEXT PRIMARY KEY, phase TEXT, "
+                "message TEXT, tailscale_ip TEXT, edge_container_id TEXT, "
+                "health_checks TEXT, last_reconciled_at DATETIME, updated_at DATETIME)"
+            ))
+        return eng
+
+    @staticmethod
+    def _columns(eng, table):
+        return {c["name"] for c in inspect(eng).get_columns(table)}
+
+    def test_backfills_probe_columns(self):
+        eng = self._legacy_engine()
+        before = self._columns(eng, "service_status")
+        for col in self._PROBE_COLUMNS:
+            assert col not in before
+        run_migrations(eng)
+        after = self._columns(eng, "service_status")
+        for col in self._PROBE_COLUMNS:
+            assert col in after
+
+    def test_backfill_is_idempotent(self):
+        eng = self._legacy_engine()
+        run_migrations(eng)
+        # A second pass must not raise (has-column guard) and leave them intact.
+        run_migrations(eng)
+        after = self._columns(eng, "service_status")
+        for col in self._PROBE_COLUMNS:
+            assert col in after

@@ -16,6 +16,8 @@ services:
       - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
       - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-24}
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
+      - LOGIN_MAX_FAILURES=${LOGIN_MAX_FAILURES:-5}
+      - LOGIN_LOCKOUT_SECONDS=${LOGIN_LOCKOUT_SECONDS:-60}
       - CORS_ORIGINS=${CORS_ORIGINS-}
       - PORT=${PORT:-8080}
       - HOST=${HOST:-0.0.0.0}

@@ -118,13 +118,16 @@ def run_migrations(target_engine: Engine | None = None) -> None:
 
     SQLAlchemy's ``create_all`` only creates missing *tables*, not missing
     columns or indexes on tables that already exist.  This function inspects
-    existing tables and (1) adds any new nullable columns the ORM models
-    declare but the DB lacks, and (2) creates indexes that newer model
-    revisions added.  Every step is idempotent and safe to run repeatedly.
+    existing tables and (1) adds any new columns the ORM models declare but the
+    DB lacks -- nullable, or NOT NULL with a DEFAULT so SQLite backfills existing
+    rows safely (e.g. ``users.token_version`` -> ``INTEGER NOT NULL DEFAULT 0``)
+    -- and (2) creates indexes that newer model revisions added.  Every step is
+    idempotent and safe to run repeatedly.
 
-    Contract: Additive migrations only (nullable ADD COLUMN, CREATE INDEX IF
-    NOT EXISTS); non-additive changes (drops, renames, type changes, NOT NULL,
-    backfills) require a manual one-off and are intentionally NOT supported here
+    Contract: Additive migrations only (ADD COLUMN that is nullable or carries a
+    DEFAULT, CREATE INDEX IF NOT EXISTS); non-additive changes (drops, renames,
+    type changes, adding a NOT NULL column WITHOUT a default, backfills) require a
+    manual one-off and are intentionally NOT supported here
     -- there is no migration framework.
     """
     eng = target_engine if target_engine is not None else engine

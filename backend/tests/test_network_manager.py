@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import docker.errors
 import pytest
 
+from app.edge.network_manager import ensure_network
+
 
 class TestCreateNetwork:
     @patch("app.edge.network_manager.docker.DockerClient")
@@ -325,3 +327,26 @@ class TestEnsureNetwork:
 
         result = ensure_network("edge_net_test", "app_container_id")
         assert result == ("new_net_id", mock_container.id)
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_idempotent_when_network_and_connection_exist(self, mock_cls):
+        """ED4: fully-converged state — the per-service network already exists
+        and the app container is already attached to it. ensure_network must be
+        a true no-op: it creates no network and connects nothing, returning the
+        existing ids. Guards the composed idempotency the reconciler relies on
+        to run every cadence without churning the isolation network."""
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        existing_net = MagicMock()
+        existing_net.id = "net_existing"
+        mock_client.networks.get.return_value = existing_net
+        mock_container = MagicMock()
+        mock_container.id = "app_cid"
+        mock_container.attrs = {"NetworkSettings": {"Networks": {"edge_net_test": {}}}}
+        mock_client.containers.get.return_value = mock_container
+
+        result = ensure_network("edge_net_test", "app_cid")
+
+        assert result == ("net_existing", "app_cid")
+        mock_client.networks.create.assert_not_called()
+        existing_net.connect.assert_not_called()

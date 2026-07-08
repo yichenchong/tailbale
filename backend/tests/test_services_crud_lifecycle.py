@@ -11,6 +11,7 @@ from app.models.certificate import Certificate
 from app.models.dns_record import DnsRecord
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
+from app.settings_store import set_setting
 from tests._services_helpers import (
     _create_service,
     _create_service_in_db,
@@ -829,6 +830,28 @@ class TestHostnameChangeNoCreds:
         assert resp.status_code == 200
         assert resp.json()["hostname"] == "new.example.com"
 
+    @patch("app.secrets.read_secret", return_value=None)
+    def test_hostname_change_updates_local_dns_record_hostname(
+        self, mock_secret, client, db_session
+    ):
+        """A surviving local-only DnsRecord (no record_id, no CF creds) must have
+        its hostname rewritten to the new value so a later reconcile syncs the
+        CORRECT hostname to Cloudflare instead of orphaning a record for the old
+        one. Exercises crud.update_service's ``dns_record.hostname = body.hostname``
+        branch (reachable only when the row survives the DNS teardown)."""
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id=None)
+        db_session.add(dns)
+        db_session.commit()
+
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+
+        db_session.expire_all()
+        updated_dns = db_session.get(DnsRecord, svc_id)
+        assert updated_dns is not None
+        assert updated_dns.hostname == "new.example.com"
+
 
 class TestHostnameChangeRecreatesEdge:
     """A hostname change must remove the edge container so the reconcile recreates
@@ -1109,3 +1132,67 @@ class TestDeleteRefreshesStaleService:
         # The delete must clean up the CURRENT hostname's cert dir; pre-fix it
         # used the stale snapshot and left new_dir behind (removing old_dir).
         assert not new_dir.exists(), "delete must remove the current hostname's cert dir"
+
+
+class TestDisablePreservesCertState:
+    """Disable keeps a disabled service's on-disk cert state (served dir + lego
+    artifacts) so a later re-enable reuses the existing certificate instead of
+    forcing a fresh Let's Encrypt issue (ACME rate-limit risk). This is the
+    ``remove_cert_state=False`` contract in disable_service's
+    _teardown_hostname_resources call — delete, by contrast, removes it."""
+
+    _LEGO_SUFFIXES = (".crt", ".key", ".json", ".issuer.crt")
+
+    @patch("app.edge.container_manager.stop_edge")
+    def test_disable_keeps_cert_dir_and_lego_artifacts(
+        self, mock_stop, client, db_session, tmp_data_dir
+    ):
+        custom_certs = str(tmp_data_dir / "certs")
+        set_setting(db_session, "cert_root", custom_certs)
+        db_session.commit()
+
+        svc = _create_service(client, name="App", hostname="app.example.com").json()
+
+        # Seed the served cert dir + lego artifacts a prior issue/renew left behind.
+        cert_dir = Path(custom_certs) / "app.example.com"
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_text("cert")
+        lego_certs = Path(custom_certs) / ".lego" / "certificates"
+        lego_certs.mkdir(parents=True)
+        lego_files = [lego_certs / f"app.example.com{s}" for s in self._LEGO_SUFFIXES]
+        for artifact in lego_files:
+            artifact.write_text("x")
+
+        resp = client.post(f"/api/services/{svc['id']}/disable")
+        assert resp.status_code == 200
+        assert resp.json()["enabled"] is False
+
+        # remove_cert_state=False: disable touches none of the cert state.
+        assert cert_dir.exists(), "disable must keep the served cert dir for re-enable"
+        assert (cert_dir / "fullchain.pem").exists()
+        for artifact in lego_files:
+            assert artifact.exists(), f"disable must keep lego artifact {artifact.name}"
+
+    @patch("app.adapters.dns_reconciler.cleanup_dns_record",
+           return_value={"deleted_remote": True, "deleted_local": True, "error": None})
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.edge.container_manager.stop_edge")
+    def test_disable_with_dns_cleanup_still_keeps_cert_dir(
+        self, mock_stop, mock_secret, mock_cleanup, client, db_session, tmp_data_dir
+    ):
+        """DNS teardown and cert-state teardown are independently gated: even when
+        cleanup_dns removes the DNS record, the cert dir is preserved."""
+        custom_certs = str(tmp_data_dir / "certs")
+        set_setting(db_session, "cert_root", custom_certs)
+        set_setting(db_session, "cf_zone_id", "zone123")
+        db_session.commit()
+
+        svc = _create_service(client, name="App", hostname="app.example.com").json()
+        cert_dir = Path(custom_certs) / "app.example.com"
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_text("cert")
+
+        resp = client.post(f"/api/services/{svc['id']}/disable?cleanup_dns=true")
+        assert resp.status_code == 200
+        mock_cleanup.assert_called_once()
+        assert cert_dir.exists(), "cert dir must survive disable even with cleanup_dns"

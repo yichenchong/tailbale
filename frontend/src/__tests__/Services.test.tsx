@@ -540,4 +540,99 @@ describe("Services page a11y contract (FPA)", () => {
     expect(btn).toHaveAttribute("aria-expanded", "false")
     expect(document.activeElement).toBe(btn)
   })
+
+  it("moves focus to the first menuitem when the row actions menu opens", async () => {
+    // WAI-ARIA menu-button pattern: activating the trigger opens the menu AND
+    // moves focus into it, onto the first item, so Arrow keys drive it at once.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByLabelText("Actions"))
+
+    const items = screen.getAllByRole("menuitem")
+    expect(items[0]).toHaveTextContent("View Details")
+    expect(document.activeElement).toBe(items[0])
+    // Roving tabindex: only the focused item is in the Tab order.
+    expect(items[0]).toHaveAttribute("tabindex", "0")
+    expect(items[1]).toHaveAttribute("tabindex", "-1")
+  })
+
+  it("drives the row actions menu with roving-tabindex Arrow/Home/End keys", async () => {
+    // WAI-ARIA menu pattern: Arrow keys wrap between menuitems, Home/End jump to
+    // the ends, and the roving tabindex (0 on the active item, -1 elsewhere)
+    // follows focus so the whole menu is one Tab stop.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByLabelText("Actions"))
+    const menu = screen.getByRole("menu")
+    const items = screen.getAllByRole("menuitem")
+    const last = items.length - 1
+    expect(document.activeElement).toBe(items[0])
+
+    // ArrowDown advances one item; the roving tabindex tracks the move.
+    fireEvent.keyDown(menu, { key: "ArrowDown" })
+    expect(document.activeElement).toBe(items[1])
+    expect(items[1]).toHaveAttribute("tabindex", "0")
+    expect(items[0]).toHaveAttribute("tabindex", "-1")
+
+    // ArrowUp steps back to the first, then wraps to the last.
+    fireEvent.keyDown(menu, { key: "ArrowUp" })
+    expect(document.activeElement).toBe(items[0])
+    fireEvent.keyDown(menu, { key: "ArrowUp" })
+    expect(document.activeElement).toBe(items[last])
+    expect(items[last]).toHaveAttribute("tabindex", "0")
+
+    // Home/End jump to the ends.
+    fireEvent.keyDown(menu, { key: "Home" })
+    expect(document.activeElement).toBe(items[0])
+    fireEvent.keyDown(menu, { key: "End" })
+    expect(document.activeElement).toBe(items[last])
+  })
+
+  it("closes the row actions menu on scroll and on resize", async () => {
+    // The menu is position:fixed at coords captured on open, so scrolling an
+    // ancestor or resizing would detach it from its trigger; both close it.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+    const btn = screen.getByLabelText("Actions")
+
+    fireEvent.click(btn)
+    expect(screen.getByRole("menu")).toBeInTheDocument()
+    expect(btn).toHaveAttribute("aria-expanded", "true")
+
+    fireEvent.scroll(window)
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+    expect(btn).toHaveAttribute("aria-expanded", "false")
+
+    // Resize dismisses it too.
+    fireEvent.click(btn)
+    expect(screen.getByRole("menu")).toBeInTheDocument()
+    act(() => {
+      window.dispatchEvent(new Event("resize"))
+    })
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+    expect(btn).toHaveAttribute("aria-expanded", "false")
+  })
 })

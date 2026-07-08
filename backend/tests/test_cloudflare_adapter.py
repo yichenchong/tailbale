@@ -1,5 +1,6 @@
 """Tests for the Cloudflare API v4 adapter."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -707,7 +708,14 @@ class TestCanonicalTimeouts:
 
         from app.adapters import cloudflare_adapter as cf
 
-        for fn in (cf.find_record, cf.create_a_record, cf.update_a_record, cf.delete_a_record):
+        for fn in (
+            cf.find_record,
+            cf.list_a_records,
+            cf.create_a_record,
+            cf.update_a_record,
+            cf.delete_a_record,
+            cf.verify_zone,
+        ):
             default = inspect.signature(fn).parameters["timeout"].default
             assert default is cf.CF_DEFAULT_TIMEOUT, fn.__name__
             assert isinstance(default, float), fn.__name__
@@ -785,6 +793,28 @@ class TestListARecords:
 
         assert list_a_records("cf-token", "z1", "app.example.com") == []
 
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_warns_when_result_set_truncated(self, mock_get, caplog):
+        # jobs.py's orphan cleanup consumes list_a_records DIRECTLY (not via
+        # find_record), so its own truncation contract must hold: when Cloudflare
+        # reports MORE matches than a single page returned, a lower id could live on
+        # an unseen page and the id-sorted set is no longer globally complete. It
+        # must surface a truncation warning while still returning the sorted page.
+        records = [
+            {"id": "r5", "content": "100.64.0.5", "comment": None},
+            {"id": "r4", "content": "100.64.0.4", "comment": None},
+        ]
+        resp = _cf_response(result=records)
+        resp.json.return_value["result_info"] = {"total_count": 150, "count": 2}
+        mock_get.return_value = resp
+
+        with caplog.at_level(logging.WARNING, logger="app.adapters.cloudflare_adapter"):
+            result = list_a_records("cf-token", "z1", "dup.example.com")
+
+        assert [r["id"] for r in result] == ["r4", "r5"]  # sorted page still returned
+        msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("150" in m and "dup.example.com" in m for m in msgs)
+
 
 class TestVerifyZone:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
@@ -815,3 +845,21 @@ class TestVerifyZone:
 
         with pytest.raises(CloudflareAPIError, match="Invalid API token"):
             verify_zone("bad-token", "z1")
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_defaults_to_30s_timeout(self, mock_get):
+        # verify_zone is an adapter function, so it inherits the canonical 30s
+        # default like the record operations (no caller relies on the default,
+        # but the "defined ONCE, reused everywhere" invariant must still hold).
+        mock_get.return_value = _cf_response(result={"name": "example.com"})
+        verify_zone("cf-token", "z1")
+        assert mock_get.call_args.kwargs["timeout"] == 30.0
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_threads_custom_timeout(self, mock_get):
+        # settings.py's /test/cloudflare calls verify_zone(..., timeout=10) to bound
+        # the connection test under lifecycle_lock. The (keyword-only) timeout MUST
+        # reach httpx2, or a slow/unreachable Cloudflare would stall that lock.
+        mock_get.return_value = _cf_response(result={"name": "example.com"})
+        verify_zone("cf-token", "z1", timeout=10.0)
+        assert mock_get.call_args.kwargs["timeout"] == 10.0

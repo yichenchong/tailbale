@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.adapters.cloudflare_adapter import CloudflareAPIError, ownership_comment
+from app.adapters.dns_reconciler import cleanup_dns_record, reconcile_dns
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
 from app.models.service import Service
@@ -665,6 +667,33 @@ class TestReconcileDns:
 
         assert db_session.get(DnsRecord, svc.id) is None
 
+    @patch("app.adapters.dns_reconciler.update_a_record")
+    @patch("app.adapters.dns_reconciler.create_a_record")
+    @patch("app.adapters.dns_reconciler.list_a_records")
+    def test_hard_update_failure_propagates_and_persists_no_row(
+        self, mock_list, mock_create, mock_update, db_session
+    ):
+        """Completes reconcile's hard-failure contract for the UPDATE path (the
+        list/create cases are already covered): a Cloudflare error while updating a
+        drifted owned record bubbles out (never swallowed) and, because it fails
+        before the db write section, persists NO phantom local row. No create is
+        attempted on the update path."""
+        svc = _create_service(db_session)
+        # Owned record present with a WRONG ip -> update path; the update fails hard.
+        mock_list.return_value = [
+            {"id": "r1", "content": "100.64.0.9", "comment": ownership_comment(svc.id)}
+        ]
+        mock_update.side_effect = CloudflareAPIError(
+            "update_a_record", "Internal error (code 1002)",
+            errors=[{"code": 1002, "message": "Internal error"}],
+        )
+
+        with pytest.raises(CloudflareAPIError, match="Internal error"):
+            reconcile_dns(db_session, svc, "100.64.0.1", "cf-token", "zone1")
+
+        mock_create.assert_not_called()
+        assert db_session.get(DnsRecord, svc.id) is None
+
     @patch("app.adapters.dns_reconciler.delete_a_record")
     @patch("app.adapters.dns_reconciler.update_a_record")
     @patch("app.adapters.dns_reconciler.create_a_record")
@@ -1012,6 +1041,46 @@ class TestCleanupDnsRecord:
         # No FALSE dns_cleanup_failed audit event for a delete that actually worked.
         events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
         assert events == []
+
+    @patch("app.adapters.dns_reconciler.delete_a_record")
+    def test_removal_event_message_when_deleted(self, mock_delete, db_session):
+        """The dns_removed audit message on the success path names the actual
+        removal ('Removed DNS record for <host>'), distinct from the already-absent
+        wording -- collapsing the two would blur the operator's audit trail."""
+        svc = _create_service(db_session)
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_ok", value="1.2.3.4")
+        db_session.add(dns)
+        db_session.commit()
+
+        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        db_session.flush()
+
+        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
+        assert len(events) == 1
+        assert events[0].message == f"Removed DNS record for {svc.hostname}"
+
+    @patch("app.adapters.dns_reconciler.delete_a_record")
+    def test_removal_event_message_when_already_absent(self, mock_delete, db_session):
+        """When Cloudflare reports the record already gone, the dns_removed message
+        must use the distinct 'stale local ... already absent' wording (never the
+        plain deleted wording), so the audit trail records that nothing was actually
+        removed remotely, only the stale local mirror was cleaned up."""
+        mock_delete.side_effect = CloudflareAPIError(
+            "delete_a_record", "Record does not exist. (code 81044)",
+            errors=[{"code": 81044, "message": "Record does not exist."}],
+        )
+        svc = _create_service(db_session)
+        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_gone", value="1.2.3.4")
+        db_session.add(dns)
+        db_session.commit()
+
+        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
+        db_session.flush()
+
+        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
+        assert len(events) == 1
+        assert "already absent" in events[0].message
+        assert events[0].message != f"Removed DNS record for {svc.hostname}"
 
 
 class TestDeleteWithDnsCleanup:

@@ -1,5 +1,8 @@
 """Tests for authentication API endpoints."""
 
+from datetime import UTC, datetime, timedelta
+
+import jwt
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
@@ -7,9 +10,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.database as database_module
 from app.auth import get_current_user
 from app.config import settings
 from app.database import Base, get_db
+from app.models.user import User
 
 
 @pytest.fixture(autouse=True)
@@ -720,12 +725,29 @@ class TestAuthStatus:
         token = setup_resp.cookies["access_token"]
         # Deactivate the user while holding a still-valid token: status must not
         # report the disabled account as authenticated (mirrors get_current_user).
-        from app.database import SessionLocal
-        from app.models.user import User
-
-        with SessionLocal() as db:
+        with database_module.SessionLocal() as db:
             user = db.query(User).filter(User.username == "admin").first()
             user.is_active = False
+            db.commit()
+
+        auth_client.cookies.clear()
+        _set_auth_cookie(auth_client, token)
+        resp = auth_client.get("/api/auth/status")
+        assert resp.status_code == 200
+        assert resp.json()["authenticated"] is False
+
+    def test_stale_token_version_reports_not_authenticated(self, auth_client):
+        """A token whose ``ver`` claim predates a token_version bump (e.g. a
+        password change on another device) must report authenticated=False,
+        matching get_current_user. Pre-fix /status used decode_access_token (sub
+        only, NO ``ver`` check), so a revoked session was wrongly reported as
+        authenticated while every protected endpoint 401'd it."""
+        setup_resp = _setup_user(auth_client)
+        token = setup_resp.cookies["access_token"]  # minted at token_version=0
+
+        with database_module.SessionLocal() as db:
+            user = db.query(User).filter(User.username == "admin").first()
+            user.token_version += 1  # mirrors a credential change elsewhere
             db.commit()
 
         auth_client.cookies.clear()
@@ -963,6 +985,25 @@ class TestSessionInvalidationOnPasswordChange:
         # ... and it authenticates the current session under the bumped version.
         _set_auth_cookie(auth_client, new_token)
         assert auth_client.get("/api/auth/me").status_code == 200
+
+    def test_legacy_token_without_version_claim_is_rejected(self, auth_client):
+        """A JWT minted before the ``ver`` claim existed carries no ``ver``. Such
+        a legacy token must be rejected by get_current_user: payload.get('ver')
+        is None while the user's token_version is 0, so the revocation check 401s
+        rather than authenticating a pre-versioning token."""
+        _setup_user(auth_client)
+        with database_module.SessionLocal() as db:
+            user_id = db.query(User).filter(User.username == "admin").first().id
+
+        legacy = jwt.encode(
+            {"sub": user_id, "exp": datetime.now(UTC) + timedelta(hours=1)},
+            settings.jwt_secret,
+            algorithm="HS256",
+        )
+        auth_client.cookies.clear()
+        _set_auth_cookie(auth_client, legacy)
+        resp = auth_client.get("/api/auth/me")
+        assert resp.status_code == 401
 
 
 class TestProtectedEndpoints:

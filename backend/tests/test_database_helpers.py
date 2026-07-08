@@ -1,15 +1,19 @@
 """Regression tests for serialized database write helpers."""
 
-
 import threading
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy import text as _text
 
+import app.models as _registered_models  # noqa: F401  -- register every table on Base.metadata
 from app.database import (
     _DB_WRITE_MUTEX,
+    Base,
     commit_with_lock,
     db_write_section,
     flush_with_lock,
+    run_migrations,
 )
 
 
@@ -431,6 +435,48 @@ def test_run_migrations_column_backfill_is_idempotent(tmp_path):
 
         after = _column_names(engine, "service_status")
         assert {"probe_retry_at", "probe_retry_attempt", "last_probe_at"} <= after
+    finally:
+        engine.dispose()
+
+
+def _legacy_engine_missing_token_version(tmp_path):
+    """Build an on-disk SQLite engine whose ``users`` table predates the AS3
+    ``token_version`` column (JWT session invalidation). The full schema is
+    created and seeded with an existing user, then ``token_version`` is dropped
+    so the table resembles a pre-AS3 release being upgraded in place.
+    """
+    engine = create_engine(f"sqlite:///{tmp_path / 'legacy_users.db'}")
+    Base.metadata.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(_text(
+            "INSERT INTO users (id, username, password_hash, role, is_active) "
+            "VALUES ('usr_legacy0001', 'admin', 'hash', 'admin', 1)"
+        ))
+        conn.execute(_text("ALTER TABLE users DROP COLUMN token_version"))
+    return engine
+
+
+def test_run_migrations_backfills_users_token_version_column(tmp_path):
+    """The AS3 ``token_version`` entry is the one NOT NULL ADD COLUMN in the
+    migration list. A legacy ``users`` table that predates it must have the
+    column added AND every existing row backfilled with the ``DEFAULT 0`` —
+    get_current_user reads ``token_version`` on every authenticated request, so
+    a missing column (or a NULL in an existing row) would break auth after an
+    in-place upgrade. Removing the ``("users", "token_version", ...)`` migration
+    entry fails this test.
+    """
+    engine = _legacy_engine_missing_token_version(tmp_path)
+    try:
+        assert "token_version" not in _column_names(engine, "users")
+
+        run_migrations(engine)
+
+        assert "token_version" in _column_names(engine, "users")
+        with engine.begin() as conn:
+            value = conn.execute(
+                _text("SELECT token_version FROM users WHERE id = 'usr_legacy0001'")
+            ).scalar_one()
+        assert value == 0, "the existing row must be backfilled with the DEFAULT 0"
     finally:
         engine.dispose()
 

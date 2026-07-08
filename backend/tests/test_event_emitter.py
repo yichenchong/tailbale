@@ -1,7 +1,11 @@
 """Tests for the centralized event emitter."""
 
+from datetime import datetime
+
 from app.events.event_emitter import emit_event
+from app.events.serialization import event_to_dict
 from app.models.event import Event
+from app.timeutil import iso
 
 
 class TestEmitEvent:
@@ -193,3 +197,61 @@ class TestEventKindsRegistry:
             "emit_event call sites use kinds missing from EVENT_KINDS "
             f"(add them to the registry): {sorted(unregistered)}"
         )
+
+
+class TestEventToDict:
+    """Direct coverage of the shared event serialization shape. It is the single
+    wire form reused by the events, dashboard, and services routers, but was only
+    ever exercised indirectly through those routers — a key rename or a dropped
+    ``iso()`` on ``created_at`` would slip past every existing test."""
+
+    def _make_event(self, db_session):
+        evt = Event(
+            service_id=None,
+            kind="dns_created",
+            level="warning",
+            message="DNS record created",
+            details={"hostname": "a.example.com"},
+            created_at=datetime(2026, 1, 2, 3, 4, 5),
+        )
+        db_session.add(evt)
+        db_session.flush()
+        return evt
+
+    def test_full_record_shape(self, db_session):
+        evt = self._make_event(db_session)
+        assert event_to_dict(evt) == {
+            "id": evt.id,
+            "service_id": None,
+            "kind": "dns_created",
+            "level": "warning",
+            "message": "DNS record created",
+            "details": {"hostname": "a.example.com"},
+            "created_at": iso(evt.created_at),
+        }
+
+    def test_created_at_uses_naive_iso_wire_format(self, db_session):
+        # The wire format is the naive isoformat (no tz designator) that the
+        # frontend's parseBackendDate relies on — pin it so a switch to str(dt)
+        # or an aware format can't slip through.
+        evt = self._make_event(db_session)
+        result = event_to_dict(evt)
+        assert result["created_at"] == "2026-01-02T03:04:05"
+        assert "+" not in result["created_at"]
+        assert not result["created_at"].endswith("Z")
+
+    def test_field_projection_selects_exact_subset(self, db_session):
+        # A projected subset preserves the caller's exact key set AND order (the
+        # dict comprehension iterates ``fields``), never leaking unrequested keys.
+        evt = self._make_event(db_session)
+        subset = event_to_dict(evt, fields=("id", "kind", "message"))
+        assert list(subset.keys()) == ["id", "kind", "message"]
+        assert subset == {
+            "id": evt.id,
+            "kind": "dns_created",
+            "message": "DNS record created",
+        }
+
+    def test_empty_fields_projects_empty_dict(self, db_session):
+        evt = self._make_event(db_session)
+        assert event_to_dict(evt, fields=()) == {}

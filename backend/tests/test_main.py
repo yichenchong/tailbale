@@ -85,6 +85,16 @@ class TestCorsMiddlewareOptions:
         assert opts["allow_origins"] == ["https://ui.example"]
         assert opts["allow_credentials"] is True
 
+    def test_wildcard_mixed_with_explicit_origins_collapses_to_wildcard(self):
+        # A '*' ANYWHERE in the list wins: the result must collapse to ["*"] and
+        # disable credentials (the CORS spec forbids wildcard + credentials, so a
+        # credentialed wildcard would be silently dropped by browsers). The
+        # explicit origin must not survive alongside the wildcard.
+        opts = _cors_middleware_options("https://ui.example, *")
+        assert opts is not None
+        assert opts["allow_origins"] == ["*"]
+        assert opts["allow_credentials"] is False
+
 
 class TestLifespanBackgroundTasks:
     """The lifespan must launch every background loop: cert renewal, the slow

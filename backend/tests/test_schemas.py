@@ -228,6 +228,21 @@ class TestBaseDomainNormalization:
         assert len(domain) == 253
         assert GeneralSettingsUpdate(base_domain=domain).base_domain == domain
 
+    def test_trailing_newline_stripped_then_accepted(self):
+        # MS2: the shared before-validator strips surrounding whitespace (incl. a
+        # trailing newline), so a padded-but-valid domain normalizes cleanly
+        # rather than being rejected.
+        assert GeneralSettingsUpdate(base_domain="example.com\n").base_domain == "example.com"
+
+    @pytest.mark.parametrize("domain", ["exa\nmple.com", "exa\tmple.com", "exam ple.com"])
+    def test_embedded_control_or_space_rejected(self, domain):
+        # MS2: normalize_base_domain uses re.fullmatch, which anchors the whole
+        # string, and strip cannot remove an interior control char/space — so an
+        # embedded newline/tab/space is rejected. base_domain feeds derived
+        # hostnames, so no interior control char may slip through.
+        with pytest.raises(ValidationError):
+            GeneralSettingsUpdate(base_domain=domain)
+
 
 class TestGeneralSettingsIntValidation:
     _INT_FIELDS = (

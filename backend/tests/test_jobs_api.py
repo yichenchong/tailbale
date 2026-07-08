@@ -432,6 +432,15 @@ class TestRetryOrphanCleanup:
         # The stale orphan job is cleared since it's no longer orphaned.
         db_session.expire_all()
         assert db_session.get(Job, job_id) is None
+        # RJ2: the reclaim branch MUST record WHY the orphan was cleared without a
+        # Cloudflare delete — a dns_orphan_resolved event whose message explains the
+        # record is now in use by an active service. This emit was untested; a
+        # regression dropping it (or the wrong kind/message) passes every other
+        # retry test.
+        events = db_session.query(Event).filter(Event.kind == "dns_orphan_resolved").all()
+        assert len(events) == 1
+        assert "now in use by an active service" in events[0].message
+        assert events[0].details["record_id"] == "cf_abc123"
 
     @patch("app.adapters.cloudflare_adapter.delete_a_record")
     @patch("app.adapters.cloudflare_adapter.list_a_records")

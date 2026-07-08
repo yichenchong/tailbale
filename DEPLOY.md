@@ -33,7 +33,8 @@ HOST_PORT=6790 HOST_DATA_DIR=/opt/tailbale/data COOKIE_SECURE=true bash ./deploy
 > `deploy.sh` delegates to `redeploy.sh`, which builds both images from the
 > repository checkout and replaces any existing `tailbale` container. The script
 > forwards the runtime variables listed below (`HOST`, `PORT`, `COOKIE_SECURE`,
-> `CORS_ORIGINS`, `JWT_EXPIRY_HOURS`, and data/socket settings).
+> `CORS_ORIGINS`, `JWT_EXPIRY_HOURS`, the login rate-limit settings, and
+> data/socket settings).
 >
 > If you prefer Compose, set `HOST_DATA_DIR` explicitly and use
 > `HOST_DATA_DIR=/opt/tailbale/data docker compose -f docker-compose.prod.yml up -d --build`
@@ -200,6 +201,8 @@ It is not re-created per deploy, so it never accumulates. Remove it with
 | `HOST_DATA_DIR` | **Yes** for Compose/manual Docker; auto-detected by `deploy.sh` | repo `data` directory for `deploy.sh` | Absolute host-side path to the data directory. `deploy.sh` resolves relative values before passing them to Docker; Compose requires an explicit absolute value and uses it for both the `/data` bind mount and edge-container bind sources. |
 | `DATA_DIR` | No | `/data` | Data directory inside the container |
 | `JWT_EXPIRY_HOURS` | No | `24` | Session duration in hours |
+| `LOGIN_MAX_FAILURES` | No | `5` | Consecutive failed logins from a client before further attempts are rejected with HTTP 429 for the lockout window. A successful login resets the count. |
+| `LOGIN_LOCKOUT_SECONDS` | No | `60` | Lockout window (seconds) applied once `LOGIN_MAX_FAILURES` is hit. |
 | `COOKIE_SECURE` | No | `false` (auto on HTTPS) | Force the session cookie's `Secure` flag. Auto-enabled when the request arrives over HTTPS (incl. `X-Forwarded-Proto`); set `true` to force it always. |
 | `CORS_ORIGINS` | No | `(empty — CORS middleware disabled; same-origin only)` | Comma-separated allowed origins |
 | `PORT` | No | `8080` | Container listen port |

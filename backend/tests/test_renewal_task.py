@@ -1,12 +1,15 @@
 """Tests for the cert renewal background task."""
 
+import logging
 import os
 import threading
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 
+from app.certs.renewal_task import run_renewal_scan
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
@@ -666,6 +669,67 @@ class TestRunRenewalScan:
             if "Unexpected error processing cert" in r.getMessage()
         ]
         assert len(attempted) == 2
+
+    @patch("app.certs.renewal_task.process_service_cert")
+    @patch("app.database.SessionLocal")
+    def test_scan_hostname_snapshot_survives_concurrent_delete(
+        self, mock_session_cls, mock_process, db_session, db_engine, caplog
+    ):
+        """The scan snapshots each hostname BEFORE the loop. If a service is
+        deleted mid-scan and its processing then raises, ``rollback_with_lock``
+        expires the session; a failure-log path that read ``svc.hostname`` at
+        that point would lazy-load the vanished row, raise inside the ``except``,
+        and abort the WHOLE scan - skipping every remaining service until the
+        next daily run. The pre-loop snapshot makes the log use a plain string,
+        so the scan logs the real hostname and keeps going. No existing test
+        exercises a genuine mid-scan delete against a real session."""
+        # run_renewal_scan opens its own session_scope() session; bind it to the
+        # shared in-memory engine so it sees the rows committed below.
+        mock_session_cls.side_effect = sessionmaker(bind=db_engine)
+
+        _create_service(db_session)
+        _create_service(
+            db_session,
+            hostname="second.example.com",
+            edge_container_name="edge_second",
+            network_name="edge_net_second",
+            ts_hostname="edge-second",
+        )
+        db_session.commit()
+
+        def delete_then_fail(db, svc, **kwargs):
+            # A concurrent delete lands mid-scan. Remove the rows out-of-band
+            # (bulk DELETE, synchronize_session=False) so svc stays in the
+            # session's identity map UNAWARE its row is gone - exactly the state
+            # another session's delete leaves behind. After the scan's rollback
+            # expires svc, a bare svc.hostname read lazy-loads the vanished row
+            # and raises; only the pre-loop snapshot avoids that.
+            sid = svc.id
+            db.query(ServiceStatus).filter(
+                ServiceStatus.service_id == sid
+            ).delete(synchronize_session=False)
+            db.query(Service).filter(Service.id == sid).delete(
+                synchronize_session=False
+            )
+            db.commit()
+            raise RuntimeError("boom mid-processing")
+
+        mock_process.side_effect = delete_then_fail
+
+        with caplog.at_level(logging.ERROR, logger="app.certs.renewal_task"):
+            result = run_renewal_scan()  # must NOT raise despite the deletes
+
+        # Both services failed, none processed, but the scan did not wedge: each
+        # logged its real (snapshotted) hostname.
+        assert result == 0
+        logged = [
+            r.getMessage()
+            for r in caplog.records
+            if "Unexpected error processing cert" in r.getMessage()
+        ]
+        assert len(logged) == 2
+        assert any("testapp.example.com" in m for m in logged)
+        assert any("second.example.com" in m for m in logged)
 
 
 # ---------------------------------------------------------------------------

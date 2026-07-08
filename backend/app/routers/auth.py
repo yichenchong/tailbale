@@ -13,7 +13,6 @@ from app import settings_store
 from app.auth import (
     COOKIE_NAME,
     create_access_token,
-    decode_access_token,
     dummy_verify_password,
     get_current_user,
     hash_password,
@@ -337,18 +336,16 @@ def auth_status(request: Request, db: Session = Depends(get_db)):
     """Check setup and authentication status. Always accessible (no auth required)."""
     setup_complete = settings_store.get_setting(db, "setup_complete") == "true"
 
+    # Mirror the full get_current_user validation (signature/expiry, active user,
+    # AND the token_version revocation check) so a stale-version token — one
+    # issued before a password change on another device — is never reported as
+    # authenticated while every protected endpoint 401s it.
     authenticated = False
-    token = request.cookies.get(COOKIE_NAME)
-    if token:
-        user_id = decode_access_token(token)
-        if user_id:
-            user = (
-                db.query(User)
-                .filter(User.id == user_id, User.is_active.is_(True))
-                .first()
-            )
-            authenticated = user is not None
+    if request.cookies.get(COOKIE_NAME):
+        try:
+            get_current_user(request, db)
+            authenticated = True
+        except HTTPException:
+            pass
 
-    return AuthStatusResponse(
-        setup_complete=setup_complete, authenticated=authenticated
-    )
+    return AuthStatusResponse(setup_complete=setup_complete, authenticated=authenticated)

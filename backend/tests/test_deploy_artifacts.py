@@ -25,6 +25,8 @@ def test_redeploy_forwards_documented_runtime_env():
         "PORT",
         "JWT_EXPIRY_HOURS",
         "COOKIE_SECURE",
+        "LOGIN_MAX_FAILURES",
+        "LOGIN_LOCKOUT_SECONDS",
         "CORS_ORIGINS",
         "HOST_DATA_DIR",
         "DOCKER_SOCKET",
@@ -224,3 +226,30 @@ def test_root_dockerfile_pins_base_images_and_lego():
     assert m, "LEGO_VERSION must be pinned to an explicit x.y.z release"
     assert "github.com/go-acme/lego/releases/download" in dockerfile
     assert 'lego_v${LEGO_VERSION}_linux_${lego_arch}.tar.gz' in dockerfile
+
+def test_docker_deploy_paths_forward_login_rate_limit_settings():
+    """LOGIN_MAX_FAILURES / LOGIN_LOCKOUT_SECONDS are real config.py Settings
+    (int) fields documented in .env.example as tunable, yet were the only such
+    runtime knobs neither Docker deploy path forwarded — so a Docker deployer
+    could not actually override them and .env.example lied for the only
+    supported deploy modes. Guard that BOTH paths (redeploy.sh -e flags and
+    docker-compose.prod.yml environment) now forward them with the config.py
+    numeric default. The numeric default is required (not an empty-string
+    fallback like CORS_ORIGINS): these are int fields, and passing "" would
+    fail pydantic parsing and crash startup."""
+    config = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    redeploy = (ROOT / "redeploy.sh").read_text(encoding="utf-8")
+    compose = (ROOT / "docker-compose.prod.yml").read_text(encoding="utf-8")
+
+    for env_name, field in (
+        ("LOGIN_MAX_FAILURES", "login_max_failures"),
+        ("LOGIN_LOCKOUT_SECONDS", "login_lockout_seconds"),
+    ):
+        m = re.search(rf"^\s*{field}:\s*int\s*=\s*(\d+)", config, re.MULTILINE)
+        assert m, f"{field} default not found in config.py"
+        default = m.group(1)
+        # redeploy.sh: numeric-default local var + forwarded -e flag.
+        assert f'{env_name}="${{{env_name}:-{default}}}"' in redeploy
+        assert f'-e {env_name}="${{{env_name}}}"' in redeploy
+        # docker-compose.prod.yml: env entry with the same numeric default.
+        assert f"{env_name}=${{{env_name}:-{default}}}" in compose

@@ -1,13 +1,15 @@
 """Tests for the certificate manager module."""
 
 import functools
+import os
 import subprocess
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.certs.cert_manager import renew_cert
+from app.certs import cert_manager
+from app.certs.cert_manager import _atomic_copy_certs, _prune_old_generations, renew_cert
 
 
 def _fake_lego_proc(lines, returncode=0, wait_side_effect=None):
@@ -993,6 +995,87 @@ class TestAtomicCopyCerts:
             dest_dir / "current" / "fullchain.pem",
             dest_dir / "current" / "privkey.pem",
         ) is True
+
+    def test_failed_swap_removes_staging_symlink(self, tmp_path, monkeypatch):
+        """A pre-publish crash (os.replace raises) must remove the
+        ``.current.*.tmp`` staging symlink ``os.symlink`` already created, not
+        just the half-built generation. Otherwise every failed swap leaks a
+        staging symlink that only a LATER successful publish's prune reaps - and
+        if no publish ever succeeds they accumulate. The except path unlinks the
+        staging symlink before re-raising; this pins that cleanup, which
+        test_failed_swap_keeps_previous_current (asserts only the old current)
+        and test_first_issuance_failure_leaves_no_current (asserts only gen-*)
+        both leave unchecked."""
+        dest_dir = tmp_path / "dest"
+        src_cert = tmp_path / "c.pem"
+        src_key = tmp_path / "k.pem"
+        _write_cert_key_pair(src_cert, src_key)
+
+        # os.symlink(gen_name, tmp_link) succeeds; the swap onto ``current`` fails.
+        def boom(src, dst):
+            raise OSError("crash during swap")
+
+        monkeypatch.setattr(cert_manager.os, "replace", boom)
+
+        with pytest.raises(OSError, match="crash during swap"):
+            _atomic_copy_certs(src_cert, src_key, dest_dir)
+
+        names = [p.name for p in dest_dir.iterdir()]
+        # No staging symlink leaked and the half-built generation was discarded.
+        assert not any(n.startswith(".current.") and n.endswith(".tmp") for n in names)
+        assert [n for n in names if n.startswith("gen-")] == []
+        assert not (dest_dir / "current").exists()
+
+
+class TestPruneOldGenerations:
+    def test_reaps_superseded_gens_and_stale_staging_only(self, tmp_path):
+        """``_prune_old_generations`` reaps ONLY superseded ``gen-*`` dirs and
+        stale ``.current.*.tmp`` staging symlinks. The live ``current`` symlink,
+        the kept generation, and any UNRELATED entry (a plain file, a non-gen
+        directory) are left untouched - the guarantee the docstring makes but
+        no test pinned directly."""
+        dest_dir = tmp_path / "dest"
+        dest_dir.mkdir()
+
+        keep = "gen-keep"
+        keep_dir = dest_dir / keep
+        keep_dir.mkdir()
+        (keep_dir / "fullchain.pem").write_text("live")
+        os.symlink(keep, dest_dir / "current")
+
+        # Superseded generation + stale staging symlink: both must be reaped.
+        old_gen = dest_dir / "gen-old"
+        old_gen.mkdir()
+        (old_gen / "fullchain.pem").write_text("old")
+        stale = dest_dir / ".current.999.888.deadbeef.tmp"
+        os.symlink("gen-old", stale)
+
+        # Unrelated entries: a plain file and a non-gen directory must survive.
+        (dest_dir / "notes.txt").write_text("keepme")
+        unrelated_dir = dest_dir / "backup"
+        unrelated_dir.mkdir()
+        (unrelated_dir / "data").write_text("d")
+
+        _prune_old_generations(dest_dir, keep=keep)
+
+        # Superseded artifacts gone.
+        assert not old_gen.exists()
+        assert not stale.is_symlink()
+        # Live current + kept gen + unrelated entries all survive untouched.
+        assert (dest_dir / "current").is_symlink()
+        assert os.readlink(dest_dir / "current") == keep
+        assert keep_dir.is_dir()
+        assert (keep_dir / "fullchain.pem").read_text() == "live"
+        assert (dest_dir / "notes.txt").read_text() == "keepme"
+        assert unrelated_dir.is_dir()
+        assert (unrelated_dir / "data").read_text() == "d"
+
+    def test_missing_dest_dir_is_a_noop(self, tmp_path):
+        """A nonexistent dest dir (``iterdir`` raises OSError) is swallowed:
+        prune is best-effort and must never raise into the publish success
+        path. Pins the ``except OSError: return`` guard."""
+        # Must not raise.
+        _prune_old_generations(tmp_path / "does-not-exist", keep="gen-x")
 
 class TestGetCertExpiry:
     def test_returns_none_for_missing_file(self, tmp_path):

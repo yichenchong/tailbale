@@ -125,7 +125,7 @@ export function useExposeForm() {
   const normalizedHostnamePrefix = hostnamePrefix.trim()
   const parsedPort = Number(port)
   const fullHostname = `${normalizedHostnamePrefix}.${baseDomain}`
-  // Backend `_unique_slug` caps the base slug at 50 chars before any `-{n}`
+  // Backend `unique_slug` caps the base slug at 50 chars before any `-{n}`
   // collision suffix (`_MAX_BASE_SLUG_LEN`); mirror it so the preview matches the
   // server for long names too (strip a trailing dash from the cut, fall back).
   const edgeSlug = slugify(normalizedName).slice(0, 50).replace(/-+$/, "") || "service"

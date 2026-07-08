@@ -85,6 +85,25 @@ class TestPurgeOldEvents:
         assert purge_old_events(db_session, retention_days=4_000_000) == 0
         assert db_session.query(Event).count() == 2
 
+    def test_purge_is_idempotent_and_never_over_deletes(self, db_session):
+        # Idempotency + no over-delete: a first pass trims the out-of-window rows,
+        # and an immediate second pass over the already-trimmed table deletes
+        # nothing more and leaves every in-window survivor intact. A DELETE that
+        # mis-bound the cutoff (e.g. `<=` drift or a stale re-scan) would either
+        # report phantom deletes on the second pass or eat a survivor.
+        _add_event(db_session, age_days=40)
+        _add_event(db_session, age_days=50)
+        kept_id = _add_event(db_session, age_days=5)
+        db_session.commit()
+
+        first = purge_old_events(db_session, retention_days=30)
+        second = purge_old_events(db_session, retention_days=30)
+
+        assert first == 2
+        assert second == 0  # nothing left old enough on the repeat pass
+        remaining = {e.id for e in db_session.query(Event).all()}
+        assert remaining == {kept_id}
+
 
 class TestRunRetentionPurge:
     def test_reads_configured_window_from_settings(self, db_session, db_engine, monkeypatch):

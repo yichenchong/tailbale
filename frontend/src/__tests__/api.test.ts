@@ -109,6 +109,51 @@ describe("api client", () => {
     await expect(api.get("/bad")).rejects.toThrow("Could not read logs")
   })
 
+  it("joins an array of plain-string error details (FL2)", async () => {
+    // A handler may return `detail` as a bare string array rather than the
+    // {loc,msg} objects; each non-blank string is kept and joined, not dropped.
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: ["first problem", "second problem"] }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("first problem; second problem")
+  })
+
+  it("prefers the 'error' key when an object detail lacks msg/message (FL2)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({ detail: { error: "boom from error key" } }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("boom from error key")
+  })
+
+  it("falls back to the generic message for a detail object with no known key (FL2)", async () => {
+    // A well-formed body whose `detail` carries none of msg/message/error must
+    // not surface "[object Object]" or an empty message — it falls through to
+    // the status-coded generic message.
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 418,
+      json: () => Promise.resolve({ detail: { code: "teapot" } }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("Request failed: 418")
+  })
+
+  it("falls back to the generic message for an empty detail array (FL2)", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 422,
+      json: () => Promise.resolve({ detail: [] }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("Request failed: 422")
+  })
+
   it("throws generic message when response has no detail", async () => {
     global.fetch = vi.fn().mockResolvedValue({
       ok: false,
@@ -331,6 +376,18 @@ describe("api client", () => {
     expect(fetchMock.mock.calls[0][0]).toBe("/api/services/svc%201")
     await api.services.remove("svc 1", { cleanupDns: true })
     expect(fetchMock.mock.calls[1][0]).toBe("/api/services/svc%201?cleanup_dns=true")
+  })
+
+  it("services.renewCert appends force=true only when requested, encoding the id (FL1)", async () => {
+    // Parallels services.remove's cleanup_dns branch: the force flag is a real
+    // query-building fork, and the interpolated id segment must be encoded.
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, text: () => Promise.resolve("{}") })
+    global.fetch = fetchMock
+
+    await api.services.renewCert("svc 1")
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/services/svc%201/renew-cert")
+    await api.services.renewCert("svc 1", { force: true })
+    expect(fetchMock.mock.calls[1][0]).toBe("/api/services/svc%201/renew-cert?force=true")
   })
 
   it("returns undefined on a 204 No Content without reading the body", async () => {

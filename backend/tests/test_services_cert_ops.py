@@ -172,3 +172,42 @@ class TestRenewCertForceReportsFailureHonestly:
         assert data["last_failure"] == "DNS challenge failed"
         assert "failed" in data["message"].lower()
         assert "DNS challenge failed" in data["message"]
+
+
+class TestRenewCertNoCloudflareToken:
+    """An ENABLED service whose cert needs a real issue/renew but has NO Cloudflare
+    token must report honestly. process_service_cert cannot run the DNS-01 challenge
+    without the token — it logs a warning and returns WITHOUT issuing — so renew_cert
+    reports performed:False + a 'token not configured' message instead of the
+    dishonest 'Certificate processed' the frontend surfaces verbatim. Mirrors the
+    disabled-service honesty guard; every other test here supplies a token."""
+
+    @patch("app.certs.renewal_task.process_service_cert")
+    @patch("app.secrets.read_secret", return_value=None)
+    def test_missing_cf_token_reports_not_performed(self, mock_secret, mock_process, client):
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.post(f"/api/services/{svc_id}/renew-cert")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["performed"] is False
+        assert data["needs_force"] is False
+        assert "cloudflare" in data["message"].lower()
+        assert "token" in data["message"].lower()
+        # The pipeline is never entered without a token — no phantom "processed".
+        mock_process.assert_not_called()
+
+    @patch("app.certs.renewal_task.process_service_cert")
+    @patch("app.secrets.read_secret", return_value=None)
+    def test_missing_cf_token_still_not_performed_with_force(
+        self, mock_secret, mock_process, client
+    ):
+        # force skips the far-healthy refusal but must still hit the token guard:
+        # forcing cannot conjure a token, so it stays honest, not a phantom success.
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        resp = client.post(f"/api/services/{svc_id}/renew-cert?force=true")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["performed"] is False
+        assert "token" in data["message"].lower()
+        mock_process.assert_not_called()

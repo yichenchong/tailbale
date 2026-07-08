@@ -33,7 +33,8 @@ def detect_tailscale_ip(
 ) -> str | None:
     """Detect the Tailscale IPv4 address assigned to an edge container.
 
-    Retries with backoff since Tailscale auth can take a few seconds.
+    Retries with a fixed delay between attempts, since Tailscale auth can take a
+    few seconds to assign an address.
     Returns the IP string or None if detection fails.
     """
     with edge_container(service_id, edge_container_name, socket_path) as (_client, container):
