@@ -22,9 +22,10 @@ def as_utc(dt: datetime) -> datetime:
 def days_from_now(days: int) -> datetime | None:
     """Return an aware UTC datetime *days* days from now, or ``None`` on overflow.
 
-    ``cert_renewal_window_days`` / ``event_retention_days`` are only loosely
-    bounded at write (a legacy or directly-``set_setting``-ed huge value slips
-    past), and ``datetime.now(UTC) +/- timedelta(days=huge)`` raises
+    ``event_retention_days`` is only ``ge=1``-bounded at the API (no upper cap);
+    ``cert_renewal_window_days`` is ``le=10000``-capped there, but a legacy or
+    directly-``set_setting``-ed value bypasses both, so
+    ``datetime.now(UTC) +/- timedelta(days=huge)`` can still raise
     ``OverflowError`` past the representable date range. This centralizes the
     guard that was hand-written three times (``services/cert_ops`` far-healthy
     check, ``routers/dashboard`` cert-attention threshold, ``events/retention_task``

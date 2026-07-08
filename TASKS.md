@@ -1,6 +1,6 @@
 # tailBale — Implementation Task Plan
 
-**Stack:** Python 3.12 (FastAPI) + SQLAlchemy/SQLite | React + TypeScript (Vite 8) | lego (ACME) | Tailscale official base image + Caddy
+**Stack:** Python 3.14 (FastAPI) + SQLAlchemy/SQLite | React + TypeScript (Vite 8) | lego (ACME) | Tailscale official base image + Caddy
 
 Reference: [edge-orchestrator-detailed-spec.md](./edge-orchestrator-detailed-spec.md)
 
@@ -17,7 +17,7 @@ Reference: [edge-orchestrator-detailed-spec.md](./edge-orchestrator-detailed-spe
   - React Router with sidebar layout and 5 stub pages (Dashboard, Services, Discover, Events, Settings)
   - Path alias `@/` configured, Vite proxy to backend `/api`
 - [x] **0.3** Create orchestrator Dockerfile
-  - Multi-stage: Node 22 frontend build → Python 3.12 production with lego binary
+  - Multi-stage: Node 24 frontend build → Python 3.14 production with lego binary
   - Volume `/data`, port 8080, health check endpoint
 - [x] **0.4** Create `docker-compose.dev.yml` for local development
   - Backend with uvicorn reload, frontend with Vite dev server
@@ -313,14 +313,14 @@ Reference: [edge-orchestrator-detailed-spec.md](./edge-orchestrator-detailed-spe
 ## Milestone 9: Production Readiness — COMPLETE
 
 - [x] **9.1** Production orchestrator Docker image + config externalization
-  - Multi-stage Dockerfile: Node frontend build → Python 3.12 production with lego binary
+  - Multi-stage Dockerfile: Node frontend build → Python 3.14 production with lego binary
   - All secrets/configs externalized to env vars: `JWT_SECRET`, `COOKIE_SECURE`, `CORS_ORIGINS`, `PORT`, `DATA_DIR`, `DOCKER_SOCKET`
   - Health check uses `PORT` env var (no hardcoded port)
   - Static file serving: FastAPI serves React SPA with `/assets` mount and catch-all SPA fallback
   - `.env.example` expanded with all configurable settings and documentation
   - `docker-compose.prod.yml` for production deployment with required JWT_SECRET validation
   - `.gitignore` already covers `.env`, `data/`, `__pycache__/`, `node_modules/`
-  - Note: Alembic migrations deferred (create_all works well for SQLite v1; add Alembic when schema changes need versioning)
+  - Note: schema changes are applied as lightweight, inspection-guarded additive migrations in `database.py::run_migrations` (`ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`) — no migration framework (no Alembic)
 - [x] **9.2** Edge container Docker image (reviewed, finalized)
   - Based on `tailscale/tailscale:latest` with Caddy static binary
   - Entrypoint: tailscaled (userspace) → tailscale up → caddy run, with graceful shutdown
@@ -408,7 +408,7 @@ Reference: [edge-orchestrator-detailed-spec.md](./edge-orchestrator-detailed-spe
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Backend language | Python 3.12 (FastAPI) | User preference, good async support |
+| Backend language | Python 3.14 (FastAPI) | User preference, good async support |
 | Frontend | React 18 + TypeScript (Vite 8) | Wizard-style UI, large ecosystem |
 | CSS | Tailwind CSS 4 + shadcn/ui utilities | Utility-first, pre-built accessible components |
 | Database | SQLAlchemy 2.0 + SQLite | Single-file DB, good for self-hosted appdata |

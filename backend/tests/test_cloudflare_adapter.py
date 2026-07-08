@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.adapters.cloudflare_adapter import list_a_records
+
 
 def _cf_response(success=True, result=None, errors=None):
     """Create a mock httpx response matching Cloudflare API format."""
@@ -767,3 +769,18 @@ class TestListARecords:
         mock_get.return_value = _cf_response(result=[])
         list_a_records("cf-token", "z1", "app.example.com")
         assert mock_get.call_args.kwargs["params"]["per_page"] == CF_FIND_PER_PAGE
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_non_list_result_is_coerced_to_empty_list(self, mock_get):
+
+        # The list endpoint normally returns ``result`` as a JSON array, but a
+        # malformed/defensive shape (a bare object) must not crash the downstream
+        # ``sorted(...)`` with a cryptic AttributeError (sorting dict keys, then
+        # calling ``.get`` on a str). list_a_records coerces any non-list result
+        # to [] so callers get a clean "no records" answer.
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"success": True, "result": {"unexpected": "dict"}, "errors": []}
+        mock_get.return_value = resp
+
+        assert list_a_records("cf-token", "z1", "app.example.com") == []

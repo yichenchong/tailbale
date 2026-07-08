@@ -10,11 +10,15 @@ from app.health.health_checker import (
     CRITICAL_CHECKS,
     WARNING_CHECKS,
     aggregate_status,
+    check_live_dns,
     run_health_checks,
 )
+from app.health.probe import summarize_probe_output
 from app.models.dns_record import DnsRecord
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
+from app.secrets import CLOUDFLARE_TOKEN, write_secret
+from app.settings_store import set_setting
 
 
 def _create_service(db, **overrides):
@@ -814,6 +818,64 @@ class TestCheckDnsNonLive:
         # value still matches the live IP.
         assert _check_dns(db_session, svc, "100.64.0.1") == (False, True)
 
+
+class TestCheckLiveDns:
+    """Direct coverage of the live Cloudflare DNS subcheck, especially the
+    ``cf_ip_matches_tailscale`` None-guard: a live check with no current
+    Tailscale IP must never register a match against a record IP (a naive
+    ``record_ip == current_ip`` would let ``None == None`` become a false
+    positive). Exercised only indirectly before this."""
+
+    def _configure_cf(self, db):
+        set_setting(db, "cf_zone_id", "zone123")
+        db.commit()
+        write_secret(CLOUDFLARE_TOKEN, "cf-token")
+
+    def test_none_ips_do_not_false_match(self, db_session):
+        # Record exists in Cloudflare but carries no content, and there is no
+        # live Tailscale IP to compare against. The guard must short-circuit on
+        # the None current IP so the match is False, not a None==None true.
+        svc = _create_service(db_session)
+        self._configure_cf(db_session)
+        with patch(
+            "app.adapters.cloudflare_adapter.find_record",
+            return_value={"content": None},
+        ):
+            present, matches, extended = check_live_dns(db_session, svc, None)
+        assert present is True  # the record object exists in Cloudflare
+        assert matches is False  # no false match from None == None
+        assert extended["cf_record_exists"] is True
+        assert extended["cf_record_ip"] is None
+        assert extended["cf_ip_matches_tailscale"] is False
+
+    def test_record_ip_without_current_ip_is_not_a_match(self, db_session):
+        # The guard also covers the current-IP side: a real record IP with no
+        # live Tailscale IP to compare cannot be declared a match.
+        svc = _create_service(db_session)
+        self._configure_cf(db_session)
+        with patch(
+            "app.adapters.cloudflare_adapter.find_record",
+            return_value={"content": "100.64.0.1"},
+        ):
+            _present, matches, extended = check_live_dns(db_session, svc, None)
+        assert matches is False
+        assert extended["cf_record_ip"] == "100.64.0.1"
+        assert extended["cf_ip_matches_tailscale"] is False
+
+    def test_matching_ips_report_a_match(self, db_session):
+        # Positive control so the None-guard tests are not vacuous: equal IPs
+        # do register as a match.
+        svc = _create_service(db_session)
+        self._configure_cf(db_session)
+        with patch(
+            "app.adapters.cloudflare_adapter.find_record",
+            return_value={"content": "100.64.0.1"},
+        ):
+            present, matches, extended = check_live_dns(db_session, svc, "100.64.0.1")
+        assert present is True
+        assert matches is True
+        assert extended["cf_ip_matches_tailscale"] is True
+
 # ---------------------------------------------------------------------------
 # Cloudflare import fix
 # ---------------------------------------------------------------------------
@@ -1406,6 +1468,23 @@ class TestClassifyProbeResult:
 
         assert classify_probe_result(0, b"xx200") is True
         assert classify_probe_result(0, b"200xx") is False
+
+
+class TestSummarizeProbeOutput:
+    """summarize_probe_output normalizes and length-bounds probe output before it
+    goes into a log line. The truncation math (``limit - 3`` + ellipsis) is an
+    off-by-one-prone branch that was only reachable indirectly."""
+
+    def test_none_output_is_empty_string(self):
+        assert summarize_probe_output(None) == ""
+
+    def test_bytes_are_decoded_and_whitespace_collapsed(self):
+        assert summarize_probe_output(b"  curl:  (7)\n failed ") == "curl: (7) failed"
+
+    def test_long_output_is_truncated_with_ellipsis(self):
+        result = summarize_probe_output("x" * 500, limit=200)
+        assert len(result) == 200
+        assert result == "x" * 197 + "..."
 
 
 # ---------------------------------------------------------------------------

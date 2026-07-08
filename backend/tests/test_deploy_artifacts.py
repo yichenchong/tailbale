@@ -149,6 +149,20 @@ def test_env_example_docker_socket_marked_not_app_read():
     assert "does NOT read this from the environment" in env_example
 
 
+def test_env_example_documents_host_data_dir():
+    """HOST_DATA_DIR is a config.py Settings field (`host_data_dir`) AND the one
+    required env var for Compose/manual Docker deploys (host-side bind-mount
+    source resolution). Lesser deploy vars (BIND_ADDR/DOCKER_SOCKET) are already
+    documented, so the required one must be too — and it must stay a real config
+    field so the template does not drift from the settings the app reads."""
+    env_example = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+    config = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    assert "host_data_dir" in config, "host_data_dir field missing from config.py"
+    assert "HOST_DATA_DIR=" in env_example
+    # The note must convey it is the host-side path, not the in-container DATA_DIR.
+    assert "ON THE DOCKER HOST" in env_example
+
+
 def test_manual_testing_cert_expiry_threshold_matches_code():
     """MANUAL_TESTING's Services-list cert color legend must match the single
     source of truth (frontend CERT_SOON_DAYS) and never resurrect the stale

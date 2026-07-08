@@ -216,11 +216,12 @@ def issue_cert(
         hostname: FQDN to issue cert for
         email: ACME account email
         cloudflare_token: Cloudflare API token for DNS challenge
-        cert_dir: Target directory to write fullchain.pem + privkey.pem
+        cert_dir: Service cert directory; the pair is published under cert_dir/current/
         lego_dir: Working directory for lego (defaults to cert_dir parent / .lego)
 
     Returns:
-        Path to the cert directory containing fullchain.pem and privkey.pem
+        cert_dir, whose ``current`` symlink resolves to the published
+        fullchain.pem and privkey.pem (see ``_atomic_copy_certs``).
     """
     if lego_dir is None:
         lego_dir = cert_dir.parent / ".lego"

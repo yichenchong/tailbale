@@ -90,6 +90,46 @@ class TestRenewCertHealthyNeedsForce:
         mock_process.assert_called_once()
         assert mock_process.call_args.kwargs.get("force") is True
 
+class TestRenewCertFarFromExpiryWithFailureStillRenews:
+    """A cert far from expiry is refused (needs_force) ONLY when it is genuinely
+    healthy. A stale far-future expires_at left over from a prior success, paired
+    with a recorded ``last_failure`` (a later renewal that errored), must NOT be
+    treated as far-healthy: renew_cert gates far_healthy on ``last_failure is
+    None``, so such a cert proceeds to a real renewal on a plain request instead
+    of being wrongly refused with needs_force. Guards that subtle condition."""
+
+    @patch("app.certs.renewal_task.process_service_cert")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    def test_far_future_expiry_with_last_failure_renews_without_force(
+        self, mock_secret, mock_process, client, db_session
+    ):
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        # Far beyond the 30-day window (would be far_healthy) BUT carrying a prior
+        # failure — so far_healthy must be False and the pipeline must run.
+        cert = Certificate(service_id=svc_id, hostname="app.example.com")
+        cert.expires_at = (datetime.now(UTC) + timedelta(days=365)).replace(tzinfo=None)
+        cert.last_failure = "previous DNS-01 error"
+        db_session.add(cert)
+        db_session.commit()
+
+        # A successful renewal clears the stale failure.
+        def fake_process(db, svc, *, force):
+            c = db.get(Certificate, svc.id)
+            c.last_failure = None
+            c.expires_at = (datetime.now(UTC) + timedelta(days=90)).replace(tzinfo=None)
+            db.commit()
+
+        mock_process.side_effect = fake_process
+
+        resp = client.post(f"/api/services/{svc_id}/renew-cert")
+        assert resp.status_code == 200
+        data = resp.json()
+        # Must NOT refuse: a failed cert is not far-healthy even far from expiry.
+        assert data["needs_force"] is False
+        assert data["performed"] is True
+        assert data["success"] is True
+        mock_process.assert_called_once()
+
 
 class TestRenewCertForceReportsFailureHonestly:
     """When a forced renewal RUNS but the cert pipeline fails internally,

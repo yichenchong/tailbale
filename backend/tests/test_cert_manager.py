@@ -7,6 +7,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.certs.cert_manager import renew_cert
+
 
 def _fake_lego_proc(lines, returncode=0, wait_side_effect=None):
     """Build a fake Popen process for streaming _run_lego tests."""
@@ -411,6 +413,36 @@ class TestRenewCert:
         assert args[days_idx] == str(LEGO_FORCE_RENEW_DAYS)
         # The forced value must exceed any plausible cert lifetime (LE = 90 days).
         assert int(args[days_idx]) > 365
+
+    @patch("app.certs.cert_manager._run_lego")
+    def test_forced_in_place_renew_reports_not_fresh_issued(self, mock_lego, tmp_path):
+        """A FORCED renewal whose `lego renew` succeeds in place is still a
+        renewal, not a fallback fresh issue: renew_cert must return
+        fresh_issued=False so the caller labels the event cert_renewed rather
+        than cert_issued. Only the unforced success path and the two fallback
+        (True) paths pin the tuple today; the forced-success False return went
+        unasserted, so a regression mislabeling a forced in-place renewal as a
+        fresh issue would slip through."""
+
+        cert_dir = tmp_path / "certs" / "test.example.com"
+        lego_dir = tmp_path / "lego"
+        lego_certs = lego_dir / "certificates"
+        lego_certs.mkdir(parents=True)
+        cert_pem, key_pem = _real_pem_pair()
+        (lego_certs / "test.example.com.crt").write_bytes(cert_pem)
+        (lego_certs / "test.example.com.key").write_bytes(key_pem)
+
+        result = renew_cert(
+            "test.example.com", "a@b.com", "cf-token",
+            cert_dir, lego_dir, days=30, force=True,
+        )
+
+        # lego renew succeeded (no fallback), so this is an in-place renewal.
+        assert result == (cert_dir, False)
+        # A single `lego renew` ran; the fresh-issue (`run`) fallback never fired.
+        invoked = [c.args[0] for c in mock_lego.call_args_list]
+        assert any("renew" in a for a in invoked)
+        assert not any("run" in a for a in invoked)
 
     @patch("app.certs.cert_manager._run_lego")
     def test_unforced_renew_uses_supplied_days(self, mock_lego, tmp_path):

@@ -143,6 +143,25 @@ class TestPortAndNameValidators:
         with pytest.raises(ValidationError):
             _make_create(upstream_scheme="ftp")
 
+    @pytest.mark.parametrize(
+        "scheme",
+        [
+            "HTTP", "HTTPS",          # case must match exactly (config_renderer keys off `== "https"`)
+            "httpsX", "xhttp",        # no partial match: the pattern is start+end anchored
+            "http\n", "https\n",      # trailing newline must not slip past `$`
+            " http", "http ",         # no surrounding whitespace (scheme is not stripped)
+            "htt", "",                # too short / empty
+        ],
+    )
+    def test_scheme_pattern_is_anchored(self, scheme):
+        # Regression guard: upstream_scheme relies solely on Field(pattern=...)
+        # for containment. A value like "HTTPS"/"httpsX" that slipped past an
+        # unanchored pattern would silently route as plain HTTP in
+        # config_renderer (which branches on `upstream_scheme == "https"`),
+        # dialing HTTP to an HTTPS upstream. Only exact "http"/"https" pass.
+        with pytest.raises(ValidationError):
+            _make_create(upstream_scheme=scheme)
+
     def test_name_max_length_boundary(self):
         # max_length=128: 128 chars OK, 129 rejected. Strip (mode="before") runs
         # first, so surrounding whitespace does not count toward the limit.

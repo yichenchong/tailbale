@@ -204,3 +204,15 @@ class TestEdgeVersionDockerDownGracefulDegrade:
         assert data["edge_version"] is None
         assert data["up_to_date"] is False
         assert "orchestrator_version" in data
+
+
+class TestEdgeReadEndpointsNotFound:
+    """The read-only edge-version endpoint guards existence (via
+    get_service_for_edge_query) BEFORE the graceful Docker-error suppression, so
+    a nonexistent service is a clean 404 — never a 200 with a null version from
+    the suppress swallowing the ServiceNotFound."""
+
+    def test_edge_version_nonexistent_service_returns_404(self, client):
+        resp = client.get("/api/services/svc_nonexistent/edge-version")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Service not found"

@@ -47,6 +47,22 @@ class TestSettingsStore:
         # Non-overridden keys still have defaults
         assert result["acme_email"] == DEFAULTS["acme_email"]
 
+    def test_get_all_settings_excludes_internal_and_secret_keys(self, db_session):
+        # get_all_settings must return only DEFAULTS (public) keys. Internal
+        # rows stored in the same Setting table -- notably the password_salt
+        # bcrypt pepper and the setup_user_claimed bootstrap marker -- must
+        # never leak into the dict a caller might iterate/serialize.
+        set_setting(db_session, "password_salt", "super-secret-pepper")
+        set_setting(db_session, "setup_user_claimed", "true")
+        set_setting(db_session, "base_domain", "custom.com")
+        result = get_all_settings(db_session)
+        assert "password_salt" not in result
+        assert "setup_user_claimed" not in result
+        assert set(result) == set(DEFAULTS)
+        # Public keys still resolve (stored override + untouched default).
+        assert result["base_domain"] == "custom.com"
+        assert result["acme_email"] == DEFAULTS["acme_email"]
+
     def test_get_positive_int_setting_uses_stored_positive_value(self, db_session):
         set_setting(db_session, "reconcile_interval_seconds", "120")
         assert get_positive_int_setting(db_session, "reconcile_interval_seconds") == 120

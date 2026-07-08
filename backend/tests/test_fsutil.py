@@ -11,6 +11,7 @@ whole reason both variants coexist.
 """
 
 import os
+import stat
 
 import pytest
 
@@ -120,8 +121,6 @@ class TestAtomicWriteBytes:
             fsutil.atomic_write_bytes(target, b"secret")
         finally:
             os.umask(old_umask)
-        import stat
-
         assert stat.S_IMODE(target.stat().st_mode) == 0o600
 
     def test_leaves_no_temp_file_behind(self, tmp_path):
@@ -163,6 +162,21 @@ class TestAtomicWriteBytes:
         assert not target.exists()
         assert list(tmp_path.iterdir()) == []
 
+    def test_chmod_failure_still_publishes_the_write(self, tmp_path, monkeypatch):
+        # chmod is best-effort: an exotic/overlay FS that rejects it must not
+        # defeat the write. mkstemp already created the temp at 0o600, so the
+        # published file stays owner-only even though the requested (broader)
+        # mode was never applied.
+        target = tmp_path / "data.bin"
+
+        def _reject_chmod(*_a, **_k):
+            raise OSError("EPERM: filesystem rejects chmod")
+
+        monkeypatch.setattr(fsutil.os, "chmod", _reject_chmod)
+        fsutil.atomic_write_bytes(target, b"payload", mode=0o644)
+        assert target.read_bytes() == b"payload"
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+
 
 class TestAtomicWriteText:
     def test_round_trips_utf8(self, tmp_path):
@@ -171,8 +185,6 @@ class TestAtomicWriteText:
         assert target.read_text(encoding="utf-8") == "héllo"
 
     def test_honours_custom_mode(self, tmp_path):
-        import stat
-
         target = tmp_path / "note.txt"
         old_umask = os.umask(0)
         try:

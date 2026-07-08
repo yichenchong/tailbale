@@ -366,7 +366,8 @@ def _wait_for_running(
     """Wait until a container reaches the 'running' state.
 
     Docker rejects ``exec`` calls when a container is restarting or paused.
-    Returns True if the container is running, False on timeout.
+    Returns True once the container reaches 'running', or False if it enters a
+    terminal state (exited/dead/removing) or the timeout elapses first.
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

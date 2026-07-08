@@ -345,3 +345,11 @@ class TestHealthCheckFullDockerSocket:
         assert extended["cf_record_exists"] is True
         assert extended["cf_record_ip"] is None
         assert extended["cf_ip_matches_tailscale"] is False
+
+    def test_full_health_check_nonexistent_service_returns_404(self, client):
+        # Guards existence (get_service_for_edge_query) before any health work, so
+        # a missing service is a clean 404 rather than a 500 from probing a
+        # None service or a misleading empty 200 checks payload.
+        resp = client.post("/api/services/svc_nonexistent/health-check-full")
+        assert resp.status_code == 404
+        assert resp.json()["detail"] == "Service not found"

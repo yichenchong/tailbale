@@ -116,8 +116,17 @@ def get_runtime_paths(db: Session) -> dict[str, str]:
 
 
 def get_all_settings(db: Session) -> dict[str, str]:
-    """Get all settings as a dict, filling in defaults."""
+    """Get all public settings as a dict, filling in defaults.
+
+    Only keys present in :data:`DEFAULTS` are returned. Internal/secret rows
+    stored in the same ``Setting`` table (e.g. the ``password_salt`` bcrypt
+    pepper written by :func:`app.auth._get_or_create_salt`, or the
+    ``setup_user_claimed`` bootstrap marker) are deliberately excluded so a
+    caller that iterates this dict can never surface them. The sole consumer
+    (``routers/settings.py::_build_response``) already reads a fixed field
+    whitelist \u2014 all of whose keys are in ``DEFAULTS`` \u2014 so this narrowing is
+    behaviour-preserving for it while removing the latent secret-leak footgun
+    for any future consumer.
+    """
     stored = {row.key: row.value for row in db.query(Setting).all()}
-    result = dict(DEFAULTS)
-    result.update(stored)
-    return result
+    return {key: stored.get(key, default) for key, default in DEFAULTS.items()}

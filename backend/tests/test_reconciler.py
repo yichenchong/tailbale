@@ -11,6 +11,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
+from app.locks import _RECONCILE_LOCKS
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -302,6 +303,36 @@ class TestReconcileService:
         mock_dns.assert_not_called()
         status = db_session.get(ServiceStatus, svc.id)
         assert status.phase == "disabled"
+
+    @patch(_P_SECRET)
+    def test_deleted_service_while_locked_reports_deleted_and_forgets_lock(
+        self, mock_secret, db_session, tmp_data_dir
+    ):
+        """A service deleted after this reconcile acquired (or while it waited
+        for) its per-service reconcile lock resolves to None on the in-lock fresh
+        read: reconcile_service must report phase='deleted' AND drop the
+        registry entry that acquiring the lock re-created, so _RECONCILE_LOCKS
+        stays bounded by live + in-flight ids. Sibling of the disabled-branch
+        guard (above) and the health sweep's deleted-mid-sweep test, for the
+        reconcile path itself."""
+        mock_secret.return_value = "ts-key"
+        svc = _create_service(db_session)
+        service_id = svc.id
+        # Drop the row (and its cascaded status) so the in-lock fresh read
+        # resolves to None. Hand reconcile_service the pre-delete snapshot it
+        # would have loaded before the delete landed — only its .id is read
+        # before that fresh read fires.
+        db_session.delete(svc)
+        db_session.flush()
+        stale = Service(id=service_id)
+        assert service_id not in _RECONCILE_LOCKS  # clean precondition
+
+        result = reconcile_service(db_session, stale)
+
+        assert result["phase"] == "deleted"
+        assert result["error"] is None
+        # The registry entry that acquiring the lock re-created must be forgotten.
+        assert service_id not in _RECONCILE_LOCKS
 
     @patch(_P_HEALTH)
     @patch(_P_AGGREGATE)

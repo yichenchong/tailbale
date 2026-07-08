@@ -135,6 +135,7 @@ def _check_response(resp: httpx2.Response, action: str) -> dict:
         raise CloudflareAPIError(action, resp.text)
     return data
 
+
 def _request(
     method: str,
     path: str,

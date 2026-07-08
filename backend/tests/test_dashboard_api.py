@@ -50,10 +50,11 @@ class TestDashboardSummary:
 
     def test_service_without_status_counted_in_total_only(self, client, db_session):
         # A never-reconciled service (no ServiceStatus row) must still count
-        # toward `total` but contribute to none of the phase tallies. Exercises
-        # the `if not status: continue` guard in dashboard_summary, which is
-        # otherwise unreachable in tests because _create_service always adds a
-        # status row.
+        # toward `total` but contribute to none of the phase tallies. The
+        # phase_counts GROUP BY inner-joins ServiceStatus to Service, so a
+        # statusless service produces no aggregate row (lands in no bucket),
+        # while `total = db.query(Service).count()` still counts it. Built by
+        # hand because _create_service always adds a status row.
         svc = Service(
             name="NoStatus", upstream_container_id="abc123",
             upstream_container_name="nostatus", upstream_scheme="http",

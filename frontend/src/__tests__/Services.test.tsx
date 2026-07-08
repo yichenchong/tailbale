@@ -514,4 +514,30 @@ describe("Services page a11y contract (FPA)", () => {
     fireEvent.click(btn)
     expect(btn).toHaveAttribute("aria-expanded", "true")
   })
+
+  it("closes the row actions menu on Escape and restores focus to the trigger", async () => {
+    // The trigger declares aria-haspopup, so keyboard users need Escape to
+    // dismiss the popup and get focus back (WAI-ARIA menu-button pattern /
+    // WCAG 2.1.1). The backdrop only handles pointer dismissal.
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+    const btn = screen.getByLabelText("Actions")
+    btn.focus()
+    fireEvent.click(btn)
+    expect(screen.getByText("View Details")).toBeInTheDocument()
+    expect(btn).toHaveAttribute("aria-expanded", "true")
+
+    fireEvent.keyDown(document, { key: "Escape" })
+
+    expect(screen.queryByText("View Details")).not.toBeInTheDocument()
+    expect(btn).toHaveAttribute("aria-expanded", "false")
+    expect(document.activeElement).toBe(btn)
+  })
 })

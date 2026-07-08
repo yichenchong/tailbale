@@ -8,6 +8,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.auth import get_current_user
+from app.config import settings
 from app.database import Base, get_db
 
 
@@ -424,6 +425,31 @@ class TestLoginRateLimit:
             self._wrong(auth_client)
         resp = _setup_user(auth_client)
         assert resp.status_code == 200
+
+    def test_unknown_usernames_from_one_client_trip_lockout(self, auth_client):
+        """AS-T1: username spraying from a single client must still trip the
+        per-IP lockout. The unknown-user branch runs a dummy bcrypt verify AND
+        records the failure, so failures key on the client host (not the
+        username) and accumulate across *distinct nonexistent* usernames.
+        Guards against a refactor that skips ``_reject_failed_login`` on the
+        unknown-user path, which would silently disable brute-force protection
+        for username enumeration/spray."""
+
+        # No user is set up: every attempt hits the missing-user dummy-verify
+        # branch. Each uses a different nonexistent username.
+        threshold = settings.login_max_failures
+        for i in range(threshold - 1):
+            resp = auth_client.post(
+                "/api/auth/login",
+                json={"username": f"ghost-{i}", "password": "whatever-pw"},
+            )
+            assert resp.status_code == 401
+        locked = auth_client.post(
+            "/api/auth/login",
+            json={"username": f"ghost-{threshold}", "password": "whatever-pw"},
+        )
+        assert locked.status_code == 429
+        assert int(locked.headers["Retry-After"]) > 0
 
 
 class TestLoginRateLimiterEviction:

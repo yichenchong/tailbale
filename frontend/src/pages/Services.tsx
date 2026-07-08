@@ -15,6 +15,9 @@ export default function Services() {
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
   const [actionMsg, setActionMsg] = useState<string | null>(null)
   const actionMsgTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Remember the button that opened the row menu so Escape can restore focus to
+  // it (WAI-ARIA menu-button pattern — the trigger declares aria-haspopup).
+  const menuTriggerRef = useRef<HTMLButtonElement | null>(null)
 
   const fetcher = useCallback(() => api.services.list(), [])
   const { data, loading, error, refresh } = useResource(fetcher)
@@ -34,6 +37,21 @@ export default function Services() {
       if (actionMsgTimerRef.current !== null) clearTimeout(actionMsgTimerRef.current)
     }
   }, [])
+
+  // Close the open row menu on Escape and return focus to its trigger. The
+  // backdrop only handles pointer dismissal; keyboard users need a way out that
+  // matches the aria-haspopup contract (WCAG 2.1.1).
+  useEffect(() => {
+    if (openMenuId === null) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return
+      setOpenMenuId(null)
+      setMenuPos(null)
+      menuTriggerRef.current?.focus()
+    }
+    document.addEventListener("keydown", onKeyDown)
+    return () => document.removeEventListener("keydown", onKeyDown)
+  }, [openMenuId])
 
   const runAction = async (action: () => Promise<unknown>) => {
     setOpenMenuId(null)
@@ -165,9 +183,11 @@ export default function Services() {
                               setOpenMenuId(null)
                               setMenuPos(null)
                             } else {
-                              const rect = e.currentTarget.getBoundingClientRect()
+                              const btn = e.currentTarget
+                              const rect = btn.getBoundingClientRect()
                               setMenuPos({ top: rect.bottom + 4, left: rect.right - 176 })
                               setOpenMenuId(svc.id)
+                              menuTriggerRef.current = btn
                             }
                           }}
                           className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"

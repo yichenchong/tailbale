@@ -6,6 +6,9 @@ from unittest.mock import MagicMock, patch
 import docker.errors
 import pytest
 
+from app.edge.container_manager import _wait_for_running
+from app.edge.tailscale_ops import detect_tailscale_ip
+
 
 def _make_service(**overrides):
     """Create a mock Service object."""
@@ -914,6 +917,22 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.5"
 
+    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_returns_none_when_container_never_running(self, mock_find, mock_sleep):
+        """The container exists but never reaches 'running' (e.g. stuck exited):
+        the pre-loop guard bails with None and never exec's tailscale inside a
+        non-running container."""
+
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_find.return_value = mock_container
+
+        result = detect_tailscale_ip("svc_123", "edge_test", max_retries=2, retry_delay=0)
+
+        assert result is None
+        mock_container.exec_run.assert_not_called()
+
 
 # ---------------------------------------------------------------------------
 # Docker socket consistency across endpoints
@@ -1282,3 +1301,41 @@ class TestEdgeContainerLifecycle:
         ):
             _find_edge_container_for_use("svc_123", "edge_test")
         fake_client.close.assert_called_once()
+
+
+class TestWaitForRunning:
+    """Direct coverage of the exec-safety gate ``_wait_for_running``. Callers
+    (reload_caddy, detect_tailscale_ip) rely on it to never exec into a
+    non-running container; only the trivial 'running' path was exercised
+    indirectly, leaving the terminal-state fast-exit and the timeout path
+    (the actual guards) untested."""
+
+    def test_returns_true_when_running(self):
+
+        container = MagicMock()
+        container.status = "running"
+        assert _wait_for_running(container) is True
+        container.reload.assert_called_once()
+
+    @patch("app.edge.container_manager.time.sleep")
+    def test_returns_false_immediately_on_terminal_state(self, mock_sleep):
+        """A dead/exited/removing container will never reach running, so the
+        wait returns at once — no polling sleep, no blocking for the timeout."""
+
+        for terminal in ("exited", "dead", "removing"):
+            container = MagicMock()
+            container.status = terminal
+            assert _wait_for_running(container) is False
+        mock_sleep.assert_not_called()
+
+    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.container_manager.time.monotonic", side_effect=[0.0, 0.0, 40.0])
+    def test_returns_false_on_timeout_when_never_running(self, mock_mono, mock_sleep):
+        """A container stuck in a non-terminal, non-running state ('created'/
+        'restarting' that never settles) polls until the deadline, then False."""
+
+        container = MagicMock()
+        container.status = "created"
+        assert _wait_for_running(container, timeout=30.0) is False
+        mock_sleep.assert_called_once()
+        container.reload.assert_called_once()

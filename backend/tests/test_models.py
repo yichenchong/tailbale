@@ -1,5 +1,7 @@
 """Tests for SQLAlchemy models — verify table creation and basic CRUD."""
 
+from datetime import datetime
+
 from app.models import (
     Certificate,
     DnsRecord,
@@ -9,6 +11,7 @@ from app.models import (
     ServiceStatus,
     Setting,
 )
+from app.models.types import NaiveUTCDateTime
 
 
 class TestSettingModel:
@@ -513,6 +516,18 @@ class TestNaiveUTCDateTime:
         assert row.expires_at.tzinfo is None
         assert row.expires_at == aware.astimezone(UTC).replace(tzinfo=None)
         assert row.expires_at == datetime(2030, 1, 1, 12, 30)
+
+    def test_naive_and_none_pass_through_unchanged(self):
+        # The decorator's other half of the contract (docstring: "leaving naive
+        # datetimes and None untouched"). Guards against a "simplification" to an
+        # unconditional value.astimezone(UTC).replace(tzinfo=None): a naive value
+        # would then be silently shifted by the host's local offset (astimezone
+        # treats naive input as LOCAL time), and None would raise AttributeError.
+        col = NaiveUTCDateTime()
+        naive = datetime(2030, 1, 1, 12, 30)
+        assert col.process_bind_param(naive, None) == naive
+        assert col.process_bind_param(naive, None).tzinfo is None
+        assert col.process_bind_param(None, None) is None
 
 
 # ---------------------------------------------------------------------------

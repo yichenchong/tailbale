@@ -71,7 +71,7 @@ def read_secret(name: str) -> str | None:
     deployment states — a Docker bind-mount whose host source is missing
     materializes as an empty directory at the secret's path; a wrong-owner /
     wrong-mode mount denies traversal — and each must read as "unset" (False in
-    :func:`_secret_configured`), never crash the settings page or the
+    :func:`app.routers.settings._secret_configured`), never crash the settings page or the
     reconcile/renewal loops with an uncaught ``OSError``.
     """
     path = _secret_path(name)

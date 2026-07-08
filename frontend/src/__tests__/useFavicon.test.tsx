@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { render, act } from "@testing-library/react"
-import { setFavicon, useDynamicFavicon } from "@/lib/useFavicon"
+import { setFavicon, useDynamicFavicon, useStaticFavicon } from "@/lib/useFavicon"
 
 function iconHref(): string | null {
   return document.querySelector("link[rel='icon']")?.getAttribute("href") ?? null
@@ -185,5 +185,28 @@ describe("useDynamicFavicon", () => {
     })
     expect(fetchMock.mock.calls.length).toBe(callsAfter401)
     unmount()
+  })
+})
+
+describe("useStaticFavicon", () => {
+  function Probe({ href }: { href?: string }) {
+    useStaticFavicon(href)
+    return null
+  }
+
+  beforeEach(() => {
+    document.querySelectorAll("link[rel='icon']").forEach((el) => el.remove())
+  })
+
+  it("sets the healthy favicon on mount by default", () => {
+    render(<Probe />)
+    expect(iconHref()).toBe("/favicon-healthy.svg")
+  })
+
+  it("updates the favicon when the href prop changes", () => {
+    const { rerender } = render(<Probe href="/favicon-healthy.svg" />)
+    expect(iconHref()).toBe("/favicon-healthy.svg")
+    rerender(<Probe href="/favicon-error.svg" />)
+    expect(iconHref()).toBe("/favicon-error.svg")
   })
 })
