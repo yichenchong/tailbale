@@ -5,6 +5,7 @@ import {
   setConfiguredTimezone,
   _resetTimezoneCache,
   formatDateTime,
+  formatDateTimeOrDash,
   parseBackendDate,
 } from "@/lib/useTimezone"
 
@@ -126,6 +127,21 @@ describe("backend timestamp parsing (non-UTC host)", () => {
       // And it must be the formatted UTC string, not the raw ISO fallback.
       expect(withBadOption).not.toBe("2026-06-21T12:00:00.000Z")
     })
+  })
+})
+
+describe("formatDateTimeOrDash", () => {
+  it("returns the em-dash placeholder for a missing value", () => {
+    expect(formatDateTimeOrDash(null, "UTC")).toBe("\u2014")
+    expect(formatDateTimeOrDash(undefined, "UTC")).toBe("\u2014")
+    expect(formatDateTimeOrDash("", "UTC")).toBe("\u2014")
+  })
+
+  it("formats a valid date identically to formatDateTime", () => {
+    const iso = "2026-06-21T12:00:00Z"
+    expect(formatDateTimeOrDash(iso, "America/New_York")).toBe(
+      formatDateTime(iso, "America/New_York"),
+    )
   })
 })
 

@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.adapters.cloudflare_adapter import list_a_records
+from app.adapters.cloudflare_adapter import CloudflareAPIError, list_a_records, verify_zone
 
 
 def _cf_response(success=True, result=None, errors=None):
@@ -784,3 +784,34 @@ class TestListARecords:
         mock_get.return_value = resp
 
         assert list_a_records("cf-token", "z1", "app.example.com") == []
+
+
+class TestVerifyZone:
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_returns_zone_name_on_success(self, mock_get):
+        mock_get.return_value = _cf_response(result={"name": "example.com"})
+
+        assert verify_zone("cf-token", "z1") == "example.com"
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_missing_name_falls_back_to_unknown(self, mock_get):
+        mock_get.return_value = _cf_response(result={})
+
+        assert verify_zone("cf-token", "z1") == "unknown"
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_issues_get_to_zone_path(self, mock_get):
+        mock_get.return_value = _cf_response(result={"name": "example.com"})
+
+        verify_zone("cf-token", "z1")
+
+        assert mock_get.call_args.args[0].endswith("/zones/z1")
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_raises_on_api_error(self, mock_get):
+        mock_get.return_value = _cf_response(
+            success=False, errors=[{"code": 9109, "message": "Invalid API token"}]
+        )
+
+        with pytest.raises(CloudflareAPIError, match="Invalid API token"):
+            verify_zone("bad-token", "z1")

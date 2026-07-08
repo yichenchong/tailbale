@@ -909,6 +909,62 @@ class TestChangePassword:
         assert resp.status_code == 422
 
 
+class TestSessionInvalidationOnPasswordChange:
+    """AS3: change-password bumps the user's token_version, so every JWT minted
+    with the previous version is rejected, while the acting session is handed a
+    fresh cookie carrying the new version (so the admin is not logged out)."""
+
+    def _login(self, client, password="securepassword123"):
+        _setup_user(client, password=password)
+        client.cookies.clear()
+        login_resp = client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": password},
+        )
+        _set_auth_cookie(client, login_resp.cookies["access_token"])
+        return login_resp
+
+    def test_login_token_authenticates(self, auth_client):
+        # A freshly issued login token carries the current version and works.
+        login_resp = self._login(auth_client)
+        _set_auth_cookie(auth_client, login_resp.cookies["access_token"])
+        assert auth_client.get("/api/auth/me").status_code == 200
+
+    def test_old_token_rejected_after_password_change(self, auth_client):
+        login_resp = self._login(auth_client)
+        old_token = login_resp.cookies["access_token"]
+
+        # Sanity: the token authenticates before the password change.
+        _set_auth_cookie(auth_client, old_token)
+        assert auth_client.get("/api/auth/me").status_code == 200
+
+        change = auth_client.post(
+            "/api/auth/change-password",
+            json={"current_password": "securepassword123", "new_password": "newpassword456"},
+        )
+        assert change.status_code == 200
+
+        # The token minted before the change now carries a stale version and is
+        # rejected, even though it has not expired.
+        _set_auth_cookie(auth_client, old_token)
+        resp = auth_client.get("/api/auth/me")
+        assert resp.status_code == 401
+
+    def test_change_password_reissues_valid_cookie(self, auth_client):
+        self._login(auth_client)
+        change = auth_client.post(
+            "/api/auth/change-password",
+            json={"current_password": "securepassword123", "new_password": "newpassword456"},
+        )
+        assert change.status_code == 200
+        # A fresh access_token cookie is set on the response ...
+        new_token = change.cookies["access_token"]
+        assert new_token
+        # ... and it authenticates the current session under the bumped version.
+        _set_auth_cookie(auth_client, new_token)
+        assert auth_client.get("/api/auth/me").status_code == 200
+
+
 class TestProtectedEndpoints:
     """Verify that protected routers return 401 without auth."""
 

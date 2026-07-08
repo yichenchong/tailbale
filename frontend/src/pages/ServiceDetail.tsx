@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type EdgeVersionResponse } from "@/lib/api"
 import { useResource } from "@/lib/useResource"
 import { useTimezone, formatDate } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
 import { phaseStyle } from "@/lib/statusStyles"
+import { useTransientMessage } from "@/lib/useTransientMessage"
 import { Loader2, ArrowLeft } from "lucide-react"
 import { useServiceDetail } from "@/components/service/useServiceDetail"
 import { ServiceEditForm } from "@/components/service/ServiceEditForm"
@@ -27,10 +28,9 @@ export default function ServiceDetail() {
     edit,
   } = useServiceDetail(id)
 
-  const [actionMsg, setActionMsg] = useState<string | null>(null)
+  const { message, show, clear } = useTransientMessage(4000)
   const [edgeVersion, setEdgeVersion] = useState<EdgeVersionResponse | null>(null)
   const [updatingEdge, setUpdatingEdge] = useState(false)
-  const actionMsgTimerRef = useRef<number | null>(null)
   const edgeVersionFetcher = useCallback(() => api.services.edgeVersion(id ?? ""), [id])
   const { refresh: refreshEdgeVersion } = useResource(edgeVersionFetcher, {
     immediate: false,
@@ -38,26 +38,6 @@ export default function ServiceDetail() {
       setEdgeVersion(v)
     },
   })
-
-  const clearActionMsgTimer = useCallback(() => {
-    if (actionMsgTimerRef.current !== null) {
-      clearTimeout(actionMsgTimerRef.current)
-      actionMsgTimerRef.current = null
-    }
-  }, [])
-
-  const showActionMsg = useCallback((msg: string) => {
-    clearActionMsgTimer()
-    setActionMsg(msg)
-    actionMsgTimerRef.current = window.setTimeout(() => {
-      setActionMsg(null)
-      actionMsgTimerRef.current = null
-    }, 4000)
-  }, [clearActionMsgTimer])
-
-  // Soft-clear the visible message without touching the pending clear timer, so a
-  // newer message's timer stays the one authority over when it disappears.
-  const clearActionMsg = useCallback(() => setActionMsg(null), [])
 
   const loadEdgeVersion = useCallback(async () => {
     setEdgeVersion(null)
@@ -71,24 +51,21 @@ export default function ServiceDetail() {
       await loadEdgeVersion()
       void refresh({ background: true })
     } catch (e) {
-      showActionMsg(errorMessage(e))
+      show(errorMessage(e))
     } finally {
       setUpdatingEdge(false)
     }
-  }, [id, loadEdgeVersion, refresh, showActionMsg])
+  }, [id, loadEdgeVersion, refresh, show])
 
   // Clear the transient action message when navigating between services (confirm
   // dialogs + the edit form reset via ServiceActions' key remount / the hook).
   useEffect(() => {
-    clearActionMsgTimer()
-    setActionMsg(null)
-  }, [id, clearActionMsgTimer])
+    clear()
+  }, [id, clear])
 
   useEffect(() => {
     void loadEdgeVersion()
   }, [loadEdgeVersion])
-
-  useEffect(() => () => clearActionMsgTimer(), [clearActionMsgTimer])
 
   if (loading) {
     return (
@@ -143,8 +120,8 @@ export default function ServiceDetail() {
       {error && (
         <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}
-      {actionMsg && (
-        <div role="status" className="mt-4 rounded-md bg-yellow-50 px-4 py-3 text-sm text-yellow-800">{actionMsg}</div>
+      {message && (
+        <div role="status" className="mt-4 rounded-md bg-yellow-50 px-4 py-3 text-sm text-yellow-800">{message}</div>
       )}
 
       {/* Info / Edit / Runtime */}
@@ -169,8 +146,8 @@ export default function ServiceDetail() {
         updatingEdge={updatingEdge}
         onUpdateEdge={handleUpdateEdge}
         refresh={refresh}
-        showActionMsg={showActionMsg}
-        clearActionMsg={clearActionMsg}
+        showActionMsg={show}
+        clearActionMsg={clear}
         applyServiceUpdate={applyServiceUpdate}
         setError={setError}
       />

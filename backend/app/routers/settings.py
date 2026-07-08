@@ -4,14 +4,14 @@ from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import docker
-import httpx2
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app import settings_store
+from app.adapters.cloudflare_adapter import CloudflareAPIError, verify_zone
 from app.auth import get_current_user
 from app.database import commit_with_lock, db_write_section, get_db
-from app.edge.docker_client import docker_client, resolve_socket
 from app.locks import lifecycle_lock
 from app.models.event import Event
 from app.models.job import Job
@@ -39,14 +39,14 @@ from app.secrets import (
     TAILSCALE_AUTH_KEY,
     TS_APIKEY_PREFIX,
     TS_AUTHKEY_PREFIX,
+    cloudflare_credentials,
     delete_secret,
     is_valid_ts_api_key,
     is_valid_ts_auth_key,
     read_secret,
     write_secret,
 )
-from app.services import UpstreamApiError, delete_service_record
-from app.settings_store import get_all_settings, get_positive_int_setting, get_setting, set_setting
+from app.services import UpstreamApiError, delete_service_record, docker_client, resolve_socket
 from app.setup_state import missing_setup_requirements
 
 logger = logging.getLogger(__name__)
@@ -59,7 +59,7 @@ router = APIRouter(
 
 
 def _require_developer_mode(db: Session) -> None:
-    if get_setting(db, "developer_mode") != "true":
+    if settings_store.get_setting(db, "developer_mode") != "true":
         raise HTTPException(status_code=403, detail="Developer Mode must be enabled first")
 
 
@@ -87,7 +87,7 @@ def _str_field(key: str) -> _Field:
 
 
 def _int_field(key: str) -> _Field:
-    return _Field(key, str, lambda db, s: get_positive_int_setting(db, key))
+    return _Field(key, str, lambda db, s: settings_store.get_positive_int_setting(db, key))
 
 
 def _bool_field(key: str) -> _Field:
@@ -139,11 +139,11 @@ def apply_section(db: Session, body: BaseModel, fieldmap: dict[str, _Field]) -> 
     for attr, field in fieldmap.items():
         value = getattr(body, attr)
         if value is not None:
-            set_setting(db, field.key, field.serialize(value))
+            settings_store.set_setting(db, field.key, field.serialize(value))
 
 
 def _build_response(db: Session) -> AllSettingsResponse:
-    s = get_all_settings(db)
+    s = settings_store.get_all_settings(db)
 
     def read_section(fieldmap: dict[str, _Field]) -> dict[str, Any]:
         return {attr: field.read(db, s) for attr, field in fieldmap.items()}
@@ -170,7 +170,7 @@ def _reject_base_domain_change_with_services(db: Session, new_domain: str) -> No
     # and a legacy deployment predating that validator can hold a mixed-case
     # stored value. Comparing raw would flag an unchanged domain as a change and
     # 409-lock the whole /general section on upgrade.
-    if new_domain.lower() == get_setting(db, "base_domain").lower():
+    if new_domain.lower() == settings_store.get_setting(db, "base_domain").lower():
         return
 
     if db.query(Service.id).first() is not None:
@@ -272,7 +272,7 @@ def mark_setup_complete(db: Session = Depends(get_db)):
             detail="Setup incomplete: configure " + ", ".join(missing) + " first",
         )
     with db_write_section(db):
-        set_setting(db, "setup_complete", "true")
+        settings_store.set_setting(db, "setup_complete", "true")
         commit_with_lock(db)
     return _build_response(db)
 
@@ -326,7 +326,7 @@ def get_main_container_logs(
 def reset_setup_complete(db: Session = Depends(get_db)):
     _require_developer_mode(db)
     with db_write_section(db):
-        set_setting(db, "setup_complete", "false")
+        settings_store.set_setting(db, "setup_complete", "false")
         commit_with_lock(db)
     return {"success": True, "message": "setup_complete reset"}
 
@@ -377,37 +377,24 @@ def test_docker(db: Session = Depends(get_db)):
 
 
 @router.post("/test/cloudflare", response_model=ConnectionTestResult)
-async def test_cloudflare(db: Session = Depends(get_db)):
-    token = read_secret(CLOUDFLARE_TOKEN)
+def test_cloudflare(db: Session = Depends(get_db)):
+    token, zone_id = cloudflare_credentials(db)
     if not token:
         return ConnectionTestResult(success=False, message="Cloudflare token not configured")
-
-    zone_id = get_setting(db, "cf_zone_id")
     if not zone_id:
         return ConnectionTestResult(success=False, message="Cloudflare zone ID not configured")
 
+    # Sync endpoint: FastAPI runs it in a threadpool, so the blocking adapter call
+    # (verify_zone -> httpx2.get) never stalls the event loop while preserving the
+    # ~10s cap and the exact ConnectionTestResult messages the settings API asserts.
     try:
-        async with httpx2.AsyncClient() as client:
-            resp = await client.get(
-                f"https://api.cloudflare.com/client/v4/zones/{zone_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            data = resp.json()
-            if not isinstance(data, dict):
-                return ConnectionTestResult(
-                    success=False, message="Unexpected Cloudflare API response"
-                )
-            if data.get("success"):
-                result = data.get("result") or {}
-                zone_name = result.get("name") or "unknown"
-                return ConnectionTestResult(
-                    success=True, message=f"Connected to zone: {zone_name}"
-                )
-            errors = data.get("errors") or []
-            first = errors[0] if errors and isinstance(errors[0], dict) else {}
-            msg = first.get("message") or "Unknown error"
-            return ConnectionTestResult(success=False, message=msg)
+        zone_name = verify_zone(token, zone_id, timeout=10)
+        return ConnectionTestResult(success=True, message=f"Connected to zone: {zone_name}")
+    except CloudflareAPIError as e:
+        errors = e.errors or []
+        first = errors[0] if errors and isinstance(errors[0], dict) else {}
+        msg = first.get("message") or "Unexpected Cloudflare API response"
+        return ConnectionTestResult(success=False, message=msg)
     except Exception as e:
         return ConnectionTestResult(success=False, message=str(e))
 

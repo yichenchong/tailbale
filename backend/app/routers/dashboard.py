@@ -6,14 +6,14 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app import settings_store
 from app.auth import get_current_user
 from app.database import get_db
+from app.events.serialization import event_to_dict
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
-from app.routers.events import _event_to_dict
-from app.settings_store import get_positive_int_setting
 from app.timeutil import days_from_now, iso
 
 router = APIRouter(
@@ -48,7 +48,7 @@ def dashboard_summary(db: Session = Depends(get_db)):
     # ``cert_renewal_window_days`` setting the reconciler/renewal/health paths
     # use, so the dashboard attention list tracks the actual renewal policy
     # instead of a hard-coded 30 days.
-    window_days = get_positive_int_setting(db, "cert_renewal_window_days")
+    window_days = settings_store.get_positive_int_setting(db, "cert_renewal_window_days")
     # cert_renewal_window_days is only loosely bounded at write, so a
     # legacy/directly-set huge value would push the horizon past the maximum
     # representable date. days_from_now returns None on that OverflowError; an
@@ -110,11 +110,11 @@ def dashboard_summary(db: Session = Depends(get_db)):
         },
         "expiring_certs": expiring_certs,
         "recent_errors": [
-            _event_to_dict(e, fields=("id", "service_id", "kind", "message", "created_at"))
+            event_to_dict(e, fields=("id", "service_id", "kind", "message", "created_at"))
             for e in recent_errors
         ],
         "recent_events": [
-            _event_to_dict(
+            event_to_dict(
                 e, fields=("id", "service_id", "kind", "level", "message", "created_at")
             )
             for e in recent_events

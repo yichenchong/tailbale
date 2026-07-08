@@ -14,19 +14,20 @@ from typing import TYPE_CHECKING
 
 import docker
 
-# ``cloudflare_adapter`` and ``cert_manager`` are imported as modules (not their
-# symbols) so tests — here and in the reconciler suite, which drives the health
-# path through ``reconcile_service`` — can patch ``find_record`` / ``get_cert_expiry``
-# at the source module and have the patch take effect: the attribute is resolved
-# at call time rather than bound once at import.
-from app import secrets
+# ``settings_store``, ``cloudflare_adapter`` and ``cert_manager`` are imported as
+# modules (not their symbols) so tests — here and in the reconciler suite, which
+# drives the health path through ``reconcile_service`` — can patch
+# ``get_positive_int_setting`` / ``find_record`` / ``get_cert_expiry`` at the source
+# module and have the patch take effect: the attribute is resolved at call time
+# rather than bound once at import.
+from app import settings_store
 from app.adapters import cloudflare_adapter
 from app.certs import cert_manager
 from app.edge.container_manager import find_edge_container
 from app.edge.docker_client import close_client, connect
 from app.health import probe
 from app.models.dns_record import DnsRecord
-from app.settings_store import get_positive_int_setting, get_setting
+from app.secrets import cloudflare_credentials
 from app.timeutil import days_from_now
 
 if TYPE_CHECKING:
@@ -172,8 +173,7 @@ def check_live_dns(
     db_record_present, db_matches_ip = _check_stored_dns(db, service, current_ip)
 
     try:
-        cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
-        zone_id = get_setting(db, "cf_zone_id")
+        cf_token, zone_id = cloudflare_credentials(db)
     except Exception:
         logger.info("Could not load Cloudflare settings for DNS health", exc_info=True)
         return db_record_present, db_matches_ip, {}
@@ -303,7 +303,7 @@ def _cert_not_expiring_subcheck(db: Session, service: Service, certs_dir: str | 
     with ``_check_cert_not_expiring`` returning ``False`` on any internal error.
     """
     try:
-        window = get_positive_int_setting(db, "cert_renewal_window_days")
+        window = settings_store.get_positive_int_setting(db, "cert_renewal_window_days")
     except ValueError:
         logger.warning(
             "cert_renewal_window_days is corrupt; reporting cert_not_expiring as "

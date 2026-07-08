@@ -392,3 +392,98 @@ describe("SettingsPage connection-test scoping", () => {
     expect(screen.queryByText("Zone rejected")).not.toBeInTheDocument()
   })
 })
+
+describe("SettingsPage tablist keyboard navigation (FB-A11Y1)", () => {
+  it("moves the active tab with Arrow keys, Home, and End", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    const generalTab = screen.getByRole("tab", { name: "General" })
+    expect(generalTab).toHaveAttribute("aria-selected", "true")
+
+    // ArrowRight advances selection + focus to the next tab and swaps panel content.
+    fireEvent.keyDown(generalTab, { key: "ArrowRight" })
+    const cloudflareTab = screen.getByRole("tab", { name: "Cloudflare" })
+    expect(cloudflareTab).toHaveAttribute("aria-selected", "true")
+    expect(generalTab).toHaveAttribute("aria-selected", "false")
+    expect(cloudflareTab).toHaveFocus()
+    expect(screen.getByText("Zone ID")).toBeInTheDocument()
+
+    // ArrowLeft steps back.
+    fireEvent.keyDown(cloudflareTab, { key: "ArrowLeft" })
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true")
+    expect(screen.getByRole("tab", { name: "General" })).toHaveFocus()
+
+    // End jumps to the last visible tab, Home back to the first.
+    fireEvent.keyDown(screen.getByRole("tab", { name: "General" }), { key: "End" })
+    const accountTab = screen.getByRole("tab", { name: "Account" })
+    expect(accountTab).toHaveAttribute("aria-selected", "true")
+    expect(accountTab).toHaveFocus()
+
+    fireEvent.keyDown(accountTab, { key: "Home" })
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true")
+
+    // ArrowLeft from the first tab wraps to the last.
+    fireEvent.keyDown(screen.getByRole("tab", { name: "General" }), { key: "ArrowLeft" })
+    expect(screen.getByRole("tab", { name: "Account" })).toHaveAttribute("aria-selected", "true")
+  })
+
+  it("uses a roving tabindex so only the active tab is tabbable", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("tabindex", "0")
+    expect(screen.getByRole("tab", { name: "Cloudflare" })).toHaveAttribute("tabindex", "-1")
+
+    fireEvent.click(screen.getByRole("tab", { name: "Cloudflare" }))
+    expect(screen.getByRole("tab", { name: "Cloudflare" })).toHaveAttribute("tabindex", "0")
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("tabindex", "-1")
+  })
+
+  it("wires aria-controls and aria-labelledby between tabs and the panel", async () => {
+    vi.stubGlobal("fetch", mockFetch())
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    const generalTab = screen.getByRole("tab", { name: "General" })
+    const panel = screen.getByRole("tabpanel")
+    const controls = generalTab.getAttribute("aria-controls")
+    expect(controls).toBeTruthy()
+    expect(generalTab.id).toBeTruthy()
+    expect(panel).toHaveAttribute("id", controls)
+    expect(panel).toHaveAttribute("aria-labelledby", generalTab.id)
+
+    // Every tab points at the one shared panel.
+    for (const t of screen.getAllByRole("tab")) {
+      expect(t).toHaveAttribute("aria-controls", controls as string)
+    }
+
+    // The panel's label follows the active tab after switching.
+    fireEvent.click(screen.getByRole("tab", { name: "Docker" }))
+    const dockerTab = screen.getByRole("tab", { name: "Docker" })
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", dockerTab.id)
+  })
+})

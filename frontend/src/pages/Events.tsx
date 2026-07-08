@@ -1,6 +1,6 @@
 import { Fragment, useCallback, useEffect, useState } from "react"
 import { api, type EventItem, type EventsResponse } from "@/lib/api"
-import { useTimezone, formatDateTime } from "@/lib/useTimezone"
+import { useTimezone, formatDateTimeOrDash } from "@/lib/useTimezone"
 import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
 import { cn, errorMessage } from "@/lib/utils"
 import { eventLevelStyle } from "@/lib/statusStyles"
@@ -71,10 +71,6 @@ export default function Events() {
   }, [searchInput, setOffset])
 
   const tz = useTimezone()
-  function fmtTime(iso: string | null) {
-    if (!iso) return "—"
-    return formatDateTime(iso, tz)
-  }
 
   const toggleEventDetails = (evt: EventItem) => {
     if (!evt.details) return
@@ -174,7 +170,7 @@ export default function Events() {
                           ) : null}
                         </td>
                         <td className="px-3 py-2 whitespace-nowrap text-zinc-500 font-mono text-xs">
-                          {fmtTime(evt.created_at)}
+                          {formatDateTimeOrDash(evt.created_at, tz)}
                         </td>
                         <td className="px-3 py-2">
                           <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", eventLevelStyle(evt.level))}>

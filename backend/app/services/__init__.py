@@ -8,6 +8,10 @@ service layer raises domain exceptions from :mod:`app.services.errors` (AR7),
 never FastAPI ``HTTPException``; :mod:`app.main` maps them to HTTP.
 """
 
+# Docker seam re-exported so routers depend on the services facade
+# (routers -> services -> edge) rather than importing app.edge.docker_client
+# directly (AR9).
+from app.edge.docker_client import docker_client, resolve_socket
 from app.services.cert_ops import renew_cert
 from app.services.crud import (
     create_service,
@@ -53,6 +57,7 @@ __all__ = [
     "create_service",
     "delete_service_record",
     "disable_service",
+    "docker_client",
     "full_health_check",
     "get_edge_logs",
     "get_edge_version",
@@ -60,6 +65,7 @@ __all__ = [
     "recreate_edge",
     "reload_caddy_action",
     "renew_cert",
+    "resolve_socket",
     "restart_edge_action",
     "to_response",
     "update_edge_job",

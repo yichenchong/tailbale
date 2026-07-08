@@ -134,6 +134,7 @@ def run_migrations(target_engine: Engine | None = None) -> None:
         ("service_status", "probe_retry_at", "DATETIME"),
         ("service_status", "probe_retry_attempt", "INTEGER"),
         ("service_status", "last_probe_at", "DATETIME"),
+        ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
     ]
     # (table, index name, column) — index name matches SQLAlchemy's default
     # ``ix_<table>_<column>`` so it is a no-op on databases already created

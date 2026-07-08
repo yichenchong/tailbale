@@ -341,3 +341,22 @@ def delete_a_record(
         action="delete_a_record",
     )
     logger.info("Deleted DNS record %s", record_id)
+
+
+def verify_zone(token: str, zone_id: str, *, timeout: float = CF_DEFAULT_TIMEOUT) -> str:
+    """Fetch ``/zones/{zone_id}`` to verify credentials and return the zone name.
+
+    Uses the shared request/response machinery, so a bad token or unknown zone
+    surfaces as a :class:`CloudflareAPIError` exactly like the record operations.
+    Returns the zone ``name``, falling back to ``"unknown"`` when Cloudflare reports
+    success but omits the name (keeps the /test/cloudflare success message stable).
+    """
+    data = _request(
+        "GET",
+        f"/zones/{zone_id}",
+        token=token,
+        timeout=timeout,
+        action="verify_zone",
+    )
+    result = data.get("result") or {}
+    return result.get("name") or "unknown"

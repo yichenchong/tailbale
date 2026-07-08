@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import settings_store
 from app.auth import (
     COOKIE_NAME,
     create_access_token,
@@ -30,7 +31,6 @@ from app.schemas.auth import (
     SetupUserRequest,
     UserResponse,
 )
-from app.settings_store import get_setting
 from app.setup_state import compute_setup_progress
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -238,7 +238,7 @@ def login(body: LoginRequest, request: Request, response: Response, db: Session 
     # Successful login: clear any accumulated failure streak so the suite's
     # (mostly successful) logins never trip the limiter.
     _login_rate_limiter.record_success(client)
-    token = create_access_token(user.id)
+    token = create_access_token(user.id, user.token_version)
     _set_cookie(response, token, request)
     return LoginResponse(user=_user_response(user))
 
@@ -257,15 +257,25 @@ def me(user: User = Depends(get_current_user)):
 @router.post("/change-password")
 def change_password(
     body: ChangePasswordRequest,
+    request: Request,
+    response: Response,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change the current user's password. Requires the current password."""
+    """Change the current user's password. Requires the current password.
+
+    Bumping ``token_version`` invalidates every JWT issued under the old version;
+    a fresh cookie is re-issued for the acting session so the admin performing
+    the change stays logged in while all other outstanding tokens are rejected.
+    """
     if not verify_password(body.current_password, user.password_hash, db):
         raise HTTPException(status_code=401, detail="Current password is incorrect")
     with db_write_section(db):
         user.password_hash = hash_password(body.new_password, db)
+        user.token_version += 1
         commit_with_lock(db)
+    token = create_access_token(user.id, user.token_version)
+    _set_cookie(response, token, request)
     return {"ok": True}
 
 
@@ -304,7 +314,7 @@ def setup_user(
         db.add(user)
         commit_with_lock(db)
 
-    token = create_access_token(user.id)
+    token = create_access_token(user.id, user.token_version)
     _set_cookie(response, token, request)
     return LoginResponse(user=_user_response(user))
 
@@ -317,7 +327,7 @@ def setup_progress(request: Request, db: Session = Depends(get_db)):
     incomplete step. After setup is complete, require a valid session because
     the progress payload discloses installation/configuration state.
     """
-    if get_setting(db, "setup_complete") == "true":
+    if settings_store.get_setting(db, "setup_complete") == "true":
         get_current_user(request, db)
     return compute_setup_progress(db)
 
@@ -325,7 +335,7 @@ def setup_progress(request: Request, db: Session = Depends(get_db)):
 @router.get("/status", response_model=AuthStatusResponse)
 def auth_status(request: Request, db: Session = Depends(get_db)):
     """Check setup and authentication status. Always accessible (no auth required)."""
-    setup_complete = get_setting(db, "setup_complete") == "true"
+    setup_complete = settings_store.get_setting(db, "setup_complete") == "true"
 
     authenticated = False
     token = request.cookies.get(COOKIE_NAME)

@@ -2,6 +2,9 @@
 
 from datetime import datetime
 
+from sqlalchemy import create_engine, inspect, text
+
+from app.database import run_migrations
 from app.models import (
     Certificate,
     DnsRecord,
@@ -683,3 +686,44 @@ class TestDashboardHotPathIndexBackfill:
         run_migrations(eng)
         assert "expires_at" in self._indexed_columns(eng, "certificates")
         assert "phase" in self._indexed_columns(eng, "service_status")
+
+
+# ---------------------------------------------------------------------------
+# AS3: run_migrations must BACK-FILL the token_version column onto a legacy DB
+# (create_all only adds it to fresh DBs). Without it, upgraded installs cannot
+# invalidate outstanding JWTs on password change.
+# ---------------------------------------------------------------------------
+
+
+class TestTokenVersionMigration:
+    """A users table created before token_version existed must gain the column
+    (idempotently) via run_migrations."""
+
+    @staticmethod
+    def _legacy_engine():
+        # Build the users table WITHOUT token_version, mirroring a pre-AS3 DB.
+        eng = create_engine("sqlite:///:memory:")
+        with eng.begin() as conn:
+            conn.execute(text(
+                "CREATE TABLE users (id TEXT PRIMARY KEY, username TEXT, "
+                "password_hash TEXT, display_name TEXT, role TEXT, is_active BOOLEAN, "
+                "created_at DATETIME, updated_at DATETIME)"
+            ))
+        return eng
+
+    @staticmethod
+    def _columns(eng, table):
+        return {c["name"] for c in inspect(eng).get_columns(table)}
+
+    def test_backfills_token_version_column(self):
+        eng = self._legacy_engine()
+        assert "token_version" not in self._columns(eng, "users")
+        run_migrations(eng)
+        assert "token_version" in self._columns(eng, "users")
+
+    def test_backfill_is_idempotent(self):
+        eng = self._legacy_engine()
+        run_migrations(eng)
+        # A second pass must not raise (has-column guard) and leave it intact.
+        run_migrations(eng)
+        assert "token_version" in self._columns(eng, "users")

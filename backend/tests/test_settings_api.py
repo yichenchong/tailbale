@@ -346,7 +346,7 @@ class TestUpdateCloudflare:
         def _boom(*args, **kwargs):
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(settings_router, "set_setting", _boom)
+        monkeypatch.setattr(settings_router.settings_store, "set_setting", _boom)
         with pytest.raises(RuntimeError):
             client.put(
                 "/api/settings/cloudflare",
@@ -417,7 +417,7 @@ class TestUpdateTailscale:
         def _boom(*args, **kwargs):
             raise RuntimeError("db down")
 
-        monkeypatch.setattr(settings_router, "set_setting", _boom)
+        monkeypatch.setattr(settings_router.settings_store, "set_setting", _boom)
         with pytest.raises(RuntimeError):
             client.put(
                 "/api/settings/tailscale",
@@ -861,23 +861,19 @@ class TestConnectionTests:
 
     @staticmethod
     def _patch_cloudflare(monkeypatch, payload):
+        # The endpoint now verifies the zone through the Cloudflare adapter
+        # (verify_zone -> _request -> httpx2.get), so mock the adapter's sync GET
+        # and let the real response-checking machinery translate the payload.
         class _FakeCFResp:
+            status_code = 200
+            text = ""
+
             def json(self):
                 return payload
 
-        class _FakeCFClient:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *exc):
-                return False
-
-            async def get(self, *args, **kwargs):
-                return _FakeCFResp()
-
         monkeypatch.setattr(
-            "app.routers.settings.httpx2.AsyncClient",
-            lambda *a, **k: _FakeCFClient(),
+            "app.adapters.cloudflare_adapter.httpx2.get",
+            lambda *a, **k: _FakeCFResp(),
         )
 
     def _configure_cloudflare(self, client):

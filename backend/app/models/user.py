@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, String, func
+from sqlalchemy import Boolean, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -21,6 +21,9 @@ class User(Base):
     display_name: Mapped[str | None] = mapped_column(String, nullable=True)
     role: Mapped[str] = mapped_column(String, default="admin")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         NaiveUTCDateTime, server_default=func.now(), nullable=False

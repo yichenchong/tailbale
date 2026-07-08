@@ -732,7 +732,7 @@ class TestReloadCaddy(_ConnectStubMixin):
             reload_caddy("svc_123", "edge_test")
         mock_container.exec_run.assert_not_called()
 
-    @patch("app.edge.caddy_admin.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_retries_when_container_is_restarting(self, mock_find, mock_sleep):
         from app.edge.caddy_admin import reload_caddy
@@ -754,7 +754,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         assert mock_container.exec_run.call_count == 2
         mock_container.reload.assert_called()
 
-    @patch("app.edge.caddy_admin.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_raises_when_container_never_stabilizes(self, mock_find, mock_sleep):
         import pytest
@@ -772,7 +772,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         with pytest.raises(RuntimeError, match="never reached a stable running container"):
             reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
 
-    @patch("app.edge.caddy_admin.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_real_reload_failure_after_transient_conflict_is_not_masked(
         self, mock_find, mock_sleep
@@ -802,7 +802,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         assert "invalid directive" in message
         assert "never reached a stable running container" not in message
 
-    @patch("app.edge.caddy_admin.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_retries_when_admin_api_connection_refused(self, mock_find, mock_sleep):
         """Caddy's admin API (:2019) may not be up immediately after the
@@ -827,7 +827,7 @@ class TestReloadCaddy(_ConnectStubMixin):
 
 
 class TestDetectTailscaleIp(_ConnectStubMixin):
-    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_detects_ip_via_tailscale_ip(self, mock_find, mock_sleep):
         from app.edge.tailscale_ops import detect_tailscale_ip
@@ -840,7 +840,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.1"
 
-    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_detects_ip_via_status_json(self, mock_find, mock_sleep):
         from app.edge.tailscale_ops import detect_tailscale_ip
@@ -862,7 +862,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.2"
 
-    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_retries_on_failure(self, mock_find, mock_sleep):
         from app.edge.tailscale_ops import detect_tailscale_ip
@@ -879,7 +879,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=2, retry_delay=0)
         assert result == "100.64.0.3"
 
-    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_none_after_max_retries(self, mock_find, mock_sleep):
         from app.edge.tailscale_ops import detect_tailscale_ip
@@ -900,7 +900,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result is None
 
-    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_ignores_non_tailscale_ips(self, mock_find, mock_sleep):
         from app.edge.tailscale_ops import detect_tailscale_ip
@@ -917,7 +917,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=1)
         assert result == "100.64.0.5"
 
-    @patch("app.edge.tailscale_ops.time.sleep")
+    @patch("app.backoff.time.sleep")
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_none_when_container_never_running(self, mock_find, mock_sleep):
         """The container exists but never reaches 'running' (e.g. stuck exited):

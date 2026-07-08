@@ -175,7 +175,7 @@ describe("Services page", () => {
       "/services/svc%2Fabc%20123",
     )
     fireEvent.click(screen.getByLabelText("Actions"))
-    expect(screen.getByRole("link", { name: "View Details" })).toHaveAttribute(
+    expect(screen.getByRole("menuitem", { name: "View Details" })).toHaveAttribute(
       "href",
       "/services/svc%2Fabc%20123",
     )

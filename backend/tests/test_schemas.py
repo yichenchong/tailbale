@@ -208,6 +208,26 @@ class TestBaseDomainNormalization:
         with pytest.raises(ValidationError):
             GeneralSettingsUpdate(base_domain="not a domain!")
 
+    def test_rejects_over_253_chars(self):
+        # 254 chars total, every label within the 63-char limit → isolates the
+        # total-length check (MS4).
+        domain = ".".join(["a" * 63, "a" * 63, "a" * 63, "a" * 62])
+        assert len(domain) == 254
+        with pytest.raises(ValidationError):
+            GeneralSettingsUpdate(base_domain=domain)
+
+    def test_rejects_label_over_63_chars(self):
+        # A single 64-char label, total well under 253 → isolates the per-label
+        # length check (MS4).
+        with pytest.raises(ValidationError):
+            GeneralSettingsUpdate(base_domain="a" * 64 + ".com")
+
+    def test_accepts_max_length_valid_domain(self):
+        # 253 chars total with every label ≤ 63 → the boundary-valid case (MS4).
+        domain = ".".join(["a" * 63, "a" * 63, "a" * 63, "a" * 61])
+        assert len(domain) == 253
+        assert GeneralSettingsUpdate(base_domain=domain).base_domain == domain
+
 
 class TestGeneralSettingsIntValidation:
     _INT_FIELDS = (

@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react"
 import { api, type OrphanJob, type JobsResponse } from "@/lib/api"
-import { useTimezone, formatDateTime } from "@/lib/useTimezone"
+import { useTimezone, formatDateTimeOrDash } from "@/lib/useTimezone"
 import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-react"
 import { cn, errorMessage } from "@/lib/utils"
 import { jobStatusStyle } from "@/lib/statusStyles"
@@ -85,11 +85,6 @@ export default function OrphanDns() {
     }
   }
 
-  function fmtTime(iso: string | null) {
-    if (!iso) return "\u2014"
-    return formatDateTime(iso, tz)
-  }
-
   return (
     <div>
       <h1 className="text-2xl font-bold">Orphaned DNS Records</h1>
@@ -163,7 +158,7 @@ export default function OrphanDns() {
                         {d?.value && (
                           <div>IP: <code className="rounded bg-zinc-100 px-1 py-0.5 text-xs">{d.value}</code></div>
                         )}
-                        <div>Created: {fmtTime(job.created_at)}</div>
+                        <div>Created: {formatDateTimeOrDash(job.created_at, tz)}</div>
                         {job.message && (
                           <div className="mt-1 text-xs text-zinc-400">{job.message}</div>
                         )}

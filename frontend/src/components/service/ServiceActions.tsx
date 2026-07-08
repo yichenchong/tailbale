@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react"
-import { useNavigate } from "react-router-dom"
+import { useEffect, useRef } from "react"
 import {
   Loader2,
   Trash2,
@@ -13,15 +12,16 @@ import {
   AlertTriangle,
 } from "lucide-react"
 import { api, type ServiceItem, type EdgeVersionResponse } from "@/lib/api"
-import { errorMessage } from "@/lib/utils"
+import { useServiceActions } from "./useServiceActions"
 
 /**
  * Lifecycle action bar + confirmation flows for a service: enable/disable (with a
  * confirm before disabling), reload/restart/recreate edge, update-edge, certificate
  * renewal (with the force-renew modal), re-run reconcile, and delete (with the DNS
  * -cleanup confirm). Success/soft-failure feedback goes through the page-level
- * `showActionMsg`; delete/toggle hard errors go through `setError`. Confirmation
- * state lives here and is reset on navigation by remounting via a `key={id}`.
+ * `showActionMsg`; delete/toggle hard errors go through `setError`. Mutation,
+ * confirmation, and loading state live in `useServiceActions`; this component is
+ * remounted (resetting that state) on navigation via a `key={id}`.
  */
 export function ServiceActions({
   service,
@@ -46,14 +46,35 @@ export function ServiceActions({
   applyServiceUpdate: (svc: ServiceItem) => void
   setError: (value: string | null) => void
 }) {
-  const navigate = useNavigate()
-  const [deleting, setDeleting] = useState(false)
-  const [confirmDelete, setConfirmDelete] = useState(false)
-  const [cleanupDns, setCleanupDns] = useState(true)
-  const [confirmDisable, setConfirmDisable] = useState(false)
-  const [confirmRecreate, setConfirmRecreate] = useState(false)
-  const [confirmForceRenew, setConfirmForceRenew] = useState(false)
-  const [renewing, setRenewing] = useState(false)
+  const {
+    deleting,
+    confirmDelete,
+    setConfirmDelete,
+    cleanupDns,
+    setCleanupDns,
+    confirmDisable,
+    setConfirmDisable,
+    confirmRecreate,
+    setConfirmRecreate,
+    confirmForceRenew,
+    setConfirmForceRenew,
+    renewing,
+    runAction,
+    handleToggleEnabled,
+    handleRecreateEdge,
+    handleDelete,
+    handleRenewCert,
+    handleForceRenewCert,
+  } = useServiceActions({
+    service,
+    id,
+    refresh,
+    showActionMsg,
+    clearActionMsg,
+    applyServiceUpdate,
+    setError,
+  })
+
   const dialogRef = useRef<HTMLDivElement | null>(null)
   const forceRenewTriggerRef = useRef<HTMLElement | null>(null)
 
@@ -92,85 +113,7 @@ export function ServiceActions({
       document.removeEventListener("keydown", onKeyDown)
       forceRenewTriggerRef.current?.focus()
     }
-  }, [confirmForceRenew])
-
-  const runAction = async (action: () => Promise<unknown>) => {
-    clearActionMsg()
-    try {
-      await action()
-      void refresh({ background: true })
-    } catch (e) {
-      showActionMsg(errorMessage(e))
-    }
-  }
-
-  const handleToggleEnabled = async () => {
-    setConfirmDisable(false)
-    try {
-      if (service.enabled) {
-        const svc = await api.services.disable(id ?? "")
-        applyServiceUpdate(svc)
-      } else {
-        const svc = await api.services.update(id ?? "", { enabled: true })
-        applyServiceUpdate(svc)
-      }
-    } catch (e) {
-      setError(errorMessage(e))
-    }
-  }
-
-  const handleRecreateEdge = async () => {
-    setConfirmRecreate(false)
-    runAction(() => api.services.recreateEdge(id ?? ""))
-  }
-
-  const handleDelete = async () => {
-    setDeleting(true)
-    try {
-      await api.services.remove(id ?? "", { cleanupDns })
-      navigate("/services")
-    } catch (e) {
-      setError(errorMessage(e))
-      setDeleting(false)
-    }
-  }
-
-  // Renew the certificate. The first call never forces: the backend refuses
-  // (needs_force) when the cert is healthy and far from expiry, and we surface a
-  // modal so the user can deliberately opt into a rate-limited Let's Encrypt
-  // hit. Near/expired certs renew straight away with no popup.
-  const handleRenewCert = async () => {
-    clearActionMsg()
-    setRenewing(true)
-    try {
-      const r = await api.services.renewCert(id ?? "")
-      if (r.needs_force) {
-        setConfirmForceRenew(true)
-      } else {
-        showActionMsg(r.message)
-        void refresh({ background: true })
-      }
-    } catch (e) {
-      showActionMsg(errorMessage(e))
-    } finally {
-      setRenewing(false)
-    }
-  }
-
-  const handleForceRenewCert = async () => {
-    setConfirmForceRenew(false)
-    clearActionMsg()
-    setRenewing(true)
-    try {
-      const r = await api.services.renewCert(id ?? "", { force: true })
-      showActionMsg(r.message)
-      void refresh({ background: true })
-    } catch (e) {
-      showActionMsg(errorMessage(e))
-    } finally {
-      setRenewing(false)
-    }
-  }
+  }, [confirmForceRenew, setConfirmForceRenew])
 
   return (
     <>

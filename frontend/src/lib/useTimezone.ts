@@ -103,6 +103,18 @@ export function formatDateTime(
   }
 }
 
+/**
+ * Like formatDateTime but renders the em-dash placeholder for a missing value,
+ * so table cells show "—" instead of a blank gap when a timestamp is null.
+ */
+export function formatDateTimeOrDash(
+  date: string | Date | null | undefined,
+  timezone: string,
+): string {
+  if (!date) return "—"
+  return formatDateTime(date, timezone)
+}
+
 /** Format a date (no time) using the configured timezone. */
 export function formatDate(
   date: string | Date | null | undefined,

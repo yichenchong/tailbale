@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 
+from app.backoff import retry_sync
 from app.edge.container_manager import _wait_for_running, edge_container
 
 logger = logging.getLogger(__name__)
@@ -48,14 +48,12 @@ def detect_tailscale_ip(
             )
             return None
 
-        for attempt in range(max_retries):
+        for attempt in retry_sync(max_retries, retry_delay):
             try:
                 # Re-check state on each retry — container may have restarted.
                 container.reload()
                 if container.status != "running" and not _wait_for_running(container, timeout=10.0):
                     logger.info("Container %s left running state on attempt %d", edge_container_name, attempt + 1)
-                    if attempt < max_retries - 1:
-                        time.sleep(retry_delay)
                     continue
 
                 ts_env = {"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"}
@@ -83,9 +81,6 @@ def detect_tailscale_ip(
                             return addr
             except Exception:
                 logger.info("Attempt %d failed for %s", attempt + 1, edge_container_name, exc_info=True)
-
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
 
         logger.warning("Failed to detect Tailscale IP for %s after %d attempts", edge_container_name, max_retries)
         return None

@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from app.backoff import capped_exponential, run_periodic
+from app.backoff import capped_exponential, retry_sync, run_periodic
 
 
 class TestCappedExponential:
@@ -201,3 +201,42 @@ class TestRunPeriodic:
             )
         # No on_error -> error backoff defaults to interval_fn().
         assert sleeps == [3, 5]
+
+
+class TestRetrySync:
+    """Synchronous bounded-retry primitive: yields 0..attempts-1, sleeping
+    `delay` BETWEEN attempts only (no trailing sleep). time.sleep is patched
+    out so these assert timing/count without real waits."""
+
+    def test_yields_all_indices_and_sleeps_between_attempts(self, monkeypatch):
+        sleeps: list[float] = []
+        monkeypatch.setattr("app.backoff.time.sleep", lambda d: sleeps.append(d))
+        assert list(retry_sync(3, 0.5)) == [0, 1, 2]
+        # attempts-1 sleeps, one between each consecutive pair, none trailing.
+        assert sleeps == [0.5, 0.5]
+
+    def test_single_attempt_never_sleeps(self, monkeypatch):
+        sleeps: list[float] = []
+        monkeypatch.setattr("app.backoff.time.sleep", lambda d: sleeps.append(d))
+        assert list(retry_sync(1, 9.0)) == [0]
+        assert sleeps == []
+
+    def test_zero_or_negative_attempts_yield_nothing_and_never_sleep(self, monkeypatch):
+        sleeps: list[float] = []
+        monkeypatch.setattr("app.backoff.time.sleep", lambda d: sleeps.append(d))
+        assert list(retry_sync(0, 1.0)) == []
+        assert list(retry_sync(-3, 1.0)) == []
+        assert sleeps == []
+
+    def test_break_out_of_loop_abandons_remaining_sleeps(self, monkeypatch):
+        # Sleep happens BEFORE attempts 1..n-1; a caller that breaks after the
+        # first attempt abandons the generator, so no further sleep runs.
+        sleeps: list[float] = []
+        monkeypatch.setattr("app.backoff.time.sleep", lambda d: sleeps.append(d))
+        seen: list[int] = []
+        for attempt in retry_sync(5, 1.0):
+            seen.append(attempt)
+            if attempt == 0:
+                break
+        assert seen == [0]
+        assert sleeps == []

@@ -8,6 +8,9 @@ import logging
 import stat
 from pathlib import Path
 
+from sqlalchemy.orm import Session
+
+from app import settings_store
 from app.config import settings
 from app.fsutil import atomic_write_text
 
@@ -106,3 +109,14 @@ def delete_secret(name: str) -> bool:
     except OSError as exc:
         logger.warning("Secret path %s is not a deletable file (%s); not deleting", name, exc)
         return False
+
+
+def cloudflare_credentials(db: Session) -> tuple[str | None, str | None]:
+    """Return the ``(token, zone_id)`` Cloudflare credential pair.
+
+    The API token is a stored secret (:data:`CLOUDFLARE_TOKEN`); the zone id is
+    its non-secret companion setting (``cf_zone_id``). Both are required for any
+    Cloudflare DNS operation, so this is the single place that answers "are CF
+    credentials configured?" — callers guard on ``token and zone_id`` (AR1).
+    """
+    return read_secret(CLOUDFLARE_TOKEN), settings_store.get_setting(db, "cf_zone_id")

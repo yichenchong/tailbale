@@ -12,10 +12,10 @@ this module — the dependency stays one-way and acyclic).
 from __future__ import annotations
 
 import logging
-import time
 
 import docker
 
+from app.backoff import retry_sync
 from app.edge.container_manager import _wait_for_running, edge_container
 
 logger = logging.getLogger(__name__)
@@ -57,7 +57,7 @@ def reload_caddy(
         last_result = ""
         last_error: docker.errors.APIError | None = None
         exit_code: int | None = None
-        for attempt in range(max_retries):
+        for attempt in retry_sync(max_retries, retry_delay):
             try:
                 exit_code, output = container.exec_run(
                     "caddy reload --config /etc/caddy/Caddyfile --force"
@@ -73,7 +73,6 @@ def reload_caddy(
                         edge_container_name, attempt + 1, max_retries,
                     )
                     _wait_for_running(container, timeout=10.0, poll_interval=0.5)
-                    time.sleep(retry_delay)
                     continue
                 break
 
@@ -92,7 +91,6 @@ def reload_caddy(
                     "Caddy admin API not ready in %s, retrying (%d/%d)...",
                     edge_container_name, attempt + 1, max_retries,
                 )
-                time.sleep(retry_delay)
                 continue
 
             # Any other failure — don't retry

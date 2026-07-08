@@ -5,7 +5,6 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app import secrets
 from app.adapters import cloudflare_adapter
 from app.adapters.cloudflare_adapter import CF_CLEANUP_TIMEOUT
 from app.auth import get_current_user
@@ -14,8 +13,8 @@ from app.events.event_emitter import emit_event
 from app.locks import lifecycle_then_global_ops
 from app.models.dns_record import DnsRecord
 from app.models.job import Job
+from app.secrets import cloudflare_credentials
 from app.services.errors import UpstreamApiError
-from app.settings_store import get_setting
 from app.timeutil import iso
 
 logger = logging.getLogger(__name__)
@@ -120,9 +119,8 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
         )
     record_id = details.get("record_id")
     hostname = details.get("hostname")
-    zone_id = details.get("zone_id")
-    if not zone_id:
-        zone_id = get_setting(db, "cf_zone_id")
+    cf_token, cf_zone_id = cloudflare_credentials(db)
+    zone_id = details.get("zone_id") or cf_zone_id
 
     if not record_id or not hostname or not zone_id:
         raise HTTPException(
@@ -130,7 +128,6 @@ def retry_orphan_cleanup(job_id: str, db: Session = Depends(get_db)):
             detail="Job is missing record_id, hostname, or zone_id in details",
         )
 
-    cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
     if not cf_token:
         raise HTTPException(
             status_code=422,

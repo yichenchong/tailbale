@@ -42,6 +42,10 @@ class GeneralSettingsUpdate(_SettingsUpdateModel):
             domain,
         ):
             raise ValueError("Invalid base domain format")
+        if len(domain) > 253:
+            raise ValueError("Base domain must not exceed 253 characters")
+        if any(len(label) > 63 for label in domain.split(".")):
+            raise ValueError("Each base domain label must not exceed 63 characters")
         return domain
 
     @field_validator("acme_email")

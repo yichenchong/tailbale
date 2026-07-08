@@ -37,6 +37,7 @@ from app.models.service_status import ServiceStatus
 from app.reconciler import probe_retry
 from app.reconciler.errors import ReconcileError
 from app.reconciler.status import _persist_status, _update_phase
+from app.secrets import cloudflare_credentials
 from app.timeutil import as_utc, days_from_now
 
 logger = logging.getLogger(__name__)
@@ -287,8 +288,7 @@ def _ensure_dns(db: Session, service: Service, ts_ip: str | None) -> None:
     """Ensuring-dns step: create/update the public DNS record (best-effort)."""
     service_id = service.id
     _update_phase(db, service_id, "ensuring_dns", "Updating DNS record")
-    cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
-    zone_id = settings_store.get_setting(db, "cf_zone_id")
+    cf_token, zone_id = cloudflare_credentials(db)
     if cf_token and zone_id and ts_ip:
         try:
             # Serialize the DNS create/update against orphaned-DNS cleanup

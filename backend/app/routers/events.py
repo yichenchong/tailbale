@@ -1,46 +1,20 @@
 """Events API endpoints — query the structured event log."""
 
-from collections.abc import Iterable
-
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
 from app.events.event_emitter import EVENT_KINDS
+from app.events.serialization import event_to_dict
 from app.models.event import Event
 from app.models.service import Service
-from app.timeutil import iso
 
 router = APIRouter(
     prefix="/api/events",
     tags=["events"],
     dependencies=[Depends(get_current_user)],
 )
-
-
-def _event_to_dict(evt: Event, fields: Iterable[str] | None = None) -> dict:
-    """Shape an :class:`Event` row into its JSON wire form.
-
-    The single event-serialization shape reused by the events endpoints,
-    ``routers/services.get_cert_logs`` (cert-log subset), and
-    ``routers/dashboard`` (recent-errors / recent-events subsets) (AR-R3-7).
-    Pass *fields* to project a subset (preserving each caller's exact key set);
-    ``None`` returns the full record. ``created_at`` uses the shared
-    nullable-datetime wire format (AR-R3-9).
-    """
-    full = {
-        "id": evt.id,
-        "service_id": evt.service_id,
-        "kind": evt.kind,
-        "level": evt.level,
-        "message": evt.message,
-        "details": evt.details,
-        "created_at": iso(evt.created_at),
-    }
-    if fields is None:
-        return full
-    return {key: full[key] for key in fields}
 
 
 def _escape_like(value: str) -> str:
@@ -106,7 +80,7 @@ def list_events(
         offset=offset,
     )
     return {
-        "events": [_event_to_dict(e) for e in rows],
+        "events": [event_to_dict(e) for e in rows],
         "total": total,
     }
 
@@ -146,6 +120,6 @@ def service_events(
         offset=offset,
     )
     return {
-        "events": [_event_to_dict(e) for e in rows],
+        "events": [event_to_dict(e) for e in rows],
         "total": total,
     }

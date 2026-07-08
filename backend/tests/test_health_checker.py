@@ -6,6 +6,7 @@ from unittest.mock import MagicMock, patch
 import docker.errors
 import pytest
 
+from app import settings_store
 from app.health.health_checker import (
     CRITICAL_CHECKS,
     WARNING_CHECKS,
@@ -749,9 +750,9 @@ class TestCertNotExpiringSubcheck:
 
         with (
             patch.object(
-                health_checker,
+                settings_store,
                 "get_positive_int_setting",
-                wraps=health_checker.get_positive_int_setting,
+                wraps=settings_store.get_positive_int_setting,
             ) as spy,
             patch.object(health_checker, "_check_cert_not_expiring", return_value=True) as inner,
         ):
@@ -768,13 +769,12 @@ class TestCertNotExpiringSubcheck:
         # unexpected error (e.g. a DB failure) must still propagate rather than
         # being silently masked as cert_not_expiring=False; broadening the except
         # would hide real faults and reintroduce silent staling.
-        from app.health import health_checker
         from app.health.health_checker import _cert_not_expiring_subcheck
 
         svc = _create_service(db_session)
         with (
             patch.object(
-                health_checker, "get_positive_int_setting", side_effect=RuntimeError("db down")
+                settings_store, "get_positive_int_setting", side_effect=RuntimeError("db down")
             ),
             pytest.raises(RuntimeError),
         ):

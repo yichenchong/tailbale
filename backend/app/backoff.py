@@ -27,7 +27,8 @@ import asyncio
 import logging
 import math
 import random
-from collections.abc import Awaitable, Callable
+import time
+from collections.abc import Awaitable, Callable, Iterator
 
 
 def capped_exponential(
@@ -126,3 +127,24 @@ async def run_periodic(
             log.error("Error in %s", name, exc_info=True)
             backoff = on_error(exc) if on_error is not None else interval_fn()
             await asyncio.sleep(backoff)
+
+
+def retry_sync(attempts: int, delay: float) -> Iterator[int]:
+    """Yield attempt indices ``0..attempts-1``, sleeping ``delay`` BETWEEN attempts.
+
+    The synchronous analogue of :func:`run_periodic`'s loop plumbing, for the
+    ``for attempt in range(n): try ...; sleep(delay)`` shape that blocking edge
+    operations otherwise hand-roll. ``for attempt in retry_sync(n, d)`` runs the
+    body up to ``n`` times, sleeping ``d`` seconds before every attempt except
+    the first — so there is exactly one sleep between consecutive attempts and
+    NO trailing sleep after the final one. A caller that ``break``\\ s or
+    ``return``\\ s out of the loop simply abandons the generator, so no further
+    sleep runs; a ``continue`` (or falling off the body) advances to the next
+    attempt, which sleeps first. ``attempts <= 0`` yields nothing (no work, no
+    sleep). The zero-based index is yielded so callers can log ``attempt + 1``
+    and reason about the last attempt (``attempt == attempts - 1``).
+    """
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(delay)
+        yield attempt

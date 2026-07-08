@@ -12,7 +12,7 @@ the tier-2 per-service reconcile lock, then the tier-3 DB write lock via
 ``db_write_section``); see :mod:`app.locks` and ``test_reconcile_locking.py``.
 
 Symbols the test suite patches at their *source* module (``app.edge.*``,
-``app.secrets``, ``app.adapters.dns_reconciler``, ``app.reconciler.reconcile_loop``,
+``app.adapters.dns_reconciler``, ``app.reconciler.reconcile_loop``,
 ``app.settings_store``) are imported as modules and called by attribute so a
 ``patch("app.edge.container_manager.remove_edge")`` still resolves at call time.
 """
@@ -26,7 +26,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
-from app import secrets, settings_store
+from app import settings_store
 from app.adapters import dns_reconciler
 from app.database import commit_with_lock, db_write_section, flush_with_lock
 from app.edge import container_manager, network_manager
@@ -44,6 +44,7 @@ from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler import reconcile_loop
 from app.schemas.services import ServiceResponse
+from app.secrets import cloudflare_credentials
 from app.services.errors import (
     HostnameChangeError,
     HostnameInUse,
@@ -175,6 +176,42 @@ def _remove_lego_cert_artifacts(certs_dir: Path, hostname: str) -> None:
             logger.warning("Failed to remove lego cert artifact %s", artifact, exc_info=True)
 
 
+def _teardown_hostname_resources(
+    db: Session,
+    svc: Service,
+    hostname: str,
+    *,
+    cleanup_dns: bool,
+    remove_cert_state: bool = True,
+) -> None:
+    """Best-effort destructive teardown of one hostname's external + on-disk state (AR5).
+
+    Composes the teardown steps that ``_apply_hostname_change``,
+    ``disable_service`` and ``_delete_service_record_locked`` each reassemble a
+    subset of:
+
+    1. Remove the Cloudflare DNS record (only when *cleanup_dns* and CF
+       credentials are configured).
+    2. Remove the served ``certs_dir/<hostname>`` tree.
+    3. Remove lego's leftover per-hostname artifacts (SC2).
+
+    Steps 2-3 (the on-disk cert state) run only when *remove_cert_state* is set.
+    ``disable_service`` keeps a disabled service's cert so a later re-enable
+    doesn't force a re-issue, so it passes ``remove_cert_state=False`` and uses
+    only the DNS step.
+    """
+    if cleanup_dns:
+        cf_token, zone_id = cloudflare_credentials(db)
+        if cf_token and zone_id:
+            dns_reconciler.cleanup_dns_record(db, svc, cf_token, zone_id)
+    if remove_cert_state:
+        certs_dir = Path(settings_store.get_runtime_paths(db)["certs_dir"])
+        cert_dir = certs_dir / hostname
+        if cert_dir.exists():
+            shutil.rmtree(cert_dir, ignore_errors=True)
+        _remove_lego_cert_artifacts(certs_dir, hostname)
+
+
 def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> dict:
     """Validate a hostname change, tear down the old hostname's DNS + cert state.
 
@@ -198,8 +235,7 @@ def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> 
 
     old_hostname = svc.hostname
 
-    cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
-    zone_id = settings_store.get_setting(db, "cf_zone_id")
+    cf_token, zone_id = cloudflare_credentials(db)
     existing_dns = db.get(DnsRecord, svc.id)
     has_live_record = existing_dns and existing_dns.record_id
 
@@ -225,13 +261,11 @@ def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> 
             status_code=422,
         )
 
-    runtime = settings_store.get_runtime_paths(db)
-    old_cert_dir = Path(runtime["certs_dir"]) / old_hostname
-    if old_cert_dir.exists():
-        shutil.rmtree(old_cert_dir, ignore_errors=True)
-    # SC2: also drop the leftover .lego per-hostname cert artifacts for the old
-    # hostname so the shared .lego store doesn't accumulate dead state.
-    _remove_lego_cert_artifacts(Path(runtime["certs_dir"]), old_hostname)
+    # Drop the old hostname's on-disk cert state (served dir + SC2 lego
+    # artifacts). The DNS teardown above stays inline: a hostname change must
+    # ABORT on a Cloudflare failure, unlike the best-effort DNS cleanup the
+    # helper performs for disable/delete.
+    _teardown_hostname_resources(db, svc, old_hostname, cleanup_dns=False)
 
     # base_domain always tracks the configured domain (validated above).
     return {"hostname": body.hostname, "base_domain": configured_domain}
@@ -513,12 +547,11 @@ def disable_service(db: Session, service_id: str, *, cleanup_dns: bool = False) 
         with contextlib.suppress(Exception):
             container_manager.stop_edge(svc.id, svc.edge_container_name, socket)
 
-        # Optionally clean up the DNS record (spec §7.4)
-        if cleanup_dns:
-            cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
-            zone_id = settings_store.get_setting(db, "cf_zone_id")
-            if cf_token and zone_id:
-                dns_reconciler.cleanup_dns_record(db, svc, cf_token, zone_id)
+        # Optionally clean up the DNS record (spec §7.4). A disabled service
+        # keeps its cert dir for a later re-enable, so only the DNS step runs.
+        _teardown_hostname_resources(
+            db, svc, svc.hostname, cleanup_dns=cleanup_dns, remove_cert_state=False
+        )
     db.refresh(svc)
     status = db.get(ServiceStatus, service_id)
     cert = db.get(Certificate, service_id)
@@ -567,25 +600,18 @@ def _delete_service_record_locked(db: Session, svc: Service, *, cleanup_dns: boo
     with contextlib.suppress(Exception):
         network_manager.remove_network(svc.network_name, socket)
 
-    if cleanup_dns:
-        cf_token = secrets.read_secret(secrets.CLOUDFLARE_TOKEN)
-        zone_id = settings_store.get_setting(db, "cf_zone_id")
-        if cf_token and zone_id:
-            dns_reconciler.cleanup_dns_record(db, svc, cf_token, zone_id)
+    # DNS record + this hostname's on-disk cert state (served dir + SC2 lego
+    # artifacts), best-effort like the rest of delete. cleanup_dns gates only
+    # the DNS step; the cert-state removal always runs.
+    _teardown_hostname_resources(db, svc, svc.hostname, cleanup_dns=cleanup_dns)
 
     runtime = settings_store.get_runtime_paths(db)
     for subdir in [
         Path(runtime["generated_dir"]) / svc.id,
-        Path(runtime["certs_dir"]) / svc.hostname,
         Path(runtime["tailscale_state_dir"]) / svc.edge_container_name,
     ]:
         if subdir.exists():
             shutil.rmtree(subdir, ignore_errors=True)
-
-    # SC2: drop lego's leftover per-hostname cert artifacts alongside the served
-    # cert dir removed above, so the shared .lego store doesn't accumulate dead
-    # state for deleted services.
-    _remove_lego_cert_artifacts(Path(runtime["certs_dir"]), svc.hostname)
 
     with db_write_section(db):
         surviving_dns = db.get(DnsRecord, svc.id)

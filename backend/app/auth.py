@@ -80,26 +80,37 @@ def verify_password(plain: str, hashed: str, db: Session) -> bool:
         return False
 
 
-def create_access_token(user_id: str) -> str:
-    """Create a JWT token with the user ID as subject."""
+def create_access_token(user_id: str, token_version: int) -> str:
+    """Create a JWT with the user ID as subject and a version claim.
+
+    ``token_version`` is embedded as ``ver`` so bumping the user's counter (e.g.
+    on password change) invalidates every previously issued token.
+    """
     expire = datetime.now(UTC) + timedelta(hours=settings.jwt_expiry_hours)
-    payload = {"sub": user_id, "exp": expire}
+    payload = {"sub": user_id, "ver": token_version, "exp": expire}
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
-def decode_access_token(token: str) -> str | None:
-    """Decode a JWT token and return the user ID, or None if invalid."""
+def _decode_token(token: str) -> dict | None:
+    """Decode and validate a JWT, returning its claims payload or None."""
     try:
-        payload = jwt.decode(
+        return jwt.decode(
             token,
             settings.jwt_secret,
             algorithms=["HS256"],
             options={"require": ["exp", "sub"]},
         )
-        subject = payload.get("sub")
-        return subject if subject else None
     except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
         return None
+
+
+def decode_access_token(token: str) -> str | None:
+    """Decode a JWT token and return the user ID, or None if invalid."""
+    payload = _decode_token(token)
+    if payload is None:
+        return None
+    subject = payload.get("sub")
+    return subject if subject else None
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -108,12 +119,18 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
-    user_id = decode_access_token(token)
+    payload = _decode_token(token)
+    user_id = payload.get("sub") if payload else None
     if not user_id:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     user = db.query(User).filter(User.id == user_id, User.is_active.is_(True)).first()
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+
+    # Stateless-JWT revocation: a token whose "ver" claim no longer matches the
+    # user's token_version was issued before a credential change and is stale.
+    if payload.get("ver") != user.token_version:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     return user

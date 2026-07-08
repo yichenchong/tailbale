@@ -27,19 +27,19 @@ from sqlalchemy.orm import Session
 from app import services as service_layer
 from app.auth import get_current_user
 from app.database import get_db
-from app.edge.docker_client import docker_client, resolve_socket
+from app.events.serialization import event_to_dict
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler import reconcile_loop
-from app.routers.events import _event_to_dict
 from app.schemas.services import (
     ServiceCreate,
     ServiceListResponse,
     ServiceResponse,
     ServiceUpdate,
 )
+from app.services import docker_client, resolve_socket
 from app.services.errors import (
     DockerUnavailable,
     HostnameSuffixInvalid,
@@ -379,7 +379,7 @@ def get_cert_logs(
     )
     return {
         "events": [
-            _event_to_dict(
+            event_to_dict(
                 evt, fields=("id", "kind", "level", "message", "created_at", "details")
             )
             for evt in events

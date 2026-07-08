@@ -7,12 +7,12 @@ from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.edge.docker_client import docker_client, resolve_socket
 from app.schemas.services import (
     ContainerPortInfo,
     DiscoveredContainer,
     DiscoveryResponse,
 )
+from app.services import docker_client, resolve_socket
 
 router = APIRouter(
     prefix="/api/discovery",

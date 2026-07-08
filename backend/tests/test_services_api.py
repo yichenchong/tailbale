@@ -1,6 +1,6 @@
 """Cross-cutting service-router plumbing tests: action-endpoint 404s, status/response shape, cert-log listing, unused-import guards, generic error-detail mapping, and full-health-check socket resolution.
 
-Feature-specific tests live in test_services_crud.py / test_services_edge_ops.py / test_services_cert_ops.py."""
+Feature-specific tests live in test_services_crud_{create,update,lifecycle}.py / test_services_edge_ops.py / test_services_cert_ops.py."""
 
 from pathlib import Path
 from unittest.mock import patch

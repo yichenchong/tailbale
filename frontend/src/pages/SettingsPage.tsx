@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 import { cn } from "@/lib/utils"
 import { Loader2 } from "lucide-react"
 import { useSettings } from "./settings/useSettings"
@@ -13,8 +13,12 @@ import { DeveloperTab } from "./settings/DeveloperTab"
 const ALL_TABS = ["General", "Cloudflare", "Tailscale", "Docker", "Paths", "Account", "Developer"] as const
 type Tab = (typeof ALL_TABS)[number]
 
+const TABPANEL_ID = "settings-tabpanel"
+const tabButtonId = (t: Tab) => `settings-tab-${t}`
+
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>("General")
+  const tabRefs = useRef<Partial<Record<Tab, HTMLButtonElement | null>>>({})
   const {
     settings,
     loading,
@@ -51,9 +55,36 @@ export default function SettingsPage() {
     )
   }
 
-  const tabs = settings.general.developer_mode
+  const tabs: readonly Tab[] = settings.general.developer_mode
     ? ALL_TABS
     : ALL_TABS.filter((item) => item !== "Developer")
+
+  const onTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const currentIndex = tabs.indexOf(tab)
+    let nextIndex: number
+    switch (e.key) {
+      case "ArrowRight":
+        nextIndex = (currentIndex + 1) % tabs.length
+        break
+      case "ArrowLeft":
+        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length
+        break
+      case "Home":
+        nextIndex = 0
+        break
+      case "End":
+        nextIndex = tabs.length - 1
+        break
+      default:
+        return
+    }
+    e.preventDefault()
+    const nextTab = tabs[nextIndex]
+    setTab(nextTab)
+    setTestResult(null)
+    setError("")
+    tabRefs.current[nextTab]?.focus()
+  }
 
   return (
     <div>
@@ -66,7 +97,12 @@ export default function SettingsPage() {
             key={t}
             type="button"
             role="tab"
+            id={tabButtonId(t)}
             aria-selected={t === tab}
+            aria-controls={TABPANEL_ID}
+            tabIndex={t === tab ? 0 : -1}
+            ref={(el) => { tabRefs.current[t] = el }}
+            onKeyDown={onTabKeyDown}
             onClick={() => { setTab(t); setTestResult(null); setError("") }}
             className={cn(
               "px-4 py-2 text-sm font-medium transition-colors",
@@ -84,7 +120,7 @@ export default function SettingsPage() {
         <div role="alert" className="mt-4 max-w-lg rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
       )}
 
-      <div className="mt-6 max-w-lg" role="tabpanel" aria-label={`${tab} settings`}>
+      <div className="mt-6 max-w-lg" role="tabpanel" id={TABPANEL_ID} aria-labelledby={tabButtonId(tab)}>
         {tab === "General" && (
           <GeneralTab settings={settings.general} onSave={(b) => save("general", b)} saving={savingSection === "general"} version={version} />
         )}
