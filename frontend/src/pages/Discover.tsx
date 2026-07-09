@@ -2,9 +2,11 @@ import { useCallback, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type DiscoveredContainer } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { Loader2, Search, Globe, RefreshCw } from "lucide-react"
-import { useTimezone, formatTime } from "@/lib/useTimezone"
+import { Loader2, Search, Globe } from "lucide-react"
+import { useTimezone } from "@/lib/useTimezone"
 import { useResource } from "@/lib/useResource"
+import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
+import { usePolledFreshness } from "@/lib/usePolledFreshness"
 
 const POLL_INTERVAL = 30_000 // 30 seconds
 
@@ -20,7 +22,7 @@ export default function Discover() {
   const [search, setSearch] = useState("")
   const [appliedSearch, setAppliedSearch] = useState("")
   const [runningOnly, setRunningOnly] = useState(true)
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const { lastRefresh, markFresh } = usePolledFreshness()
 
   // Composite fetcher: merge the discovery + services endpoints and derive each
   // container's exposure count. Memoized over its inputs so a filter/search
@@ -44,7 +46,7 @@ export default function Discover() {
   // the 30s cadence matches the old hand-rolled setInterval.
   const { data, loading, error, refresh } = useResource(fetcher, {
     pollMs: POLL_INTERVAL,
-    onData: () => setLastRefresh(new Date()),
+    onData: markFresh,
   })
   const containers = data?.containers ?? []
   const exposureCounts = data?.exposureCounts ?? {}
@@ -74,25 +76,12 @@ export default function Discover() {
           <h1 className="text-2xl font-bold">Discover Containers</h1>
           <p className="mt-1 text-sm text-zinc-500">Find running Docker containers to expose as HTTPS services.</p>
         </div>
-        <div className="flex items-center gap-3">
-          {lastRefresh && (
-            <span className="text-xs text-zinc-400">
-              Updated {formatTime(lastRefresh, tz)}
-            </span>
-          )}
-          <button
-            onClick={() => void refresh()}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-          >
-            {loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            Refresh
-          </button>
-        </div>
+        <PolledRefreshControl
+          lastRefresh={lastRefresh}
+          timezone={tz}
+          loading={loading}
+          onRefresh={() => { void refresh() }}
+        />
       </div>
 
       {/* Filters */}
@@ -142,13 +131,7 @@ export default function Discover() {
           </div>
         ) : (
           <>
-            {error && (
-              <div role="status" className="mb-3 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800">
-                {lastRefresh
-                  ? `Couldn't refresh \u2014 showing data from ${formatTime(lastRefresh, tz)}`
-                  : "Couldn't refresh \u2014 showing cached data"}
-              </div>
-            )}
+            <StaleDataBanner error={error} lastRefresh={lastRefresh} timezone={tz} className="mb-3" />
             <div className="overflow-x-auto rounded-md border border-zinc-200">
               <table className="min-w-full divide-y divide-zinc-200">
                 <thead className="bg-zinc-50">

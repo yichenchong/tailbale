@@ -17,11 +17,14 @@ import app.models
 from app.config import settings
 from app.database import Base, engine
 from app.routers.auth import router as auth_router
+from app.routers.connection_tests import router as connection_tests_router
 from app.routers.dashboard import router as dashboard_router
+from app.routers.developer import router as developer_router
 from app.routers.discovery import router as discovery_router
 from app.routers.events import router as events_router
 from app.routers.jobs import router as jobs_router
 from app.routers.profiles import router as profiles_router
+from app.routers.service_actions import router as service_actions_router
 from app.routers.services import router as services_router
 from app.routers.settings import router as settings_router
 from app.services.errors import ServiceError
@@ -125,8 +128,11 @@ if _cors_options is not None:
 
 app.include_router(auth_router)
 app.include_router(settings_router)
+app.include_router(developer_router)
+app.include_router(connection_tests_router)
 app.include_router(discovery_router)
 app.include_router(services_router)
+app.include_router(service_actions_router)
 app.include_router(events_router)
 app.include_router(dashboard_router)
 app.include_router(profiles_router)

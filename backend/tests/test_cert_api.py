@@ -3,23 +3,10 @@
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
+from app import settings_store
 from app.models.certificate import Certificate
 from app.models.event import Event
-
-
-def _create_service(client, **overrides):
-    """Helper to create a service with defaults."""
-    body = {
-        "name": "Nextcloud",
-        "upstream_container_id": "abc123def456",
-        "upstream_container_name": "nextcloud",
-        "upstream_scheme": "http",
-        "upstream_port": 80,
-        "hostname": "nextcloud.example.com",
-        "base_domain": "example.com",
-    }
-    body.update(overrides)
-    return client.post("/api/services", json=body)
+from tests._services_helpers import create_service_api
 
 
 def _upsert_cert(db, svc_id, hostname, *, expires_at, last_failure=None):
@@ -38,7 +25,7 @@ class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_success(self, mock_secret, mock_process, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         resp = client.post(f"/api/services/{svc_id}/renew-cert")
         assert resp.status_code == 200
@@ -57,7 +44,7 @@ class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_failure(self, mock_secret, mock_process, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_process.side_effect = Exception("ACME rate limited")
 
         resp = client.post(f"/api/services/{svc_id}/renew-cert")
@@ -67,7 +54,7 @@ class TestRenewCertEndpoint:
     def test_renew_cert_far_healthy_no_force_requires_force(
         self, mock_process, client, db_session
     ):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
             expires_at=datetime.now(UTC) + timedelta(days=60),
@@ -86,7 +73,7 @@ class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_far_healthy_force_renews(self, mock_secret, mock_process, client, db_session):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
             expires_at=datetime.now(UTC) + timedelta(days=60),
@@ -112,9 +99,8 @@ class TestRenewCertEndpoint:
         # timedelta(days=window) inside the far-from-expiry check, which used to
         # 500 the manual renew path. The fix treats the overflow as "not far
         # healthy" (unbounded window means renew eagerly) and proceeds normally.
-        from app import settings_store
 
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         # Healthy, far-from-expiry, no prior failure — enters the far_healthy
         # branch where timedelta(days=window_days) is evaluated.
         _upsert_cert(
@@ -141,7 +127,7 @@ class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_near_expiry_no_force_performs(self, mock_secret, mock_process, client, db_session):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
             expires_at=datetime.now(UTC) + timedelta(days=5),
@@ -158,7 +144,7 @@ class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_expired_no_force_performs(self, mock_secret, mock_process, client, db_session):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         _upsert_cert(
             db_session, svc_id, "nextcloud.example.com",
             expires_at=datetime.now(UTC) - timedelta(days=1),
@@ -172,7 +158,7 @@ class TestRenewCertEndpoint:
     @patch("app.certs.renewal_task.process_service_cert")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_renew_cert_missing_cert_no_force_performs(self, mock_secret, mock_process, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         resp = client.post(f"/api/services/{svc_id}/renew-cert")
         assert resp.status_code == 200
@@ -185,7 +171,7 @@ class TestRenewCertEndpoint:
         # issues nothing). The manual endpoint must NOT claim it processed a cert.
         # read_secret returns None with no secret file, so process_service_cert
         # runs for real (unmocked) and no-ops; renew_cert must report honestly.
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         resp = client.post(f"/api/services/{svc_id}/renew-cert?force=true")
         assert resp.status_code == 200
@@ -197,14 +183,14 @@ class TestRenewCertEndpoint:
 
 class TestCertLogsEndpoint:
     def test_cert_logs_empty(self, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         resp = client.get(f"/api/services/{svc_id}/logs/cert")
         assert resp.status_code == 200
         assert resp.json()["events"] == []
 
     def test_cert_logs_returns_cert_events(self, client, db_session):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         # Insert cert-related events
         events_data = [
@@ -235,7 +221,7 @@ class TestCertLogsEndpoint:
         assert resp.status_code == 404
 
     def test_cert_logs_limit_parameter(self, client, db_session):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         # Insert more events than limit
         for i in range(5):
@@ -258,7 +244,7 @@ class TestCertLogsEndpoint:
 
 
     def test_cert_logs_include_details(self, client, db_session):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         db_session.add(Event(
             service_id=svc_id, kind="cert_issued", level="info",

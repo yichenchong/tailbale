@@ -6,30 +6,28 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import app.database as database_module
 from app.locks import _RECONCILE_LOCKS, forget_reconcile_lock, reconcile_lock_for
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler import reconcile_loop as loop_mod
 from app.reconciler.reconcile_loop import reconcile_all, reconcile_one
+from tests._services_helpers import create_service_db
 
 
 def _create_service(db, name="TestApp", enabled=True, **overrides):
     slug = name.lower().replace(" ", "")
-    defaults = {
-        "name": name, "upstream_container_id": "abc123",
-        "upstream_container_name": slug, "upstream_scheme": "http",
-        "upstream_port": 80, "hostname": f"{slug}.example.com",
-        "base_domain": "example.com", "edge_container_name": f"edge_{slug}",
-        "network_name": f"edge_net_{slug}", "ts_hostname": f"edge-{slug}",
+    values = {
+        "name": name,
+        "upstream_container_name": slug,
+        "hostname": f"{slug}.example.com",
+        "edge_container_name": f"edge_{slug}",
+        "network_name": f"edge_net_{slug}",
+        "ts_hostname": f"edge-{slug}",
         "enabled": enabled,
     }
-    defaults.update(overrides)
-    svc = Service(**defaults)
-    db.add(svc)
-    db.flush()
-    db.add(ServiceStatus(service_id=svc.id, phase="pending"))
-    db.commit()
-    return svc
+    values.update(overrides)
+    return create_service_db(db, **values)
 
 
 class TestReconcileAll:
@@ -105,7 +103,6 @@ class TestReconcileOne:
         mock_reconcile.assert_called_once()
 
     def test_raises_for_missing_service(self, db_session):
-        import pytest
         with pytest.raises(ValueError, match="not found"):
             reconcile_one(db_session, "svc_nonexistent")
 
@@ -127,7 +124,6 @@ class TestReconcileLoop:
         return fake_sleep
 
     def test_runs_sweep_then_sleeps_interval_and_cancels_cleanly(self):
-        import app.database as database_module
 
         mock_session = MagicMock()
         session_factory = MagicMock(return_value=mock_session)
@@ -152,7 +148,6 @@ class TestReconcileLoop:
         mock_session.close.assert_called_once()
 
     def test_blank_docker_socket_forwards_none(self):
-        import app.database as database_module
 
         mock_session = MagicMock()
         session_factory = MagicMock(return_value=mock_session)
@@ -172,7 +167,6 @@ class TestReconcileLoop:
         assert mock_all.call_args.kwargs.get("socket_path") is None
 
     def test_sweep_error_backs_off_30s_and_does_not_crash(self):
-        import app.database as database_module
 
         mock_session = MagicMock()
         session_factory = MagicMock(return_value=mock_session)
@@ -204,7 +198,6 @@ class TestReconcileLoop:
         # reads its OWN interval setting and drives the lightweight sweep (not the
         # full reconcile_all) — a copy-paste of the reconcile loop would otherwise
         # silently sweep on the wrong cadence with the wrong function.
-        import app.database as database_module
 
         mock_session = MagicMock()
         session_factory = MagicMock(return_value=mock_session)

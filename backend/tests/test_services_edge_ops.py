@@ -4,9 +4,10 @@ Mirrors app.services.edge_ops (split from test_services_api.py)."""
 
 from unittest.mock import patch
 
-from tests._services_helpers import (
-    _create_service,
-)
+import docker
+
+from app.version import __version__
+from tests._services_helpers import _create_service
 
 
 class TestDisabledServiceActionEndpoints:
@@ -66,8 +67,6 @@ class TestUpdateEdgeFastPath:
     def test_update_edge_already_current_returns_success(
         self, mock_recreate, mock_build, client,
     ):
-        from app.version import __version__
-
         svc_id = _create_service(client).json()["id"]
         with patch(
             "app.edge.container_manager.get_edge_version", return_value=__version__
@@ -124,8 +123,6 @@ class TestAsyncEdgeEndpointErrorMapping:
     edge_action), not a generic 500 — while still returning 200 on success."""
 
     def test_reconcile_docker_unreachable_returns_503(self, client):
-        import docker
-
         svc_id = _create_service(client).json()["id"]
         with patch(
             "app.reconciler.reconcile_loop.spawn_reconcile",
@@ -156,8 +153,6 @@ class TestAsyncEdgeEndpointErrorMapping:
     def test_update_edge_docker_unreachable_returns_503(
         self, mock_secret, mock_version, mock_recreate, mock_build, client,
     ):
-        import docker
-
         mock_recreate.side_effect = docker.errors.DockerException("DOCKER_HOST unreachable")
         svc_id = _create_service(client).json()["id"]
 
@@ -193,8 +188,6 @@ class TestEdgeVersionDockerDownGracefulDegrade:
 
     @patch("app.edge.container_manager.get_edge_version")
     def test_docker_unavailable_returns_200_with_null_version(self, mock_ver, client):
-        import docker
-
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         mock_ver.side_effect = docker.errors.DockerException("daemon down")
 

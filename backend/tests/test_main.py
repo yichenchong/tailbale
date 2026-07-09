@@ -11,9 +11,27 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import sessionmaker
 
-from app.main import _cors_middleware_options, _spa_response
+import app.certs.renewal_task as renewal_mod
+import app.database as database_module
+import app.edge.image_builder as image_builder_mod
+import app.events.retention_task as retention_mod
+import app.main as main_module
+import app.reconciler.reconcile_loop as loop_mod
+import app.routers.jobs as jobs_mod
+from app.main import _cors_middleware_options, _service_error_handler, _spa_response
+from app.services.errors import (
+    HostnameChangeError,
+    HostnameInUse,
+    HostnameSuffixInvalid,
+    ServiceDisabled,
+    ServiceError,
+    ServiceNotFound,
+    TailscaleAuthKeyMissing,
+)
 
 
 @pytest.fixture()
@@ -103,15 +121,7 @@ class TestLifespanBackgroundTasks:
     def test_starts_reconcile_health_renewal_and_retention_loops(
         self, db_engine, tmp_data_dir, monkeypatch
     ):
-        from sqlalchemy.orm import sessionmaker
 
-        import app.certs.renewal_task as renewal_mod
-        import app.database as database_module
-        import app.edge.image_builder as image_builder_mod
-        import app.events.retention_task as retention_mod
-        import app.main as main_module
-        import app.reconciler.reconcile_loop as loop_mod
-        import app.routers.jobs as jobs_mod
 
         # Point the lifespan's table-creation + startup session at the test engine
         # and neutralize the heavy/external startup steps.
@@ -154,15 +164,7 @@ class TestLifespanBackgroundTasks:
         already exited with an exception. Pre-fix the sequential ``await task``
         re-raised that exception, short-circuiting the loop so the remaining tasks
         were never cancelled (a leak) and the shutdown itself raised."""
-        from sqlalchemy.orm import sessionmaker
 
-        import app.certs.renewal_task as renewal_mod
-        import app.database as database_module
-        import app.edge.image_builder as image_builder_mod
-        import app.events.retention_task as retention_mod
-        import app.main as main_module
-        import app.reconciler.reconcile_loop as loop_mod
-        import app.routers.jobs as jobs_mod
 
         monkeypatch.setattr(main_module, "engine", db_engine)
         monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
@@ -226,19 +228,7 @@ class TestServiceErrorHandler:
 
     @staticmethod
     def _client():
-        from fastapi import FastAPI, HTTPException
-        from fastapi.testclient import TestClient
 
-        from app.main import _service_error_handler
-        from app.services.errors import (
-            HostnameChangeError,
-            HostnameInUse,
-            HostnameSuffixInvalid,
-            ServiceDisabled,
-            ServiceError,
-            ServiceNotFound,
-            TailscaleAuthKeyMissing,
-        )
 
         app = FastAPI()
         app.add_exception_handler(ServiceError, _service_error_handler)

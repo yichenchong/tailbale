@@ -6,6 +6,7 @@ The loop runs in a daemon thread in production.  Here we drive
 """
 
 import contextlib
+import logging as _logging
 from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
@@ -175,7 +176,6 @@ class TestUpdateRetryState:
         # MUST surface at WARNING (visible under a production WARNING+ filter) and
         # the loop keeps going (returns True) instead of silently stalling with an
         # invisible failure. Pre-fix this was logged at INFO.
-        import logging as _logging
 
         svc = _create_service(db_session)
         TestSession = sessionmaker(bind=db_session.get_bind())
@@ -202,7 +202,6 @@ class TestClearRetryState:
         # A swallowed clear leaves the probe-retry fields set forever, so the UI
         # shows a pending retry that never comes. That failure MUST be visible at
         # WARNING under a production WARNING+ filter. Pre-fix it was logged at INFO.
-        import logging as _logging
 
         svc = _create_service(db_session)
         TestSession = sessionmaker(bind=db_session.get_bind())
@@ -317,7 +316,6 @@ class TestProbeRetryLoop:
         # MUST be surfaced at WARNING — visible under a production WARNING+ filter
         # — and MUST NOT crash the loop: it rolls back and continues to
         # exhaustion. Pre-fix this was logged at INFO, hiding genuine failures.
-        import logging as _logging
 
         svc = _create_service(db_session)
 

@@ -7,7 +7,7 @@ import {
   UPSTREAM_PORT_MESSAGE,
 } from "@/lib/validation"
 import { Row } from "./Row"
-import { type ServiceEditState } from "./useServiceDetail"
+import { type ServiceEditState } from "@/lib/serviceTypes"
 import { errorMessage } from "@/lib/utils"
 
 /**

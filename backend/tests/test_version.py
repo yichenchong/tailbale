@@ -2,6 +2,9 @@
 
 from unittest.mock import MagicMock, patch
 
+from app.edge.container_manager import create_edge_container, get_edge_version
+from app.version import __version__, get_version
+
 
 class TestVersionModule:
     def test_reads_version_file(self, tmp_path):
@@ -10,13 +13,11 @@ class TestVersionModule:
 
         with patch("app.version._VERSION_FILE_LOCATIONS", [vfile]):
             # Re-call get_version since __version__ is cached at import time
-            from app.version import get_version
             assert get_version() == "1.2.3"
 
     def test_returns_dev_when_missing(self, tmp_path):
         missing = tmp_path / "NOPE"
         with patch("app.version._VERSION_FILE_LOCATIONS", [missing]):
-            from app.version import get_version
             assert get_version() == "dev"
 
     def test_strips_whitespace(self, tmp_path):
@@ -24,7 +25,6 @@ class TestVersionModule:
         vfile.write_text("  2.0.0  \n")
 
         with patch("app.version._VERSION_FILE_LOCATIONS", [vfile]):
-            from app.version import get_version
             assert get_version() == "2.0.0"
 
     def test_empty_file_falls_through_to_next_location(self, tmp_path):
@@ -38,7 +38,6 @@ class TestVersionModule:
         good.write_text("9.9.9\n")
 
         with patch("app.version._VERSION_FILE_LOCATIONS", [empty, good]):
-            from app.version import get_version
             assert get_version() == "9.9.9"
 
     def test_whitespace_only_file_falls_through_to_dev(self, tmp_path):
@@ -48,7 +47,6 @@ class TestVersionModule:
         blank.write_text("   \n\t")
 
         with patch("app.version._VERSION_FILE_LOCATIONS", [blank]):
-            from app.version import get_version
             assert get_version() == "dev"
 
 
@@ -102,7 +100,6 @@ class TestEdgeVersionEndpoint:
 class TestGetEdgeVersion:
     @patch("app.edge.container_manager._find_edge_container")
     def test_reads_label(self, mock_find):
-        from app.edge.container_manager import get_edge_version
 
         mock_container = MagicMock()
         mock_container.labels = {"tailbale.version": "0.2.0", "tailbale.managed": "true"}
@@ -112,7 +109,6 @@ class TestGetEdgeVersion:
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_none_when_no_label(self, mock_find):
-        from app.edge.container_manager import get_edge_version
 
         mock_container = MagicMock()
         mock_container.labels = {"tailbale.managed": "true"}
@@ -122,7 +118,6 @@ class TestGetEdgeVersion:
 
     @patch("app.edge.container_manager._find_edge_container")
     def test_returns_none_when_no_container(self, mock_find):
-        from app.edge.container_manager import get_edge_version
 
         mock_find.return_value = None
         assert get_edge_version("svc_1", "edge_app") is None
@@ -143,7 +138,6 @@ class TestUpdateEdgeEndpoint:
 
     @patch("app.edge.container_manager.get_edge_version")
     def test_already_up_to_date(self, mock_ver, client):
-        from app.version import __version__
         mock_ver.return_value = __version__
 
         svc_id = self._create(client).json()["id"]
@@ -160,8 +154,6 @@ class TestContainerVersionLabel:
     @patch("app.edge.container_manager.ensure_edge_image")
     @patch("app.edge.container_manager.docker.DockerClient")
     def test_create_stamps_version_label(self, mock_cls, mock_ensure, tmp_path):
-        from app.edge.container_manager import create_edge_container
-        from app.version import __version__
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client

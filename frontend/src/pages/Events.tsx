@@ -5,7 +5,7 @@ import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, Chevron
 import { cn, errorMessage } from "@/lib/utils"
 import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
-import { usePagination } from "@/lib/usePagination"
+import { usePaginatedResource } from "@/lib/usePaginatedResource"
 import { Pagination } from "@/components/Pagination"
 
 const SEARCH_DEBOUNCE_MS = 300
@@ -22,35 +22,31 @@ export default function Events() {
   const [levelFilter, setLevelFilter] = useState("")
   const [kindFilter, setKindFilter] = useState("")
   const [expandedId, setExpandedId] = useState<string | null>(null)
-  const { offset, limit, total, page, pageCount, setOffset, setTotal, prev, next, goToPage, clampToContent } =
-    usePagination()
-
-  const fetcher = useCallback(
-    () => api.events.list({ search, level: levelFilter, kind: kindFilter, limit, offset }),
-    [search, levelFilter, kindFilter, limit, offset],
+  const loadEvents = useCallback(
+    ({ limit, offset }: { limit: number; offset: number }) =>
+      api.events.list({ search, level: levelFilter, kind: kindFilter, limit, offset }),
+    [search, levelFilter, kindFilter],
   )
-  // Sync `total` for the pager and clamp the offset when the current page fell
-  // off the end. Events never used to clamp, so the new retention cleanup could
-  // shrink `total` and strand the user on an empty page over still-reachable
-  // rows; the shared helper fixes that. Returning `true` keeps the spinner up
-  // and skips storing the empty page so the offset change retriggers the load.
-  const onData = useCallback(
-    (data: EventsResponse): boolean => {
-      setTotal(data.total)
-      const clamped = clampToContent(data.total, data.events.length)
-      if (clamped !== null) {
-        setOffset(clamped)
-        return true
-      }
-      return false
-    },
-    [setTotal, clampToContent, setOffset],
-  )
-  const { data, loading, error } = useResource(fetcher, {
-    onData,
+  const getEvents = useCallback((response: EventsResponse) => response.events, [])
+  const {
+    items,
+    loading,
+    error,
+    offset,
+    limit,
+    total,
+    page,
+    pageCount,
+    setOffset,
+    prev,
+    next,
+    goToPage,
+  } = usePaginatedResource<EventsResponse, EventItem>({
+    load: loadEvents,
+    getItems: getEvents,
     mapError: (e) => (errorMessage(e, "Failed to load events")),
   })
-  const events = data?.events ?? []
+  const events = items
 
   // Kind filter options come from the backend registry (GET /events/kinds) —
   // the single source of truth — rather than a hardcoded mirror that silently

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react"
+import { getJsonSafe } from "@/lib/utils"
 
 /** @internal exported for test cleanup */
 export let cachedTimezone: string | null = null
@@ -31,10 +32,7 @@ export function useTimezone(): string {
     if (cachedTimezone) {
       setTz(cachedTimezone)
     } else {
-      // Use raw fetch to avoid api.get throwing on non-200 responses
-      // (which would break tests that mock fetch globally).
-      fetch("/api/settings", { credentials: "same-origin" })
-        .then((r) => (r.ok ? r.json() : null))
+      getJsonSafe<{ general?: { timezone?: string } }>("/api/settings")
         .then((data) => {
           // Ignore a late settings response if a timezone has since been
           // established — by an explicit setConfiguredTimezone (e.g. saving
@@ -45,7 +43,6 @@ export function useTimezone(): string {
             setConfiguredTimezone(data.general.timezone)
           }
         })
-        .catch(() => {})
     }
     return () => {
       subscribers.delete(setTz)

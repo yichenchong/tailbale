@@ -5,6 +5,8 @@ from unittest.mock import MagicMock, patch
 import docker
 import requests
 
+from app.settings_store import set_setting
+
 
 def _make_mock_container(
     id="abc123",
@@ -387,7 +389,6 @@ class TestListContainers:
         discovery must resolve the daemon via from_env() so it honors DOCKER_HOST,
         mirroring _validate_upstream / the edge managers. Passing base_url="" would
         silently query the default local socket and ignore DOCKER_HOST."""
-        from app.settings_store import set_setting
 
         set_setting(db_session, "docker_socket_path", "")
         db_session.commit()

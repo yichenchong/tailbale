@@ -6,10 +6,12 @@ serializes a secret (token / auth key / api key / password) back to a client.
 """
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel, ValidationError
 
+from app.edge import config_renderer
 from app.schemas import auth as auth_schemas
 from app.schemas import services as service_schemas
 from app.schemas import settings as settings_schemas
@@ -716,9 +718,7 @@ class TestCaddySnippetContainment:
         # Single-source-of-truth guard: render_caddyfile MUST embed the snippet
         # via render_snippet_block (the same function the validator lexes), so the
         # validated bytes always equal the deployed Caddyfile's snippet block.
-        from types import SimpleNamespace
 
-        from app.edge import config_renderer
 
         for v in [
             "respond <<HTML\n<h1>{x}</h1>\nHTML",

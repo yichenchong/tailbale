@@ -1,17 +1,22 @@
 """Tests for Docker network management."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import docker.errors
 import pytest
 
-from app.edge.network_manager import ensure_network
+from app.edge.network_manager import (
+    connect_container,
+    create_network,
+    ensure_network,
+    remove_network,
+)
 
 
 class TestCreateNetwork:
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_creates_new_network(self, mock_cls):
-        from app.edge.network_manager import create_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -27,7 +32,6 @@ class TestCreateNetwork:
 
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_returns_existing_network(self, mock_cls):
-        from app.edge.network_manager import create_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -42,7 +46,6 @@ class TestCreateNetwork:
 
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_uses_socket_path(self, mock_cls):
-        from app.edge.network_manager import create_network
 
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
@@ -57,7 +60,6 @@ class TestCreateNetwork:
         """If another caller creates the network between our get and create
         (modern daemons reject duplicate names with 409), recover by returning
         the existing network instead of propagating the error."""
-        from app.edge.network_manager import create_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -78,7 +80,6 @@ class TestCreateNetwork:
     def test_create_failure_without_existing_reraises(self, mock_cls):
         """A genuine create failure (network still absent afterwards) surfaces
         the original APIError rather than a confusing NotFound."""
-        from app.edge.network_manager import create_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -92,7 +93,6 @@ class TestCreateNetwork:
 class TestRemoveNetwork:
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_removes_existing(self, mock_cls):
-        from app.edge.network_manager import remove_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -104,7 +104,6 @@ class TestRemoveNetwork:
 
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_noop_if_not_found(self, mock_cls):
-        from app.edge.network_manager import remove_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -119,7 +118,6 @@ class TestRemoveNetwork:
         container is removed, so the first ``network.remove()`` fails with
         "has active endpoints". The network must be torn down by disconnecting
         the lingering endpoint(s) and retrying, not leaked."""
-        from app.edge.network_manager import remove_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -142,7 +140,6 @@ class TestRemoveNetwork:
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_disconnects_all_endpoints(self, mock_cls):
         """Every attached container is force-disconnected before the retry."""
-        from app.edge.network_manager import remove_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -163,7 +160,6 @@ class TestRemoveNetwork:
     def test_does_not_disconnect_when_remove_succeeds(self, mock_cls):
         """When the network has no lingering endpoints, remove succeeds directly
         and no containers are disconnected."""
-        from app.edge.network_manager import remove_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -183,9 +179,7 @@ class TestRemoveNetwork:
         error), remove_network must not raise — the sole caller suppresses
         exceptions, so a raise would leak the network silently. The failure is
         logged so the leak is observable."""
-        import logging
 
-        from app.edge.network_manager import remove_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -207,7 +201,6 @@ class TestRemoveNetwork:
 class TestConnectContainer:
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_connects_container(self, mock_cls):
-        from app.edge.network_manager import connect_container
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -223,7 +216,6 @@ class TestConnectContainer:
 
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_noop_if_already_connected(self, mock_cls):
-        from app.edge.network_manager import connect_container
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -241,7 +233,6 @@ class TestConnectContainer:
 
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_connect_race_already_connected_is_idempotent(self, mock_cls):
-        from app.edge.network_manager import connect_container
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -265,7 +256,6 @@ class TestConnectContainer:
 
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_falls_back_to_container_name_when_id_is_stale(self, mock_cls):
-        from app.edge.network_manager import connect_container
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -288,7 +278,6 @@ class TestConnectContainer:
     def test_connect_reraises_unexpected_api_error(self, mock_cls):
         """An APIError that is NOT an 'already connected/exists' race must
         propagate — it is a real failure, not idempotent recovery."""
-        from app.edge.network_manager import connect_container
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client
@@ -306,7 +295,6 @@ class TestConnectContainer:
 class TestEnsureNetwork:
     @patch("app.edge.network_manager.docker.DockerClient")
     def test_creates_and_connects(self, mock_cls):
-        from app.edge.network_manager import ensure_network
 
         mock_client = MagicMock()
         mock_cls.from_env.return_value = mock_client

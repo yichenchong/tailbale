@@ -2,23 +2,14 @@
 
 from unittest.mock import patch
 
+from sqlalchemy import text
+
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
 from app.models.job import Job
-
-
-def _create_service(client, **overrides):
-    body = {
-        "name": "Nextcloud",
-        "upstream_container_id": "abc123def456",
-        "upstream_container_name": "nextcloud",
-        "upstream_scheme": "http",
-        "upstream_port": 80,
-        "hostname": "nextcloud.example.com",
-        "base_domain": "example.com",
-    }
-    body.update(overrides)
-    return client.post("/api/services", json=body)
+from app.routers.jobs import CF_CLEANUP_TIMEOUT, reset_stale_running_jobs
+from app.settings_store import set_setting
+from tests._services_helpers import create_service_api
 
 
 def _create_orphan_job(db, **overrides):
@@ -66,7 +57,6 @@ class TestListJobs:
         assert data["jobs"][0]["details"]["record_id"] == "cf_abc123"
 
     def test_lists_job_with_invalid_details_without_crashing(self, client, db_session):
-        from sqlalchemy import text
 
         job = _create_orphan_job(db_session)
         db_session.execute(
@@ -135,7 +125,6 @@ class TestGetJob:
         assert resp.json()["id"] == job.id
 
     def test_get_job_with_invalid_details_without_crashing(self, client, db_session):
-        from sqlalchemy import text
 
         job = _create_orphan_job(db_session)
         db_session.execute(
@@ -174,7 +163,6 @@ class TestRetryOrphanCleanup:
         assert resp.status_code == 200
         assert resp.json()["success"] is True
 
-        from app.routers.jobs import CF_CLEANUP_TIMEOUT
         mock_delete.assert_called_once_with(
             "cf-token-123", "zone1", "cf_abc123", timeout=CF_CLEANUP_TIMEOUT
         )
@@ -255,7 +243,6 @@ class TestRetryOrphanCleanup:
         assert resp.json()["success"] is True
 
         # The SPECIFIC orphaned record must be deleted (not the lowest-id one).
-        from app.routers.jobs import CF_CLEANUP_TIMEOUT
         mock_delete.assert_called_once_with(
             "cf-token-123", "zone1", "cf_abc123", timeout=CF_CLEANUP_TIMEOUT
         )
@@ -341,7 +328,6 @@ class TestRetryOrphanCleanup:
         assert db_session.get(Job, job.id).status == "pending"
 
     def test_retry_rejects_invalid_json_details(self, client, db_session):
-        from sqlalchemy import text
 
         job = _create_orphan_job(db_session)
         db_session.execute(
@@ -358,7 +344,6 @@ class TestRetryOrphanCleanup:
         assert db_session.get(Job, job.id).status == "pending"
 
     def test_retry_rejects_non_object_details(self, client, db_session):
-        from sqlalchemy import text
 
         job = _create_orphan_job(db_session)
         db_session.execute(
@@ -379,7 +364,6 @@ class TestRetryOrphanCleanup:
     def test_retry_uses_current_zone_when_job_details_lack_zone(
         self, mock_secret, mock_list, client, db_session
     ):
-        from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone-from-settings")
         db_session.commit()
@@ -395,7 +379,6 @@ class TestRetryOrphanCleanup:
         resp = client.post(f"/api/jobs/{job_id}/retry")
 
         assert resp.status_code == 200
-        from app.routers.jobs import CF_CLEANUP_TIMEOUT
         mock_list.assert_called_once_with(
             "cf-token-123", "zone-from-settings", "test.example.com", "A",
             timeout=CF_CLEANUP_TIMEOUT,
@@ -415,7 +398,7 @@ class TestRetryOrphanCleanup:
         job_id = job.id
         # list_a_records returns our orphan's id — but a live DnsRecord now owns it.
         mock_list.return_value = [{"id": "cf_abc123", "content": "100.64.0.9"}]
-        svc = _create_service(client, hostname="test.example.com").json()
+        svc = create_service_api(client, hostname="test.example.com").json()
         db_session.add(DnsRecord(
             service_id=svc["id"],
             hostname="test.example.com",
@@ -451,7 +434,6 @@ class TestRetryOrphanCleanup:
         """Both Cloudflare calls on the lock-held retry path MUST use the short
         cleanup timeout, not the adapter's 30s default, so a slow/unreachable
         Cloudflare cannot stall all service lifecycle work for ~60s."""
-        from app.routers.jobs import CF_CLEANUP_TIMEOUT
 
         assert CF_CLEANUP_TIMEOUT < 30.0
         job = _create_orphan_job(db_session)
@@ -475,7 +457,6 @@ class TestRetryOrphanCleanup:
         set to 'running' before the Cloudflare I/O; if the shortened cleanup
         timeout fires mid-delete the shared except handler MUST roll it back to
         'failed' so a subsequent retry/dismiss is accepted (both reject 'running')."""
-        from app.routers.jobs import CF_CLEANUP_TIMEOUT
 
         job = _create_orphan_job(db_session)
         job_id = job.id
@@ -509,7 +490,6 @@ class TestRetryOrphanCleanup:
 
 class TestResetStaleRunningJobs:
     def test_reset_flips_running_jobs_to_failed(self, db_session):
-        from app.routers.jobs import reset_stale_running_jobs
 
         running = _create_orphan_job(db_session, status="running")
         pending = _create_orphan_job(db_session, status="pending")
@@ -527,7 +507,6 @@ class TestResetStaleRunningJobs:
         # Dismiss is rejected while running...
         assert client.delete(f"/api/jobs/{stuck.id}").status_code == 409
 
-        from app.routers.jobs import reset_stale_running_jobs
         reset_stale_running_jobs(db_session)
 
         # ...but works once the stale job is reclaimed.
@@ -575,7 +554,6 @@ class TestDismissOrphanJob:
         assert db_session.get(Job, job.id) is not None
 
     def test_dismiss_deletes_job_with_invalid_details(self, client, db_session):
-        from sqlalchemy import text
 
         job = _create_orphan_job(db_session)
         job_id = job.id
@@ -604,10 +582,9 @@ class TestDeleteCreatesRetryableOrphan:
     @patch("app.adapters.cloudflare_adapter.list_a_records")
     @patch("app.secrets.read_secret", return_value="cf-token-123")
     def test_full_lifecycle(self, mock_secret, mock_list, mock_delete, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone1")
 
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         # Add a DNS record for this service
         dns = DnsRecord(
@@ -648,9 +625,8 @@ class TestDeleteCreatesRetryableOrphan:
     def test_delete_without_zone_creates_job_retryable_after_zone_configured(
         self, mock_secret, mock_list, client, db_session
     ):
-        from app.settings_store import set_setting
 
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         dns = DnsRecord(
             service_id=svc_id, hostname="nextcloud.example.com",
             record_id="cf_late_zone", value="100.64.0.1",
@@ -675,7 +651,6 @@ class TestDeleteCreatesRetryableOrphan:
         resp = client.post(f"/api/jobs/{job_id}/retry")
 
         assert resp.status_code == 200
-        from app.routers.jobs import CF_CLEANUP_TIMEOUT
         mock_list.assert_called_once_with(
             "cf-token-123", "zone-configured-later", "nextcloud.example.com", "A",
             timeout=CF_CLEANUP_TIMEOUT,

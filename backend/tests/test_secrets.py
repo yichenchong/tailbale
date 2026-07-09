@@ -4,6 +4,7 @@ import stat
 
 import pytest
 
+from app.config import settings
 from app.secrets import (
     CLOUDFLARE_TOKEN,
     cloudflare_credentials,
@@ -69,7 +70,6 @@ class TestSecretStorage:
     def test_atomic_write(self, tmp_data_dir):
         """Verify no .tmp files are left behind after write."""
         write_secret("test_key", "value")
-        from app.config import settings
         tmp_files = list(settings.secrets_dir.glob("*.tmp"))
         assert len(tmp_files) == 0
 
@@ -86,7 +86,6 @@ class TestSecretStorage:
         monkeypatch.setattr(os, "fsync", _spy_fsync)
         write_secret("test_key", "value")
 
-        from app.config import settings
         parent_inode = settings.secrets_dir.stat().st_ino
         assert parent_inode in synced_inodes, (
             "parent directory must be fsynced so the atomic rename is durable"
@@ -99,7 +98,6 @@ class TestSecretStorage:
         finally:
             os.umask(old_umask)
 
-        from app.config import settings
 
         secret_path = settings.secrets_dir / "test_key"
         assert stat.S_IMODE(secret_path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR

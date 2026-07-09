@@ -1,10 +1,15 @@
 """Tests for the centralized event emitter."""
 
+import ast
+import logging
 from datetime import datetime
+from pathlib import Path
 
-from app.events.event_emitter import emit_event
+from app.events.event_emitter import EVENT_KINDS, emit_event
 from app.events.serialization import event_to_dict
 from app.models.event import Event
+from app.models.service import Service
+from app.models.service_status import ServiceStatus
 from app.timeutil import iso
 
 
@@ -21,8 +26,6 @@ class TestEmitEvent:
         assert events[0].details is None
 
     def test_with_service_id(self, db_session):
-        from app.models.service import Service
-        from app.models.service_status import ServiceStatus
 
         svc = Service(
             name="Test", upstream_container_id="c1", upstream_container_name="test",
@@ -96,7 +99,6 @@ class TestEmitEvent:
 
 class TestEventKindsRegistry:
     def test_contains_representative_kinds(self):
-        from app.events.event_emitter import EVENT_KINDS
 
         for kind in (
             "reconcile_completed",
@@ -109,7 +111,6 @@ class TestEventKindsRegistry:
             assert kind in EVENT_KINDS
 
     def test_registered_kind_emits_no_drift_warning(self, db_session, caplog):
-        import logging
 
         with caplog.at_level(logging.WARNING, logger="app.events.event_emitter"):
             emit_event(db_session, None, "reconcile_completed", "All good")
@@ -118,7 +119,6 @@ class TestEventKindsRegistry:
         assert drift == []
 
     def test_unregistered_kind_logs_drift_warning_but_persists(self, db_session, caplog):
-        import logging
 
         with caplog.at_level(logging.WARNING, logger="app.events.event_emitter"):
             evt = emit_event(db_session, None, "totally_made_up_kind", "Drifted")
@@ -151,10 +151,7 @@ class TestEventKindsRegistry:
         ``_persist_status``. Dynamic kinds (variables / ``event["kind"]``) are out
         of static reach and rely on the runtime drift canary instead.
         """
-        import ast
-        from pathlib import Path
 
-        from app.events.event_emitter import EVENT_KINDS
 
         app_dir = Path(__file__).resolve().parents[1] / "app"
         emitted: set[str] = set()

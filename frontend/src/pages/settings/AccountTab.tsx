@@ -3,6 +3,7 @@ import { CheckCircle, XCircle } from "lucide-react"
 import { api } from "@/lib/api"
 import { Field } from "@/components/settings/Field"
 import { errorMessage } from "@/lib/utils"
+import { isPassword, isPresentPassword } from "@/lib/validation"
 
 export function AccountTab() {
   const [currentPassword, setCurrentPassword] = useState("")
@@ -13,8 +14,8 @@ export function AccountTab() {
   const [error, setError] = useState("")
 
   const canSubmit =
-    currentPassword.length > 0 &&
-    newPassword.length >= 8 &&
+    isPresentPassword(currentPassword) &&
+    isPassword(newPassword) &&
     newPassword === confirmPassword &&
     !saving
 

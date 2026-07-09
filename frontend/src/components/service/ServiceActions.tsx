@@ -11,7 +11,7 @@ import {
   Play,
   AlertTriangle,
 } from "lucide-react"
-import { api, type ServiceItem, type EdgeVersionResponse } from "@/lib/api"
+import { type ServiceItem, type EdgeVersionResponse } from "@/lib/api"
 import { useServiceActions } from "./useServiceActions"
 
 /**
@@ -59,6 +59,7 @@ export function ServiceActions({
     confirmForceRenew,
     setConfirmForceRenew,
     renewing,
+    actions,
     runAction,
     handleToggleEnabled,
     handleRecreateEdge,
@@ -126,7 +127,7 @@ export function ServiceActions({
               <span className="text-sm text-yellow-800">Disable this service? The edge container will stop receiving traffic.</span>
               <button onClick={handleToggleEnabled}
                 className="rounded bg-yellow-600 px-2 py-1 text-xs font-medium text-white hover:bg-yellow-700">
-                Disable
+                {actions.disable.label}
               </button>
               <button onClick={() => setConfirmDisable(false)}
                 className="text-xs text-yellow-700 hover:underline">Cancel</button>
@@ -134,18 +135,18 @@ export function ServiceActions({
           ) : (
             <button onClick={() => service.enabled ? setConfirmDisable(true) : handleToggleEnabled()}
               className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-              {service.enabled ? <><PowerOff className="h-4 w-4" /> Disable</> : <><Power className="h-4 w-4" /> Enable</>}
+              {service.enabled ? <><PowerOff className="h-4 w-4" /> {actions.disable.label}</> : <><Power className="h-4 w-4" /> {actions.enable.label}</>}
             </button>
           )}
           {service.enabled && (
             <>
-              <button onClick={() => runAction(() => api.services.reload(id ?? ""))}
+              <button onClick={() => runAction(actions.reload.run)}
                 className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-                <RefreshCw className="h-4 w-4" /> Reload Caddy
+                <RefreshCw className="h-4 w-4" /> {actions.reload.label}
               </button>
-              <button onClick={() => runAction(() => api.services.restartEdge(id ?? ""))}
+              <button onClick={() => runAction(actions.restart.run)}
                 className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-                <RotateCcw className="h-4 w-4" /> Restart Edge
+                <RotateCcw className="h-4 w-4" /> {actions.restart.label}
               </button>
 
               {/* Recreate Edge with confirmation */}
@@ -162,7 +163,7 @@ export function ServiceActions({
               ) : (
                 <button onClick={() => setConfirmRecreate(true)}
                   className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-                  <PackagePlus className="h-4 w-4" /> Recreate Edge
+                  <PackagePlus className="h-4 w-4" /> {actions.recreate.label}
                 </button>
               )}
 
@@ -179,9 +180,9 @@ export function ServiceActions({
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50">
             {renewing ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />} Renew certificate
           </button>
-          <button onClick={() => runAction(() => api.services.reconcile(id ?? ""))}
+          <button onClick={() => runAction(actions.reconcile.run)}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50">
-            <Play className="h-4 w-4" /> Re-run Reconcile
+            <Play className="h-4 w-4" /> {actions.reconcile.label}
           </button>
 
           {/* Delete with cleanup checkboxes */}

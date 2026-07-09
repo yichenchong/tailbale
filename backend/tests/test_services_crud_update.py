@@ -2,12 +2,17 @@
 
 Mirrors app.services.crud (split from test_services_crud.py)."""
 
+import hashlib
 import threading
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 
+from app.locks import _SERVICE_LIFECYCLE_MUTEX
 from app.models.dns_record import DnsRecord
+from app.models.event import Event
+from app.settings_store import set_setting
 from tests._services_helpers import _create_service
 
 
@@ -229,7 +234,6 @@ class TestUpdateUpstreamPortValidation:
 
     def test_update_port_invalid_rejected(self, client):
         """If the new port isn't exposed by the container, update should 422."""
-        from fastapi import HTTPException
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         with patch(
             "app.routers.services._validate_upstream",
@@ -257,7 +261,6 @@ class TestUpdateUpstreamPortValidation:
 
     def test_update_docker_unreachable_503(self, client):
         """If Docker is unreachable during port revalidation, return 503."""
-        from fastapi import HTTPException
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         with patch(
             "app.routers.services._validate_upstream",
@@ -274,9 +277,7 @@ class TestUpdateUpstreamPortValidation:
         """A PUT that changes both hostname and an INVALID port must reject before
         any destructive hostname teardown: the old DNS record and cert dir must be
         left intact, and the hostname must not change."""
-        from fastapi import HTTPException
 
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -364,8 +365,6 @@ class TestUpdatePortValidationHoistedOutOfLock:
     lifecycle op. Pre-fix the validation ran while holding both locks."""
 
     def test_validation_runs_before_lifecycle_lock(self, client):
-        from app.locks import _SERVICE_LIFECYCLE_MUTEX
-
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
 
         observed: dict = {}
@@ -407,10 +406,6 @@ class TestUpdateEventRedactsSnippet:
     its details."""
 
     def test_service_updated_details_redact_raw_snippet(self, client, db_session):
-        import hashlib
-
-        from app.models.event import Event
-
         snippet = "header X-Frame-Options DENY"
         svc_id = _create_service(client).json()["id"]
         resp = client.put(

@@ -2,32 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { api, type ServiceItem } from "@/lib/api"
 import { useResource } from "@/lib/useResource"
 import { isServiceName, isUpstreamPort } from "@/lib/validation"
+import { type ServiceEditState } from "@/lib/serviceTypes"
 
-/** Editable configuration fields + their live validity, owned by the hook. */
-export interface ServiceEditState {
-  editing: boolean
-  setEditing: (v: boolean) => void
-  name: string
-  setName: (v: string) => void
-  port: string
-  setPort: (v: string) => void
-  scheme: string
-  setScheme: (v: string) => void
-  healthcheck: string
-  setHealthcheck: (v: string) => void
-  preserveHost: boolean
-  setPreserveHost: (v: boolean) => void
-  snippet: string
-  setSnippet: (v: string) => void
-  /** Trimmed name (mirrors the backend strip) for messages + request bodies. */
-  normalizedName: string
-  /** Name length within backend bounds (see {@link isServiceName}). */
-  nameValid: boolean
-  /** Port in the backend 1..65535 range (see {@link isUpstreamPort}). */
-  portValid: boolean
-  /** Re-seed every field from the current service (Cancel), ignoring the guard. */
-  reset: () => void
-}
 
 export interface UseServiceDetailResult {
   service: ServiceItem | null

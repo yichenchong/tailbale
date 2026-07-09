@@ -1,11 +1,13 @@
-import { useCallback, useState } from "react"
+import { useCallback } from "react"
 import { Link } from "react-router-dom"
 import { api } from "@/lib/api"
-import { useTimezone, formatDateTime, formatTime as fmtTime } from "@/lib/useTimezone"
+import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
 import { certStatus } from "@/lib/certStatus"
 import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
+import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
+import { usePolledFreshness } from "@/lib/usePolledFreshness"
 import {
   Loader2,
   Activity,
@@ -14,20 +16,19 @@ import {
   XCircle,
   ShieldAlert,
   Clock,
-  RefreshCw,
 } from "lucide-react"
 
 const POLL_INTERVAL = 30_000
 
 export default function Dashboard() {
   const tz = useTimezone()
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
+  const { lastRefresh, markFresh } = usePolledFreshness()
 
   const fetcher = useCallback(() => api.dashboard.summary(), [])
   const { data, loading, error, refresh } = useResource(fetcher, {
     pollMs: POLL_INTERVAL,
     mapError: (e) => (errorMessage(e, "Failed to load")),
-    onData: () => setLastRefresh(new Date()),
+    onData: markFresh,
   })
 
   if (loading && !data) {
@@ -53,38 +54,15 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="mt-1 text-zinc-500">Overview of your exposed services.</p>
         </div>
-        <div className="flex items-center gap-3">
-          {lastRefresh && (
-            <span className="text-xs text-zinc-400">
-              Updated {fmtTime(lastRefresh, tz)}
-            </span>
-          )}
-          <button
-            onClick={() => refresh()}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-          >
-            {loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            Refresh
-          </button>
-        </div>
+        <PolledRefreshControl
+          lastRefresh={lastRefresh}
+          timezone={tz}
+          loading={loading}
+          onRefresh={() => { void refresh() }}
+        />
       </div>
 
-      {/* A failed background poll (or manual refresh) keeps the last-good data on
-          screen; surface the staleness instead of silently presenting it as
-          current. Polite live region (role="status") so it announces to
-          assistive tech when it appears without a focus change (WCAG 4.1.3). */}
-      {error && (
-        <div role="status" className="mt-4 rounded-md bg-amber-50 px-4 py-2 text-sm text-amber-800">
-          {lastRefresh
-            ? `Couldn't refresh \u2014 showing data from ${fmtTime(lastRefresh, tz)}`
-            : "Couldn't refresh \u2014 showing cached data"}
-        </div>
-      )}
+      <StaleDataBanner error={error} lastRefresh={lastRefresh} timezone={tz} />
 
       {/* Summary cards */}
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">

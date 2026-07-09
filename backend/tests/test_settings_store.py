@@ -1,12 +1,17 @@
 """Tests for the settings key-value store."""
 
+from pathlib import Path
+
 import pytest
 
+from app.config import settings as app_settings
+from app.edge.docker_client import resolve_socket
 from app.models.setting import Setting
 from app.settings_store import (
     DEFAULTS,
     get_all_settings,
     get_positive_int_setting,
+    get_runtime_paths,
     get_setting,
     set_setting,
 )
@@ -111,7 +116,6 @@ class TestSettingsStore:
 
 class TestRuntimePaths:
     def test_defaults_fall_back_to_config(self, db_session):
-        from app.settings_store import get_runtime_paths
 
         paths = get_runtime_paths(db_session)
         assert "generated_dir" in paths
@@ -121,7 +125,6 @@ class TestRuntimePaths:
             assert v
 
     def test_db_overrides_config(self, db_session):
-        from app.settings_store import get_runtime_paths, set_setting
 
         set_setting(db_session, "generated_root", "/custom/generated")
         set_setting(db_session, "cert_root", "/custom/certs")
@@ -133,8 +136,6 @@ class TestRuntimePaths:
 
     def test_host_paths_same_as_internal_when_no_host_data_dir(self, db_session):
         """Without HOST_DATA_DIR, host paths equal internal paths."""
-        from app.config import settings as app_settings
-        from app.settings_store import get_runtime_paths
 
         original = app_settings.host_data_dir
         app_settings.host_data_dir = None
@@ -148,10 +149,7 @@ class TestRuntimePaths:
 
     def test_host_paths_translated_when_host_data_dir_set(self, db_session):
         """With HOST_DATA_DIR, host paths replace data_dir prefix."""
-        from pathlib import Path
 
-        from app.config import settings as app_settings
-        from app.settings_store import get_runtime_paths
 
         original_host = app_settings.host_data_dir
         original_data = app_settings.data_dir
@@ -177,10 +175,7 @@ class TestRuntimePaths:
 
     def test_host_paths_do_not_rewrite_paths_outside_data_dir(self, db_session):
         """Custom roots outside DATA_DIR are not remapped with string replacement."""
-        from pathlib import Path
 
-        from app.config import settings as app_settings
-        from app.settings_store import get_runtime_paths, set_setting
 
         original_host = app_settings.host_data_dir
         original_data = app_settings.data_dir
@@ -203,8 +198,6 @@ class TestRuntimePaths:
         """Without HOST_DATA_DIR the host path must be byte-for-byte equal to the
         internal path even when the configured root is non-canonical (contains
         '..'). resolve()-ing only the host side would silently diverge them."""
-        from app.config import settings as app_settings
-        from app.settings_store import get_runtime_paths, set_setting
 
         original_host = app_settings.host_data_dir
         app_settings.host_data_dir = None
@@ -220,30 +213,23 @@ class TestRuntimePaths:
 
 class TestResolveSocket:
     def test_unset_returns_default(self, db_session):
-        from app.edge.docker_client import resolve_socket
 
         # Unset falls back to the default unix socket (non-None).
         assert resolve_socket(db_session) == "unix:///var/run/docker.sock"
 
     def test_empty_returns_none(self, db_session):
-        from app.edge.docker_client import resolve_socket
-        from app.settings_store import set_setting
 
         set_setting(db_session, "docker_socket_path", "")
         db_session.commit()
         assert resolve_socket(db_session) is None
 
     def test_whitespace_returns_none(self, db_session):
-        from app.edge.docker_client import resolve_socket
-        from app.settings_store import set_setting
 
         set_setting(db_session, "docker_socket_path", "   ")
         db_session.commit()
         assert resolve_socket(db_session) is None
 
     def test_configured_value_is_returned(self, db_session):
-        from app.edge.docker_client import resolve_socket
-        from app.settings_store import set_setting
 
         set_setting(db_session, "docker_socket_path", "tcp://10.0.0.1:2375")
         db_session.commit()

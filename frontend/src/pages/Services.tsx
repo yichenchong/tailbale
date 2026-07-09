@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react"
+import { useCallback } from "react"
 import { Link, useNavigate } from "react-router-dom"
 import { api, type ServiceItem } from "@/lib/api"
 import { useTimezone } from "@/lib/useTimezone"
@@ -7,100 +7,23 @@ import { formatCertExpiry } from "@/lib/certStatus"
 import { phaseStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { useTransientMessage } from "@/lib/useTransientMessage"
-import { Loader2, Plus, ExternalLink, MoreVertical } from "lucide-react"
+import { Loader2, Plus, ExternalLink } from "lucide-react"
+import { RowActionsMenu } from "@/components/service/RowActionsMenu"
+import { useRowActionMenu, type RowActionMenuItem } from "@/components/service/useRowActionMenu"
+import { serviceLifecycleActions } from "@/components/service/lifecycleActions"
 
 export default function Services() {
   const navigate = useNavigate()
   const tz = useTimezone()
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null)
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
-  const [menuActiveIndex, setMenuActiveIndex] = useState(0)
+  const menu = useRowActionMenu()
   const { message, show } = useTransientMessage(3000)
-  // Remember the button that opened the row menu so Escape can restore focus to
-  // it (WAI-ARIA menu-button pattern — the trigger declares aria-haspopup).
-  const menuTriggerRef = useRef<HTMLButtonElement | null>(null)
-  // The open row menu's container, so keyboard navigation can enumerate its
-  // menuitems for roving-tabindex focus movement (WAI-ARIA menu pattern).
-  const menuRef = useRef<HTMLDivElement | null>(null)
 
   const fetcher = useCallback(() => api.services.list(), [])
   const { data, loading, error, refresh } = useResource(fetcher)
   const services = data?.services ?? []
 
-  // Close the open row menu on Escape and return focus to its trigger. The
-  // backdrop only handles pointer dismissal; keyboard users need a way out that
-  // matches the aria-haspopup contract (WCAG 2.1.1).
-  useEffect(() => {
-    if (openMenuId === null) return
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key !== "Escape") return
-      setOpenMenuId(null)
-      setMenuPos(null)
-      menuTriggerRef.current?.focus()
-    }
-    document.addEventListener("keydown", onKeyDown)
-    return () => document.removeEventListener("keydown", onKeyDown)
-  }, [openMenuId])
-
-  // Opening the menu moves focus to its first item and resets the roving
-  // tabindex, so Arrow keys drive it immediately (WAI-ARIA menu-button pattern).
-  useEffect(() => {
-    if (openMenuId === null) return
-    setMenuActiveIndex(0)
-    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
-  }, [openMenuId])
-
-  // The menu is position:fixed with coords captured at open time, so scrolling
-  // the Layout <main> or resizing would detach it from its trigger. Close it on
-  // scroll/resize (FA3); `capture` catches scroll from any ancestor because
-  // scroll events don't bubble. A portal would be overkill here.
-  useEffect(() => {
-    if (openMenuId === null) return
-    const close = () => {
-      setOpenMenuId(null)
-      setMenuPos(null)
-    }
-    window.addEventListener("scroll", close, true)
-    window.addEventListener("resize", close)
-    return () => {
-      window.removeEventListener("scroll", close, true)
-      window.removeEventListener("resize", close)
-    }
-  }, [openMenuId])
-
-  // Roving-tabindex keyboard navigation for the open row menu: Arrow keys wrap
-  // between menuitems, Home/End jump to the ends (WAI-ARIA menu pattern).
-  const handleMenuKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    const items = Array.from(
-      e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    )
-    if (items.length === 0) return
-    const current = items.findIndex((el) => el === document.activeElement)
-    let next: number
-    switch (e.key) {
-      case "ArrowDown":
-        next = current < 0 ? 0 : (current + 1) % items.length
-        break
-      case "ArrowUp":
-        next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length
-        break
-      case "Home":
-        next = 0
-        break
-      case "End":
-        next = items.length - 1
-        break
-      default:
-        return
-    }
-    e.preventDefault()
-    setMenuActiveIndex(next)
-    items[next].focus()
-  }
-
   const runAction = async (action: () => Promise<unknown>) => {
-    setOpenMenuId(null)
-    setMenuPos(null)
+    menu.close()
     try {
       await action()
       void refresh()
@@ -110,8 +33,7 @@ export default function Services() {
   }
 
   const handleDelete = async (svc: ServiceItem) => {
-    setOpenMenuId(null)
-    setMenuPos(null)
+    menu.close()
     if (!window.confirm(`Delete service "${svc.name}"? This also removes its DNS record and cannot be undone.`)) return
     try {
       // Match the detail page's default: clean up the Cloudflare DNS record so a
@@ -190,21 +112,19 @@ export default function Services() {
               {services.map((svc) => {
                 const phase = svc.status?.phase || "pending"
                 const cert = formatCertExpiry(svc.status?.cert_expires_at, tz)
-                const menuItems: Array<
-                  | { key: string; label: string; to: string }
-                  | { key: string; label: string; onSelect: () => void; danger?: boolean }
-                > = [
+                const actions = serviceLifecycleActions(svc.id)
+                const menuItems: RowActionMenuItem[] = [
                   { key: "view", label: "View Details", to: `/services/${encodeURIComponent(svc.id)}` },
                   ...(svc.enabled
                     ? [
-                        { key: "reload", label: "Reload Caddy", onSelect: () => runAction(() => api.services.reload(svc.id)) },
-                        { key: "restart", label: "Restart Edge", onSelect: () => runAction(() => api.services.restartEdge(svc.id)) },
-                        { key: "recreate", label: "Recreate Edge", onSelect: () => runAction(() => api.services.recreateEdge(svc.id)) },
+                        { key: actions.reload.key, label: actions.reload.label, onSelect: () => runAction(actions.reload.run) },
+                        { key: actions.restart.key, label: actions.restart.label, onSelect: () => runAction(actions.restart.run) },
+                        { key: actions.recreate.key, label: actions.recreate.label, onSelect: () => runAction(actions.recreate.run) },
                       ]
                     : []),
                   svc.enabled
-                    ? { key: "disable", label: "Disable", onSelect: () => runAction(() => api.services.disable(svc.id)) }
-                    : { key: "enable", label: "Enable", onSelect: () => runAction(() => api.services.update(svc.id, { enabled: true })) },
+                    ? { key: actions.disable.key, label: actions.disable.label, onSelect: () => runAction(actions.disable.run) }
+                    : { key: actions.enable.key, label: actions.enable.label, onSelect: () => runAction(actions.enable.run) },
                   { key: "delete", label: "Delete", onSelect: () => handleDelete(svc), danger: true },
                 ]
                 return (
@@ -238,74 +158,7 @@ export default function Services() {
                       {cert.text}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="inline-block">
-                        <button
-                          onClick={(e) => {
-                            if (openMenuId === svc.id) {
-                              setOpenMenuId(null)
-                              setMenuPos(null)
-                            } else {
-                              const btn = e.currentTarget
-                              const rect = btn.getBoundingClientRect()
-                              setMenuPos({ top: rect.bottom + 4, left: rect.right - 176 })
-                              setOpenMenuId(svc.id)
-                              menuTriggerRef.current = btn
-                            }
-                          }}
-                          className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
-                          aria-label="Actions"
-                          aria-haspopup="true"
-                          aria-expanded={openMenuId === svc.id}
-                        >
-                          <MoreVertical className="h-4 w-4" />
-                        </button>
-                        {openMenuId === svc.id && menuPos && (
-                          <>
-                            <div className="fixed inset-0 z-10" onClick={() => { setOpenMenuId(null); setMenuPos(null) }} />
-                            <div
-                              ref={menuRef}
-                              role="menu"
-                              aria-label="Service actions"
-                              className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
-                              style={{ top: menuPos.top, left: menuPos.left }}
-                              onKeyDown={handleMenuKeyDown}
-                            >
-                              {menuItems.map((item, index) => {
-                                const tabIndex = index === menuActiveIndex ? 0 : -1
-                                const base = "block w-full px-3 py-1.5 text-left text-sm"
-                                if ("to" in item) {
-                                  return (
-                                    <Link
-                                      key={item.key}
-                                      to={item.to}
-                                      role="menuitem"
-                                      tabIndex={tabIndex}
-                                      className={cn(base, "text-zinc-700 hover:bg-zinc-50")}
-                                    >
-                                      {item.label}
-                                    </Link>
-                                  )
-                                }
-                                return (
-                                  <button
-                                    key={item.key}
-                                    type="button"
-                                    role="menuitem"
-                                    tabIndex={tabIndex}
-                                    onClick={item.onSelect}
-                                    className={cn(
-                                      base,
-                                      item.danger ? "text-red-600 hover:bg-red-50" : "text-zinc-700 hover:bg-zinc-50",
-                                    )}
-                                  >
-                                    {item.label}
-                                  </button>
-                                )
-                              })}
-                            </div>
-                          </>
-                        )}
-                      </div>
+                      <RowActionsMenu rowId={svc.id} items={menuItems} menu={menu} />
                     </td>
                   </tr>
                 )

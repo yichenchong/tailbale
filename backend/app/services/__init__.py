@@ -13,12 +13,8 @@ never FastAPI ``HTTPException``; :mod:`app.main` maps them to HTTP.
 # directly (AR9).
 from app.edge.docker_client import docker_client, resolve_socket
 from app.services.cert_ops import renew_cert
-from app.services.crud import (
-    create_service,
-    delete_service_record,
-    disable_service,
-    update_service,
-)
+from app.services.create import create_service
+from app.services.delete import delete_service_record, disable_service
 from app.services.edge_ops import (
     full_health_check,
     get_edge_logs,
@@ -41,6 +37,7 @@ from app.services.errors import (
     UpstreamApiError,
 )
 from app.services.mapping import to_response
+from app.services.update import update_service
 
 __all__ = [
     "DockerUnavailable",

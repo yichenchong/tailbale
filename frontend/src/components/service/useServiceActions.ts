@@ -2,6 +2,7 @@ import { useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type ServiceItem } from "@/lib/api"
 import { errorMessage } from "@/lib/utils"
+import { serviceLifecycleActions } from "./lifecycleActions"
 
 export interface UseServiceActionsParams {
   service: ServiceItem
@@ -38,6 +39,8 @@ export function useServiceActions({
   const [confirmForceRenew, setConfirmForceRenew] = useState(false)
   const [renewing, setRenewing] = useState(false)
 
+  const actions = serviceLifecycleActions(id ?? "")
+
   const runAction = async (action: () => Promise<unknown>) => {
     clearActionMsg()
     try {
@@ -52,10 +55,10 @@ export function useServiceActions({
     setConfirmDisable(false)
     try {
       if (service.enabled) {
-        const svc = await api.services.disable(id ?? "")
+        const svc = await actions.disable.run()
         applyServiceUpdate(svc)
       } else {
-        const svc = await api.services.update(id ?? "", { enabled: true })
+        const svc = await actions.enable.run()
         applyServiceUpdate(svc)
       }
     } catch (e) {
@@ -65,7 +68,7 @@ export function useServiceActions({
 
   const handleRecreateEdge = async () => {
     setConfirmRecreate(false)
-    runAction(() => api.services.recreateEdge(id ?? ""))
+    runAction(actions.recreate.run)
   }
 
   const handleDelete = async () => {
@@ -117,6 +120,7 @@ export function useServiceActions({
   }
 
   return {
+    actions,
     deleting,
     confirmDelete,
     setConfirmDelete,

@@ -3,10 +3,12 @@
 import contextlib
 import os
 import stat
+from pathlib import Path as _Path
 
 import pytest
 from pydantic import ValidationError
 
+from app import config as config_module
 from app.config import Settings, _load_or_create_jwt_secret
 
 
@@ -25,7 +27,6 @@ def test_generated_jwt_secret_is_owner_only(tmp_path):
 def test_generated_jwt_secret_fsyncs_parent_directory(tmp_path, monkeypatch):
     """The first-run secret write must fsync the secrets directory, not just the
     temp file, so the publishing rename survives a crash."""
-    from app import config as config_module
 
     synced_inodes: list[int] = []
 
@@ -185,7 +186,6 @@ def test_jwt_secret_read_toctou_falls_through_to_generate(tmp_path, monkeypatch)
     """If the secret file vanishes between a would-be existence check and the read
     (TOCTOU vs. a concurrent first-run writer/deleter), the read must catch
     FileNotFoundError and fall through to generate, never propagate it."""
-    from pathlib import Path as _Path
 
     secrets_dir = tmp_path / "secrets"
     secrets_dir.mkdir(parents=True)

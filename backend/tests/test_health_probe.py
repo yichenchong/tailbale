@@ -1,0 +1,169 @@
+"""HTTPS probe helper tests."""
+
+from unittest.mock import MagicMock
+
+import docker.errors
+import pytest
+
+from app.health import probe
+from app.models.service import Service
+
+
+def _service(**overrides):
+    defaults = {
+        "name": "Test",
+        "upstream_container_id": "c1",
+        "upstream_container_name": "t",
+        "upstream_scheme": "http",
+        "upstream_port": 80,
+        "hostname": "t.example.com",
+        "base_domain": "example.com",
+        "edge_container_name": "e",
+        "network_name": "n",
+        "ts_hostname": "ts",
+    }
+    defaults.update(overrides)
+    service = Service(**defaults)
+    service.id = overrides.get("id", "svc-probe")
+    return service
+
+
+def _client_with_edge(container):
+    client = MagicMock()
+    client.containers.get.return_value = container
+    return client
+
+
+def _running_edge(exit_code=0, output=b"200"):
+    container = MagicMock()
+    container.status = "running"
+    container.exec_run.return_value = (exit_code, output)
+    return container
+
+
+class TestCheckHttpsProbe:
+    def test_false_when_no_ip(self, caplog):
+        assert probe.check_https_probe(_service(), None) is False
+        assert "missing Tailscale IP" in caplog.text
+
+    def test_false_when_no_client(self, caplog):
+        assert probe.check_https_probe(_service(), "100.64.0.1", client=None) is False
+        assert "Docker client unavailable" in caplog.text
+
+    def test_success(self):
+        service = _service(hostname="probe.example.com")
+        client = _client_with_edge(_running_edge(0, b"200"))
+
+        assert probe.check_https_probe(service, "100.64.0.1", client=client) is True
+        client.containers.get.assert_called_once_with("e")
+
+    def test_runs_curl_in_edge_container(self):
+        service = _service(hostname="tls.example.com", edge_container_name="edge_tls")
+        container = _running_edge(0, b"200")
+        client = _client_with_edge(container)
+
+        probe.check_https_probe(service, "100.64.0.1", client=client)
+
+        container.exec_run.assert_called_once()
+        command = container.exec_run.call_args.args[0]
+        assert "curl" in command
+        assert "https://localhost:443/" in command
+        assert "tls.example.com" in " ".join(command)
+
+    def test_uses_configured_healthcheck_path(self):
+        service = _service(
+            hostname="tls.example.com",
+            edge_container_name="edge_tls",
+            healthcheck_path="readyz",
+        )
+        container = _running_edge(0, b"200")
+        client = _client_with_edge(container)
+
+        probe.check_https_probe(service, "100.64.0.1", client=client)
+
+        command = container.exec_run.call_args.args[0]
+        assert "https://localhost:443/readyz" in command
+
+    def test_5xx_is_failure(self, caplog):
+        client = _client_with_edge(_running_edge(0, b"502"))
+
+        assert probe.check_https_probe(_service(hostname="fail.example.com"), "100.64.0.1", client) is False
+        assert "upstream returned 5xx" in caplog.text
+        assert "http_code=502" in caplog.text
+
+    def test_4xx_is_success(self):
+        client = _client_with_edge(_running_edge(0, b"401"))
+
+        assert probe.check_https_probe(_service(hostname="auth.example.com"), "100.64.0.1", client) is True
+
+    def test_connection_error_is_failure(self, caplog):
+        client = _client_with_edge(_running_edge(7, b"curl: (7) Failed to connect"))
+
+        assert probe.check_https_probe(_service(hostname="err.example.com"), "100.64.0.1", client) is False
+        assert "curl returned non-zero" in caplog.text
+        assert "exit_code=7" in caplog.text
+
+    def test_container_not_running(self, caplog):
+        container = MagicMock()
+        container.status = "restarting"
+        client = _client_with_edge(container)
+
+        assert probe.check_https_probe(_service(), "100.64.0.1", client=client) is False
+        assert "edge container not running" in caplog.text
+        assert "container_status=restarting" in caplog.text
+
+    def test_no_response_is_failure(self, caplog):
+        client = _client_with_edge(_running_edge(0, b"000"))
+
+        assert probe.check_https_probe(_service(), "100.64.0.1", client=client) is False
+        assert "no HTTP response received" in caplog.text
+        assert "http_code=000" in caplog.text
+
+    def test_rejects_malformed_status(self, caplog):
+        client = _client_with_edge(_running_edge(0, b"00"))
+
+        assert probe.check_https_probe(_service(hostname="bad.example.com"), "100.64.0.1", client) is False
+        assert "did not return a valid HTTP status" in caplog.text
+
+    def test_recovers_via_label_search_after_transient_named_lookup_error(self):
+        edge = _running_edge(0, b"200")
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.APIError("daemon busy")
+        client.containers.list.return_value = [edge]
+
+        assert probe.check_https_probe(_service(id="svc-transient"), "100.64.0.5", client) is True
+
+
+class TestClassifyProbeResult:
+    @pytest.mark.parametrize(
+        ("name", "exit_code", "output", "expected"),
+        [
+            ("2xx", 0, b"200", True),
+            ("3xx", 0, b"301", True),
+            ("4xx", 0, b"401", True),
+            ("nonzero_curl_exit", 7, b"curl: (7) Failed to connect", False),
+            ("5xx", 0, b"502", False),
+            ("no_response_000", 0, b"000", False),
+            ("non_three_digit_status", 0, b"00", False),
+            ("empty_output", 0, b"", False),
+            ("none_output", 0, None, False),
+            ("trailing_numeric_status", 0, b"xx200", True),
+            ("trailing_non_digit_status", 0, b"200xx", False),
+        ],
+    )
+    def test_classifies_curl_exit_and_http_status(self, name, exit_code, output, expected):
+        assert name
+        assert probe.classify_probe_result(exit_code, output) is expected
+
+
+class TestSummarizeProbeOutput:
+    def test_none_output_is_empty_string(self):
+        assert probe.summarize_probe_output(None) == ""
+
+    def test_bytes_are_decoded_and_whitespace_collapsed(self):
+        assert probe.summarize_probe_output(b"  curl:  (7)\n failed ") == "curl: (7) failed"
+
+    def test_long_output_is_truncated_with_ellipsis(self):
+        result = probe.summarize_probe_output("x" * 500, limit=200)
+        assert len(result) == 200
+        assert result == "x" * 197 + "..."

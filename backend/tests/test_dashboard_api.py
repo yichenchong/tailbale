@@ -6,22 +6,22 @@ from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
+from app.settings_store import set_setting
+from tests._services_helpers import create_service_db
 
 
 def _create_service(db, name="TestApp", phase="pending"):
     slug = name.lower().replace(" ", "")
-    svc = Service(
-        name=name, upstream_container_id="abc123",
-        upstream_container_name=slug, upstream_scheme="http",
-        upstream_port=80, hostname=f"{slug}.example.com",
-        base_domain="example.com", edge_container_name=f"edge_{slug}",
-        network_name=f"edge_net_{slug}", ts_hostname=f"edge-{slug}",
+    return create_service_db(
+        db,
+        name=name,
+        upstream_container_name=slug,
+        hostname=f"{slug}.example.com",
+        edge_container_name=f"edge_{slug}",
+        network_name=f"edge_net_{slug}",
+        ts_hostname=f"edge-{slug}",
+        status_phase=phase,
     )
-    db.add(svc)
-    db.flush()
-    db.add(ServiceStatus(service_id=svc.id, phase=phase))
-    db.commit()
-    return svc
 
 
 class TestDashboardSummary:
@@ -103,7 +103,6 @@ class TestDashboardSummary:
         # representable date -> OverflowError -> the whole /dashboard/summary
         # 500s. The consumer must clamp (matching events/retention_task.py), so
         # an unbounded horizon flags every cert instead of crashing.
-        from app.settings_store import set_setting
 
         svc = _create_service(db_session, "Overflow")
         db_session.add(Certificate(
@@ -155,7 +154,6 @@ class TestDashboardSummary:
         # cert_renewal_window_days, not a hard-coded 30. With the window widened
         # to 45, a cert 40 days out (excluded under the old 30-day literal) is
         # now flagged for attention.
-        from app.settings_store import set_setting
 
         svc = _create_service(db_session, "Wide")
         db_session.add(Certificate(
@@ -174,7 +172,6 @@ class TestDashboardSummary:
     def test_attention_window_narrowed_excludes_cert(self, client, db_session):
         # AR3, other direction: narrowing the window to 7 days drops a cert
         # 20 days out that the old 30-day literal would have flagged.
-        from app.settings_store import set_setting
 
         svc = _create_service(db_session, "Narrow")
         db_session.add(Certificate(

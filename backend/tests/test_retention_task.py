@@ -1,5 +1,6 @@
 """Tests for the event-log retention task."""
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -146,7 +147,6 @@ class TestRetentionLoop:
         # and back off with the daily interval — never crash the task or
         # tight-loop. Drive exactly one iteration, then break out on the
         # post-iteration sleep via a sentinel.
-        import asyncio
 
         calls = {"purge": 0, "sleeps": []}
 
@@ -186,7 +186,6 @@ class TestRetentionLoop:
         # effect on the next sweep). Without this, a refactor that hoisted the
         # setting read out of the per-pass work — or drifted the startup delay /
         # interval — would silently break behavior no other test pins.
-        import asyncio
 
         purge_calls = {"n": 0}
 
@@ -229,7 +228,6 @@ class TestRetentionLoop:
         # the loop must treat the pass as a normal success — sleep the daily
         # interval, NOT enter the error branch and back off forever (the exact
         # failure the guard exists to prevent).
-        import asyncio
 
         calls = {"purge": 0}
 
@@ -267,7 +265,6 @@ class TestRetentionLoop:
         # Graceful shutdown: a CancelledError raised during the loop (here from the
         # startup sleep) must propagate so the task terminates cleanly — never be
         # swallowed by the generic error/back-off branch.
-        import asyncio
 
         async def cancel_on_startup(seconds):
             raise asyncio.CancelledError

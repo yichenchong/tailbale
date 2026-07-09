@@ -2,9 +2,20 @@
 
 Feature-specific tests live in test_services_crud_{create,update,lifecycle}.py / test_services_edge_ops.py / test_services_cert_ops.py."""
 
+import ast
+import logging
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import docker
+import requests
+from sqlalchemy import text
+
+from app.models.certificate import Certificate
+from app.models.event import Event
+from app.models.service_status import ServiceStatus
+from app.settings_store import set_setting
 from tests._services_helpers import (
     _create_service,
     _create_service_in_db,
@@ -25,16 +36,12 @@ class TestStubActionEndpoints:
 
 class TestStatusResponseFields:
     def test_status_includes_health_checks_and_cert(self, client, db_session):
-        from app.models.certificate import Certificate
-        from app.models.service_status import ServiceStatus
-
         svc_id = _create_service(client).json()["id"]
         status = db_session.get(ServiceStatus, svc_id)
         status.health_checks = {"edge_container_running": True, "cert_present": False}
         db_session.commit()
 
         cert = Certificate(service_id=svc_id, hostname="nextcloud.example.com")
-        from datetime import datetime
         cert.expires_at = datetime(2026, 8, 1)
         db_session.add(cert)
         db_session.commit()
@@ -52,10 +59,6 @@ class TestStatusResponseFields:
         assert data["status"]["cert_expires_at"] is None
 
     def test_list_includes_cert_expiry(self, client, db_session):
-        from datetime import datetime
-
-        from app.models.certificate import Certificate
-
         svc_id = _create_service(client).json()["id"]
         cert = Certificate(service_id=svc_id, hostname="nextcloud.example.com")
         cert.expires_at = datetime(2026, 7, 15)
@@ -67,10 +70,6 @@ class TestStatusResponseFields:
         assert svc["status"]["cert_expires_at"] == "2026-07-15T00:00:00"
 
     def test_update_response_includes_cert_expiry(self, client, db_session):
-        from datetime import datetime
-
-        from app.models.certificate import Certificate
-
         svc_id = _create_service(client).json()["id"]
         cert = Certificate(service_id=svc_id, hostname="nextcloud.example.com")
         cert.expires_at = datetime(2026, 9, 1)
@@ -82,10 +81,6 @@ class TestStatusResponseFields:
         assert resp.json()["status"]["cert_expires_at"] == "2026-09-01T00:00:00"
 
     def test_disable_response_includes_cert_expiry(self, client, db_session):
-        from datetime import datetime
-
-        from app.models.certificate import Certificate
-
         svc_id = _create_service(client).json()["id"]
         cert = Certificate(service_id=svc_id, hostname="nextcloud.example.com")
         cert.expires_at = datetime(2026, 9, 2)
@@ -102,10 +97,6 @@ class TestCertLogs:
     events-list hardening) instead of 500-ing the whole response."""
 
     def test_malformed_cert_event_details_do_not_break_listing(self, client, db_session):
-        from sqlalchemy import text
-
-        from app.models.event import Event
-
         svc = _create_service_in_db(db_session)
         bad = Event(
             service_id=svc.id, kind="cert_failed", level="error",
@@ -139,9 +130,7 @@ class TestUnusedImportCleanup:
 
     @staticmethod
     def _endpoint_node(name):
-        import ast
-
-        source = Path(__file__).parent.parent / "app" / "routers" / "services.py"
+        source = Path(__file__).parent.parent / "app" / "routers" / "service_actions.py"
         tree = ast.parse(source.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             # Match sync OR async defs: an endpoint switching between the two
@@ -149,12 +138,10 @@ class TestUnusedImportCleanup:
             # turn this guard into a vacuous pass.
             if isinstance(node, ast.AsyncFunctionDef | ast.FunctionDef) and node.name == name:
                 return node
-        raise AssertionError(f"endpoint {name!r} not found in routers/services.py")
+        raise AssertionError(f"endpoint {name!r} not found in routers/service_actions.py")
 
     @staticmethod
     def _assert_no_config_settings_import(node, fname):
-        import ast
-
         for child in ast.walk(node):
             if isinstance(child, ast.ImportFrom) and child.module and "config" in child.module:
                 names = [alias.name for alias in child.names]
@@ -176,8 +163,6 @@ class TestActionEndpointErrorDetailGeneric:
     MUST record the full exception (with traceback) server-side."""
 
     def test_renew_cert_500_is_generic_and_logged(self, client, caplog):
-        import logging
-
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         secret = "SENSITIVE /var/secret/key.pem boom"
         with patch(
@@ -195,8 +180,6 @@ class TestActionEndpointErrorDetailGeneric:
 
     @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_500_is_generic_and_logged(self, mock_reload, client, caplog):
-        import logging
-
         secret = "SENSITIVE docker.sock denied at /run/x"
         mock_reload.side_effect = RuntimeError(secret)
         svc_id = _create_service(client, name="App2", hostname="app2.example.com").json()["id"]
@@ -211,10 +194,6 @@ class TestActionEndpointErrorDetailGeneric:
 
     @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_docker_unreachable_503_is_generic_and_logged(self, mock_reload, client, caplog):
-        import logging
-
-        import docker
-
         secret = "unix:///run/leaky-docker.sock connection refused"
         mock_reload.side_effect = docker.errors.DockerException(secret)
         svc_id = _create_service(client, name="App2", hostname="app2.example.com").json()["id"]
@@ -229,10 +208,6 @@ class TestActionEndpointErrorDetailGeneric:
 
     @patch("app.edge.container_manager.restart_edge")
     def test_restart_edge_docker_unreachable_503_is_generic_and_logged(self, mock_restart, client, caplog):
-        import logging
-
-        import requests
-
         secret = "Connection refused to unix:///run/leaky-docker.sock"
         mock_restart.side_effect = requests.exceptions.ConnectionError(secret)
         svc_id = _create_service(client, name="App3", hostname="app3.example.com").json()["id"]
@@ -250,10 +225,6 @@ class TestActionEndpointErrorDetailGeneric:
     def test_recreate_edge_docker_unreachable_503_is_generic_and_logged(
         self, mock_recreate, mock_secret, client, caplog,
     ):
-        import logging
-
-        import docker
-
         secret = "DOCKER_HOST tcp://10.0.0.5:2375 unreachable"
         mock_recreate.side_effect = docker.errors.DockerException(secret)
         svc_id = _create_service(client, name="App4", hostname="app4.example.com").json()["id"]
@@ -297,9 +268,6 @@ class TestHealthCheckFullDockerSocket:
     ):
         """cf_error must not leak the Cloudflare request URL (embeds cf_zone_id)
         into the 200 body; the real error is logged server-side."""
-        import logging
-
-        from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone-abc123")
         db_session.commit()
@@ -327,7 +295,6 @@ class TestHealthCheckFullDockerSocket:
         whose content is also None, cf_ip_matches_tailscale must be False — not a
         None == None false positive. Mirrors the current_ip guard dns_matches_ip
         already uses on the sibling line."""
-        from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone-abc123")
         db_session.commit()

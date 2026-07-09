@@ -1,11 +1,27 @@
 """Tests for the Cloudflare API v4 adapter."""
 
+import inspect
+import json as _json
 import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.adapters.cloudflare_adapter import CloudflareAPIError, list_a_records, verify_zone
+from app.adapters import cloudflare_adapter as cf
+from app.adapters import dns_reconciler
+from app.adapters.cloudflare_adapter import (
+    CF_FIND_PER_PAGE,
+    CloudflareAPIError,
+    create_a_record,
+    delete_a_record,
+    find_record,
+    is_not_found_error,
+    list_a_records,
+    ownership_comment,
+    update_a_record,
+    verify_zone,
+)
+from app.routers import jobs
 
 
 def _cf_response(success=True, result=None, errors=None):
@@ -21,7 +37,6 @@ def _cf_response(success=True, result=None, errors=None):
 class TestRequestHelper:
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_composes_post_request_and_checks_action(self, mock_post):
-        from app.adapters import cloudflare_adapter as cf
 
         response = _cf_response(result={"id": "r1"})
         mock_post.return_value = response
@@ -49,7 +64,6 @@ class TestRequestHelper:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.delete")
     def test_omits_absent_optional_kwargs(self, mock_delete):
-        from app.adapters import cloudflare_adapter as cf
 
         response = _cf_response(result={"id": "r1"})
         mock_delete.return_value = response
@@ -71,7 +85,6 @@ class TestRequestHelper:
 class TestSharedErrorHandling:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_raises_on_error(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         mock_get.return_value = _cf_response(
             success=False, errors=[{"message": "Invalid token"}]
@@ -82,7 +95,6 @@ class TestSharedErrorHandling:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_formats_non_dict_cloudflare_errors(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         mock_get.return_value = _cf_response(
             success=False,
@@ -96,7 +108,6 @@ class TestSharedErrorHandling:
             find_record("bad-token", "z1", "app.example.com")
 
     def test_record_not_found_detection_does_not_match_zone_errors(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         assert is_not_found_error(
             CloudflareAPIError(
@@ -114,7 +125,6 @@ class TestSharedErrorHandling:
         )
 
     def test_record_does_not_exist_81044_is_treated_as_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # Cloudflare returns code 81044 / "Record does not exist." when deleting
         # an already-removed record; cleanup must treat that as already gone.
@@ -143,7 +153,6 @@ class TestSharedErrorHandling:
         )
 
     def test_bare_generic_1001_is_not_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # 1001 is a GENERIC Cloudflare error code, not record-not-found (that's
         # 81044). A delete failing for an unrelated reason that happens to carry
@@ -158,7 +167,6 @@ class TestSharedErrorHandling:
         )
 
     def test_1001_with_record_not_found_message_is_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # A 1001 carrying an actual record-not-found MESSAGE is still treated as
         # already-gone via the message path, even though the bare code does not.
@@ -171,14 +179,12 @@ class TestSharedErrorHandling:
         )
 
     def test_generic_exception_with_record_message_is_gone(self):
-        from app.adapters.cloudflare_adapter import is_not_found_error
 
         # A plain (non-CloudflareAPIError) exception surfaced by delete whose
         # message says the record is gone is still treated as already-removed.
         assert is_not_found_error(RuntimeError("DNS record does not exist"))
 
     def test_transient_edge_5xx_is_not_gone(self):
-        from app.adapters.cloudflare_adapter import is_not_found_error
 
         # A non-JSON edge 5xx during delete must NOT be mistaken for "record
         # gone", or cleanup would drop the local row on a transient outage.
@@ -189,7 +195,6 @@ class TestSharedErrorHandling:
         )
 
     def test_non_delete_action_not_found_is_not_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # A not-found surfaced by a non-delete action (e.g. find_record) must not
         # be treated as a delete-time "already gone", even with code 81044.
@@ -202,7 +207,6 @@ class TestSharedErrorHandling:
         )
 
     def test_delete_error_empty_errors_falls_back_to_message(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # With no structured errors, fall back to the CloudflareAPIError message.
         assert is_not_found_error(
@@ -213,7 +217,6 @@ class TestSharedErrorHandling:
         )
 
     def test_non_dict_error_body_record_gone_via_message(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # Cloudflare normally returns structured dict errors, but the classifier
         # also handles a non-dict (bare string) error entry: a string saying the
@@ -224,7 +227,6 @@ class TestSharedErrorHandling:
         )
 
     def test_non_dict_error_body_unrelated_is_not_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # A non-dict error entry that is NOT a record-not-found message must NOT be
         # swallowed, or a transient failure would orphan the real CF record.
@@ -233,7 +235,6 @@ class TestSharedErrorHandling:
         )
 
     def test_mixed_errors_any_not_found_match_is_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # A delete can fail with MULTIPLE errors. The classifier scans the whole
         # list, not just the first entry: an unrelated 1001 ahead of a real 81044
@@ -250,7 +251,6 @@ class TestSharedErrorHandling:
         )
 
     def test_mixed_errors_none_match_is_not_gone(self):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, is_not_found_error
 
         # When NO entry in a multi-error list is record-not-found, the loop must
         # fall through to False -- never default to "gone" on an unrelated batch.
@@ -267,9 +267,7 @@ class TestSharedErrorHandling:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_non_json_edge_error_raises_typed_cloudflare_error(self, mock_get):
-        import json as _json
 
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, find_record
 
         # Cloudflare's edge can return an HTML 5xx page instead of JSON. The
         # adapter must translate that into the SAME typed CloudflareAPIError every
@@ -287,7 +285,6 @@ class TestSharedErrorHandling:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_unexpected_response_shape_raises_typed_cloudflare_error(self, mock_get):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, find_record
 
         # A 200 whose JSON body is not an object (a bare list/string) must surface
         # the same typed CloudflareAPIError, not an opaque ``.get`` AttributeError.
@@ -302,7 +299,6 @@ class TestSharedErrorHandling:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_failure_without_structured_errors_falls_back_to_body_text(self, mock_get):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, find_record
 
         # A Cloudflare failure envelope (``success: false``) can arrive with an EMPTY
         # ``errors`` list. _check_response must still raise the typed
@@ -325,7 +321,6 @@ class TestSharedErrorHandling:
 class TestFindRecord:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_finds_existing_record(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         record = {"id": "r1", "type": "A", "name": "app.example.com", "content": "100.64.0.1"}
         mock_get.return_value = _cf_response(result=[record])
@@ -338,7 +333,6 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_returns_none_when_not_found(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         mock_get.return_value = _cf_response(result=[])
 
@@ -347,7 +341,6 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_passes_type_and_name_params(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         mock_get.return_value = _cf_response(result=[])
 
@@ -358,9 +351,7 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_multiple_records_pick_is_deterministic_and_warns(self, mock_get, caplog):
-        import logging
 
-        from app.adapters.cloudflare_adapter import find_record
 
         records = [
             {"id": "r3", "type": "A", "name": "dup.example.com", "content": "100.64.0.3"},
@@ -382,7 +373,6 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_multiple_records_pick_stable_under_reordering(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         records = [
             {"id": "r1", "type": "A", "name": "dup.example.com", "content": "100.64.0.1"},
@@ -401,9 +391,7 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_single_record_does_not_warn(self, mock_get, caplog):
-        import logging
 
-        from app.adapters.cloudflare_adapter import find_record
 
         record = {"id": "r1", "type": "A", "name": "app.example.com", "content": "100.64.0.1"}
         mock_get.return_value = _cf_response(result=[record])
@@ -416,7 +404,6 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_default_timeout_is_30(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         mock_get.return_value = _cf_response(result=[])
         find_record("cf-token", "z1", "app.example.com")
@@ -424,7 +411,6 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_custom_timeout_is_threaded_through(self, mock_get):
-        from app.adapters.cloudflare_adapter import find_record
 
         mock_get.return_value = _cf_response(result=[])
         find_record("cf-token", "z1", "app.example.com", "A", timeout=10.0)
@@ -432,7 +418,6 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_requests_larger_per_page(self, mock_get):
-        from app.adapters.cloudflare_adapter import CF_FIND_PER_PAGE, find_record
 
         # Cloudflare's list endpoint defaults to per_page=20; find_record must
         # request a larger page explicitly so a hostname with up to CF_FIND_PER_PAGE
@@ -445,9 +430,7 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_warns_when_result_set_truncated(self, mock_get, caplog):
-        import logging
 
-        from app.adapters.cloudflare_adapter import find_record
 
         # Cloudflare reports MORE matching records (total_count) than the single
         # page returned: the deterministic pick is no longer guaranteed global, so
@@ -470,9 +453,7 @@ class TestFindRecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_no_truncation_warning_when_full_set_returned(self, mock_get, caplog):
-        import logging
 
-        from app.adapters.cloudflare_adapter import find_record
 
         # total_count equals what was returned -> nothing was truncated -> the only
         # warning allowed is the multi-record determinism note, never a truncation one.
@@ -495,7 +476,6 @@ class TestFindRecord:
 class TestCreateARecord:
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_creates_record(self, mock_post):
-        from app.adapters.cloudflare_adapter import create_a_record
 
         created = {"id": "new_r1", "type": "A", "name": "app.example.com", "content": "100.64.0.1"}
         mock_post.return_value = _cf_response(result=created)
@@ -513,7 +493,6 @@ class TestCreateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_raises_on_failure(self, mock_post):
-        from app.adapters.cloudflare_adapter import create_a_record
 
         mock_post.return_value = _cf_response(
             success=False, errors=[{"message": "Record already exists"}]
@@ -524,7 +503,6 @@ class TestCreateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_honors_explicit_timeout(self, mock_post):
-        from app.adapters.cloudflare_adapter import create_a_record
 
         mock_post.return_value = _cf_response(result={"id": "new_r1"})
 
@@ -533,7 +511,6 @@ class TestCreateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_defaults_to_30s_timeout(self, mock_post):
-        from app.adapters.cloudflare_adapter import create_a_record
 
         mock_post.return_value = _cf_response(result={"id": "new_r1"})
 
@@ -549,7 +526,6 @@ class TestCreateARecord:
         cryptic AttributeError. The adapter coerces None to {} so the caller gets
         a clean record-id check instead.
         """
-        from app.adapters.cloudflare_adapter import create_a_record
 
         resp = MagicMock()
         resp.status_code = 200
@@ -561,7 +537,6 @@ class TestCreateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_includes_comment_in_body_when_passed(self, mock_post):
-        from app.adapters.cloudflare_adapter import create_a_record
 
         mock_post.return_value = _cf_response(result={"id": "new_r1"})
 
@@ -573,7 +548,6 @@ class TestCreateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.post")
     def test_omits_comment_key_when_not_passed(self, mock_post):
-        from app.adapters.cloudflare_adapter import create_a_record
 
         mock_post.return_value = _cf_response(result={"id": "new_r1"})
 
@@ -585,7 +559,6 @@ class TestCreateARecord:
 class TestUpdateARecord:
     @patch("app.adapters.cloudflare_adapter.httpx2.patch")
     def test_updates_record(self, mock_patch):
-        from app.adapters.cloudflare_adapter import update_a_record
 
         updated = {"id": "r1", "content": "100.64.0.2"}
         mock_patch.return_value = _cf_response(result=updated)
@@ -599,7 +572,6 @@ class TestUpdateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.patch")
     def test_honors_explicit_timeout(self, mock_patch):
-        from app.adapters.cloudflare_adapter import update_a_record
 
         mock_patch.return_value = _cf_response(result={"id": "r1", "content": "100.64.0.2"})
 
@@ -608,7 +580,6 @@ class TestUpdateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.patch")
     def test_defaults_to_30s_timeout(self, mock_patch):
-        from app.adapters.cloudflare_adapter import update_a_record
 
         mock_patch.return_value = _cf_response(result={"id": "r1", "content": "100.64.0.2"})
 
@@ -619,7 +590,6 @@ class TestUpdateARecord:
     def test_null_result_returns_empty_dict(self, mock_patch):
         """A present-but-null ``result`` is coerced to {} (never returned as None),
         keeping the documented dict return type intact."""
-        from app.adapters.cloudflare_adapter import update_a_record
 
         resp = MagicMock()
         resp.status_code = 200
@@ -631,7 +601,6 @@ class TestUpdateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.patch")
     def test_includes_comment_in_body_when_passed(self, mock_patch):
-        from app.adapters.cloudflare_adapter import update_a_record
 
         mock_patch.return_value = _cf_response(result={"id": "r1", "content": "100.64.0.2"})
 
@@ -644,7 +613,6 @@ class TestUpdateARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.patch")
     def test_omits_comment_key_when_not_passed(self, mock_patch):
-        from app.adapters.cloudflare_adapter import update_a_record
 
         mock_patch.return_value = _cf_response(result={"id": "r1", "content": "100.64.0.2"})
 
@@ -656,7 +624,6 @@ class TestUpdateARecord:
 class TestDeleteARecord:
     @patch("app.adapters.cloudflare_adapter.httpx2.delete")
     def test_deletes_record(self, mock_delete):
-        from app.adapters.cloudflare_adapter import delete_a_record
 
         mock_delete.return_value = _cf_response(result={"id": "r1"})
 
@@ -666,7 +633,6 @@ class TestDeleteARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.delete")
     def test_raises_on_failure(self, mock_delete):
-        from app.adapters.cloudflare_adapter import delete_a_record
 
         mock_delete.return_value = _cf_response(
             success=False, errors=[{"message": "Record not found"}]
@@ -677,7 +643,6 @@ class TestDeleteARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.delete")
     def test_default_timeout_is_30(self, mock_delete):
-        from app.adapters.cloudflare_adapter import delete_a_record
 
         mock_delete.return_value = _cf_response(result={"id": "r1"})
         delete_a_record("cf-token", "z1", "r1")
@@ -685,7 +650,6 @@ class TestDeleteARecord:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.delete")
     def test_custom_timeout_is_threaded_through(self, mock_delete):
-        from app.adapters.cloudflare_adapter import delete_a_record
 
         mock_delete.return_value = _cf_response(result={"id": "r1"})
         delete_a_record("cf-token", "z1", "r1", timeout=10.0)
@@ -696,7 +660,6 @@ class TestCanonicalTimeouts:
     """The CF timeouts are defined ONCE in the adapter and reused everywhere."""
 
     def test_constants_have_expected_values_and_are_float(self):
-        from app.adapters import cloudflare_adapter as cf
 
         assert cf.CF_DEFAULT_TIMEOUT == 30.0
         assert cf.CF_CLEANUP_TIMEOUT == 10.0
@@ -704,9 +667,7 @@ class TestCanonicalTimeouts:
         assert isinstance(cf.CF_CLEANUP_TIMEOUT, float)
 
     def test_all_adapter_defaults_use_canonical_default_timeout(self):
-        import inspect
 
-        from app.adapters import cloudflare_adapter as cf
 
         for fn in (
             cf.find_record,
@@ -721,9 +682,6 @@ class TestCanonicalTimeouts:
             assert isinstance(default, float), fn.__name__
 
     def test_cleanup_timeout_is_single_source_of_truth(self):
-        from app.adapters import cloudflare_adapter as cf
-        from app.adapters import dns_reconciler
-        from app.routers import jobs
 
         # dns_reconciler and jobs must reuse the adapter's constant, not redefine it.
         assert dns_reconciler.CF_CLEANUP_TIMEOUT is cf.CF_CLEANUP_TIMEOUT
@@ -734,12 +692,10 @@ class TestCanonicalTimeouts:
 
 class TestOwnershipComment:
     def test_marker_format(self):
-        from app.adapters.cloudflare_adapter import ownership_comment
 
         assert ownership_comment("svc123") == "tailbale-managed:svc123"
 
     def test_marker_within_cloudflare_100_char_limit(self):
-        from app.adapters.cloudflare_adapter import ownership_comment
 
         # Cloudflare caps the comment field at 100 chars; service ids are short, so
         # the marker must stay well under the limit even for an oversized id.
@@ -749,7 +705,6 @@ class TestOwnershipComment:
 class TestListARecords:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_returns_all_matches_including_comment(self, mock_get):
-        from app.adapters.cloudflare_adapter import list_a_records
 
         records = [
             {"id": "r2", "content": "100.64.0.2", "comment": "tailbale-managed:svc"},
@@ -765,14 +720,12 @@ class TestListARecords:
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_returns_empty_list_when_none(self, mock_get):
-        from app.adapters.cloudflare_adapter import list_a_records
 
         mock_get.return_value = _cf_response(result=[])
         assert list_a_records("cf-token", "z1", "none.example.com") == []
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_requests_larger_per_page(self, mock_get):
-        from app.adapters.cloudflare_adapter import CF_FIND_PER_PAGE, list_a_records
 
         mock_get.return_value = _cf_response(result=[])
         list_a_records("cf-token", "z1", "app.example.com")

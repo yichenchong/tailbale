@@ -3,18 +3,24 @@
 import threading
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
+from sqlalchemy import inspect as _inspect
 from sqlalchemy import text as _text
 
 import app.models as _registered_models  # noqa: F401  -- register every table on Base.metadata
 from app.database import (
     _DB_WRITE_MUTEX,
     Base,
+    _set_sqlite_pragma,
     commit_with_lock,
     db_write_section,
     flush_with_lock,
     run_migrations,
 )
+from app.models.certificate import Certificate
+from app.models.event import Event
+from app.models.job import Job
+from app.models.service_status import ServiceStatus
 
 
 class FakeSession:
@@ -162,7 +168,6 @@ def test_db_write_section_serializes_writers_across_threads():
 
 
 def _index_names(engine, table):
-    from sqlalchemy import inspect as _inspect
 
     return {ix["name"] for ix in _inspect(engine).get_indexes(table)}
 
@@ -176,11 +181,7 @@ def _legacy_engine(tmp_path):
     ``service_id``/``status``/``kind``/``created_at`` filters/ordering indexes,
     ``certificate.expires_at`` and ``service_status.phase``).
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy import text as _text
 
-    import app.models  # noqa: F401  -- register every table on Base.metadata
-    from app.database import Base
 
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy.db'}")
     Base.metadata.create_all(engine)
@@ -198,7 +199,6 @@ def _legacy_engine(tmp_path):
 
 
 def test_run_migrations_backfills_service_id_indexes(tmp_path):
-    from app.database import run_migrations
 
     engine = _legacy_engine(tmp_path)
     try:
@@ -217,7 +217,6 @@ def test_run_migrations_backfills_service_id_indexes(tmp_path):
 def test_run_migrations_backfills_job_status_kind_created_at_indexes(tmp_path):
     """jobs.py filters on status/kind and orders by created_at; legacy DBs that
     predate ``index=True`` on those columns must have the indexes backfilled."""
-    from app.database import run_migrations
 
     engine = _legacy_engine(tmp_path)
     try:
@@ -243,7 +242,6 @@ def test_run_migrations_backfills_events_kind_index(tmp_path):
     created before that index was added must have it backfilled too, or the kind
     filter degrades to a full scan of the unbounded-growth events table. This is
     the analogue of ``ix_jobs_kind`` (which IS backfilled)."""
-    from app.database import run_migrations
 
     engine = _legacy_engine(tmp_path)
     try:
@@ -264,11 +262,6 @@ def test_index_migrations_cover_every_core_model_index(tmp_path):
     list. Dropping every such index and running the migration must restore ALL of
     them, so adding ``index=True`` to a core model without a backfill entry fails
     loudly here (this is exactly how the missing ``ix_events_kind`` slipped in)."""
-    from app.database import run_migrations
-    from app.models.certificate import Certificate
-    from app.models.event import Event
-    from app.models.job import Job
-    from app.models.service_status import ServiceStatus
 
     engine = _legacy_engine(tmp_path)
     try:
@@ -287,7 +280,6 @@ def test_run_migrations_backfills_dashboard_hot_path_indexes(tmp_path):
     """dashboard.py orders events by created_at, scans certificates by
     expires_at, and counts service_status by phase; legacy DBs that predate
     ``index=True`` on those columns must have the indexes backfilled."""
-    from app.database import run_migrations
 
     engine = _legacy_engine(tmp_path)
     try:
@@ -305,7 +297,6 @@ def test_run_migrations_backfills_dashboard_hot_path_indexes(tmp_path):
 
 
 def test_run_migrations_is_idempotent(tmp_path):
-    from app.database import run_migrations
 
     engine = _legacy_engine(tmp_path)
     try:
@@ -332,10 +323,7 @@ def test_run_migrations_twice_is_noop_on_current_model_db(tmp_path):
     exactly, so on a DB freshly created from the current models run_migrations is
     a pure no-op: the index set (incl. the AR13 dashboard indexes) is identical
     before and after two runs, with no duplicate CREATE INDEX failures."""
-    from sqlalchemy import create_engine
 
-    import app.models  # noqa: F401  -- register every table on Base.metadata
-    from app.database import Base, run_migrations
 
     engine = create_engine(f"sqlite:///{tmp_path / 'current.db'}")
     try:
@@ -358,9 +346,7 @@ def test_run_migrations_twice_is_noop_on_current_model_db(tmp_path):
 
 def test_run_migrations_no_op_on_empty_database(tmp_path):
     """Tables absent entirely: the has_table guard keeps it crash-free."""
-    from sqlalchemy import create_engine
 
-    from app.database import run_migrations
 
     engine = create_engine(f"sqlite:///{tmp_path / 'empty.db'}")
     try:
@@ -375,11 +361,7 @@ def _legacy_engine_missing_columns(tmp_path):
     ``last_probe_at``) — the original reason ``run_migrations`` exists. The full
     schema is created, then ``service_status`` is rebuilt without those columns.
     """
-    from sqlalchemy import create_engine
-    from sqlalchemy import text as _text
 
-    import app.models  # noqa: F401  -- register every table on Base.metadata
-    from app.database import Base
 
     engine = create_engine(f"sqlite:///{tmp_path / 'legacy_cols.db'}")
     Base.metadata.create_all(engine)
@@ -397,7 +379,6 @@ def _legacy_engine_missing_columns(tmp_path):
 
 
 def _column_names(engine, table):
-    from sqlalchemy import inspect as _inspect
 
     return {c["name"] for c in _inspect(engine).get_columns(table)}
 
@@ -405,7 +386,6 @@ def _column_names(engine, table):
 def test_run_migrations_backfills_missing_probe_columns(tmp_path):
     """ADD COLUMN backfill (run_migrations' original job) must add every probe
     column a legacy ``service_status`` table lacks."""
-    from app.database import run_migrations
 
     engine = _legacy_engine_missing_columns(tmp_path)
     try:
@@ -425,7 +405,6 @@ def test_run_migrations_backfills_missing_probe_columns(tmp_path):
 def test_run_migrations_column_backfill_is_idempotent(tmp_path):
     """Re-running after a column backfill must not raise (duplicate-column ALTER)
     nor disturb the already-added columns."""
-    from app.database import run_migrations
 
     engine = _legacy_engine_missing_columns(tmp_path)
     try:
@@ -493,9 +472,7 @@ def test_set_sqlite_pragma_applies_to_overflow_connections(tmp_path):
     to e.g. a ``first_connect`` listener, overflow connections would silently
     drop FK enforcement and orphan child rows.
     """
-    from sqlalchemy import create_engine, event
 
-    from app.database import _set_sqlite_pragma
 
     engine = create_engine(
         f"sqlite:///{tmp_path / 'overflow.db'}",

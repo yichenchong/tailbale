@@ -7,10 +7,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+from sqlalchemy import text
+from sqlalchemy.orm import sessionmaker
+
+from app import services as service_layer
+from app.locks import _RECONCILE_LOCKS, reconcile_lock_for
 from app.models.certificate import Certificate
 from app.models.dns_record import DnsRecord
+from app.models.job import Job
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
+from app.reconciler.reconcile_loop import reconcile_all
+from app.services import delete_service_record
 from app.settings_store import set_setting
 from tests._services_helpers import (
     _create_service,
@@ -69,11 +77,6 @@ class TestDeleteService:
         assert resp.status_code == 201
 
     def test_delete_serializes_with_reconcile_mutex(self, db_session):
-        from sqlalchemy.orm import sessionmaker
-
-        from app.locks import reconcile_lock_for
-        from app.services import delete_service_record
-
         svc = _create_service_in_db(db_session)
         service_id = svc.id
         TestSession = sessionmaker(bind=db_session.get_bind())
@@ -117,8 +120,6 @@ class TestDeleteForgetsReconcileLock:
     (it used to grow one entry per id ever seen and never shrink)."""
 
     def test_delete_drops_only_deleted_services_lock(self, client):
-        from app.locks import _RECONCILE_LOCKS, reconcile_lock_for
-
         keep_id = _create_service(client, hostname="keep.example.com").json()["id"]
         drop_id = _create_service(client, hostname="drop.example.com").json()["id"]
 
@@ -144,10 +145,6 @@ class TestDeleteForgetsReconcileLock:
     def test_reconcile_after_delete_is_graceful_and_no_resurrected_lock(self, db_session):
         # reconcile_one is autouse-mocked in this suite; reconcile_all is the real,
         # unmocked sweep and is the cleaner deterministic no-op to assert against.
-        from app.locks import _RECONCILE_LOCKS, reconcile_lock_for
-        from app.reconciler.reconcile_loop import reconcile_all
-        from app.services import delete_service_record
-
         svc = _create_service_in_db(db_session)
         sid = svc.id
         reconcile_lock_for(sid)
@@ -279,7 +276,6 @@ class TestDisableDnsCleanup:
     @patch("app.secrets.read_secret", return_value="cf-token")
     @patch("app.edge.container_manager.stop_edge")
     def test_disable_with_cleanup_dns(self, mock_stop, mock_secret, mock_cleanup, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
@@ -340,7 +336,6 @@ class TestDeleteUsesRuntimePaths:
     @patch("app.edge.network_manager.remove_network")
     @patch("app.edge.container_manager.remove_edge")
     def test_delete_reads_runtime_paths(self, mock_re, mock_rn, client, db_session, tmp_data_dir):
-        from app.settings_store import set_setting
 
         custom_gen = str(tmp_data_dir / "custom_gen")
         custom_certs = str(tmp_data_dir / "custom_certs")
@@ -374,7 +369,6 @@ class TestHostnameChangeCleanup:
            return_value={"deleted_remote": True, "deleted_local": True, "error": None})
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_hostname_change_deletes_old_dns(self, mock_secret, mock_cleanup, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -399,7 +393,6 @@ class TestHostnameChangeCleanup:
         self, mock_secret, mock_cleanup, client, db_session
     ):
         """Hostname change should abort with 502 when old DNS record can't be removed."""
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -438,7 +431,6 @@ class TestHostnameChangeCleanup:
 
     def test_hostname_change_clears_stale_cert_metadata(self, client, db_session):
         """Hostname change should clear expires_at, last_renewed_at, last_failure, next_retry_at."""
-        from datetime import datetime
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         cert = Certificate(
             service_id=svc_id,
@@ -463,7 +455,6 @@ class TestHostnameChangeCleanup:
         assert updated_cert.next_retry_at is None
 
     def test_hostname_change_removes_old_cert_dir(self, client, db_session, tmp_data_dir):
-        from app.settings_store import set_setting
         custom_certs = str(tmp_data_dir / "certs")
         set_setting(db_session, "cert_root", custom_certs)
         db_session.commit()
@@ -500,7 +491,6 @@ class TestHostnameChangeDnsAbort:
     @patch("app.adapters.dns_reconciler.cleanup_dns_record")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_hostname_change_aborts_on_cf_failure(self, mock_secret, mock_cleanup, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -522,7 +512,6 @@ class TestHostnameChangeDnsAbort:
     @patch("app.adapters.dns_reconciler.cleanup_dns_record")
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_hostname_change_proceeds_on_cf_success(self, mock_secret, mock_cleanup, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -541,7 +530,6 @@ class TestHostnameChangeDnsAbort:
     @patch("app.secrets.read_secret", return_value="cf-token")
     def test_hostname_change_no_record_proceeds(self, mock_secret, mock_cleanup, client, db_session):
         """If there's no DNS record at all, hostname change should proceed."""
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -566,8 +554,6 @@ class TestDisableDnsCleanupStructured:
     def test_disable_keeps_dns_row_on_cf_failure(
         self, mock_stop, mock_secret, mock_cleanup, client, db_session
     ):
-        from app.models.dns_record import DnsRecord
-        from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
@@ -601,7 +587,6 @@ class TestDisableDnsCleanupStructured:
         self, mock_stop, mock_secret, mock_cleanup, client, db_session
     ):
         """Disable proceeds even when cleanup_dns_record reports a failure."""
-        from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
@@ -629,7 +614,6 @@ class TestDeleteDnsCleanupStructured:
     def test_delete_proceeds_on_cf_failure(
         self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
     ):
-        from app.settings_store import set_setting
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -655,7 +639,6 @@ class TestDeleteDnsCleanupStructured:
         self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
     ):
         """Delete calls cleanup_dns_record and proceeds even on failure."""
-        from app.settings_store import set_setting
 
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
@@ -683,9 +666,6 @@ class TestDeleteOrphanJob:
         self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
     ):
         """When cleanup_dns fails, an orphan Job should be created with record info."""
-        from app.models.job import Job
-        from app.settings_store import set_setting
-
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -723,8 +703,6 @@ class TestDeleteOrphanJob:
         self, mock_re, mock_rn, client, db_session
     ):
         """Even without cleanup_dns=true, if a DnsRecord exists, an orphan Job is created."""
-        from app.models.job import Job
-
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
 
         dns = DnsRecord(service_id=svc_id, hostname="app.example.com", record_id="cf_rec_888")
@@ -749,9 +727,6 @@ class TestDeleteOrphanJob:
         self, mock_re, mock_rn, mock_secret, mock_cleanup, client, db_session
     ):
         """When cleanup succeeds (DnsRecord deleted), no orphan Job should be created."""
-        from app.models.job import Job
-        from app.settings_store import set_setting
-
         set_setting(db_session, "cf_zone_id", "zone123")
         db_session.commit()
 
@@ -771,8 +746,6 @@ class TestDeleteOrphanJob:
         self, mock_re, mock_rn, client, db_session
     ):
         """When no DnsRecord exists, no orphan Job should be created."""
-        from app.models.job import Job
-
         svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
         resp = client.delete(f"/api/services/{svc_id}")
         assert resp.status_code == 204
@@ -983,7 +956,6 @@ class TestBackgroundReconcilePassesSocket:
     wrong daemon. Invariant guard for both call sites (create + update-enable)."""
 
     def test_create_threads_request_socket_to_reconcile(self, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
         db_session.commit()
 
@@ -995,7 +967,6 @@ class TestBackgroundReconcilePassesSocket:
         assert mock_reconcile.call_args.kwargs.get("socket_path") == "unix:///custom/docker.sock"
 
     def test_update_enable_threads_request_socket_to_reconcile(self, client, db_session):
-        from app.settings_store import set_setting
         set_setting(db_session, "docker_socket_path", "unix:///custom/docker.sock")
         db_session.commit()
 
@@ -1030,7 +1001,6 @@ class TestLegoCertArtifactCleanup:
     @patch("app.edge.network_manager.remove_network")
     @patch("app.edge.container_manager.remove_edge")
     def test_delete_removes_lego_artifacts(self, mock_re, mock_rn, client, db_session, tmp_data_dir):
-        from app.settings_store import set_setting
 
         custom_certs = str(tmp_data_dir / "certs")
         set_setting(db_session, "cert_root", custom_certs)
@@ -1049,7 +1019,6 @@ class TestLegoCertArtifactCleanup:
         assert survivor.exists(), "another hostname's lego artifacts must not be removed"
 
     def test_hostname_change_removes_old_lego_artifacts(self, client, db_session, tmp_data_dir):
-        from app.settings_store import set_setting
 
         custom_certs = str(tmp_data_dir / "certs")
         set_setting(db_session, "cert_root", custom_certs)
@@ -1072,7 +1041,6 @@ class TestLegoCertArtifactCleanup:
     @patch("app.edge.container_manager.remove_edge")
     def test_delete_survives_missing_lego_dir(self, mock_re, mock_rn, client, db_session, tmp_data_dir):
         """Best-effort: with no .lego store at all, delete must still succeed."""
-        from app.settings_store import set_setting
 
         custom_certs = str(tmp_data_dir / "certs")
         set_setting(db_session, "cert_root", custom_certs)
@@ -1097,11 +1065,6 @@ class TestDeleteRefreshesStaleService:
     def test_delete_uses_current_hostname_not_stale_snapshot(
         self, mock_re, mock_rn, client, db_session, tmp_data_dir
     ):
-        from sqlalchemy import text
-
-        from app import services as service_layer
-        from app.settings_store import set_setting
-
         custom_certs = str(tmp_data_dir / "certs")
         set_setting(db_session, "cert_root", custom_certs)
         db_session.commit()

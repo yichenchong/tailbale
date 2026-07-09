@@ -1,10 +1,13 @@
 """Tests for SQLAlchemy models — verify table creation and basic CRUD."""
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta, timezone
 
+import pytest
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import event as sa_event
+from sqlalchemy.exc import IntegrityError
 
-from app.database import run_migrations
+from app.database import _set_sqlite_pragma, engine, run_migrations
 from app.models import (
     Certificate,
     DnsRecord,
@@ -14,7 +17,9 @@ from app.models import (
     ServiceStatus,
     Setting,
 )
+from app.models.service import generate_id
 from app.models.types import NaiveUTCDateTime
+from tests._services_helpers import create_service_db
 
 
 class TestSettingModel:
@@ -41,8 +46,6 @@ class TestSettingModel:
         db_session.add(Setting(key="k1", value="v1"))
         db_session.commit()
         # Adding same key should raise
-        import pytest
-        from sqlalchemy.exc import IntegrityError
 
         db_session.add(Setting(key="k1", value="v2"))
         with pytest.raises(IntegrityError):
@@ -81,7 +84,6 @@ class TestServiceModel:
         assert row.preserve_host_header is True
 
     def test_auto_id_generation(self, db_session):
-        from app.models.service import generate_id
 
         generated = generate_id()
         assert generated.startswith("svc_")
@@ -92,8 +94,6 @@ class TestServiceModel:
         assert generated != another
 
     def test_unique_hostname(self, db_session):
-        import pytest
-        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1"))
         db_session.commit()
@@ -103,8 +103,6 @@ class TestServiceModel:
             db_session.commit()
 
     def test_unique_edge_container_name(self, db_session):
-        import pytest
-        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1", hostname="a.example.com"))
         db_session.commit()
@@ -117,8 +115,6 @@ class TestServiceModel:
             db_session.commit()
 
     def test_unique_network_name(self, db_session):
-        import pytest
-        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1", hostname="a.example.com"))
         db_session.commit()
@@ -133,8 +129,6 @@ class TestServiceModel:
             db_session.commit()
 
     def test_unique_ts_hostname(self, db_session):
-        import pytest
-        from sqlalchemy.exc import IntegrityError
 
         db_session.add(self._make_service(id="svc_1", hostname="a.example.com"))
         db_session.commit()
@@ -355,25 +349,9 @@ class TestJobModel:
 class TestSqliteForeignKeyCascade:
     """Verify that PRAGMA foreign_keys=ON is active, making CASCADE deletes work."""
 
-    def _create_service_in_db(self, db, **overrides):
-        defaults = {
-            "name": "TestApp", "upstream_container_id": "abc123",
-            "upstream_container_name": "testapp", "upstream_scheme": "http",
-            "upstream_port": 80, "hostname": "testapp.example.com",
-            "base_domain": "example.com", "edge_container_name": "edge_testapp",
-            "network_name": "edge_net_testapp", "ts_hostname": "edge-testapp",
-        }
-        defaults.update(overrides)
-        svc = Service(**defaults)
-        db.add(svc)
-        db.flush()
-        status = ServiceStatus(service_id=svc.id, phase="pending")
-        db.add(status)
-        db.commit()
-        return svc
 
     def test_delete_service_cascades_status(self, db_session):
-        svc = self._create_service_in_db(db_session)
+        svc = create_service_db(db_session)
         svc_id = svc.id
         assert db_session.get(ServiceStatus, svc_id) is not None
         db_session.delete(svc)
@@ -381,7 +359,7 @@ class TestSqliteForeignKeyCascade:
         assert db_session.get(ServiceStatus, svc_id) is None
 
     def test_delete_service_cascades_certificate(self, db_session):
-        svc = self._create_service_in_db(db_session)
+        svc = create_service_db(db_session)
         svc_id = svc.id
         cert = Certificate(service_id=svc_id, hostname=svc.hostname)
         db_session.add(cert)
@@ -392,7 +370,7 @@ class TestSqliteForeignKeyCascade:
         assert db_session.get(Certificate, svc_id) is None
 
     def test_delete_service_cascades_dns_record(self, db_session):
-        svc = self._create_service_in_db(db_session)
+        svc = create_service_db(db_session)
         svc_id = svc.id
         dns = DnsRecord(service_id=svc_id, hostname=svc.hostname, record_id="cf_rec_1")
         db_session.add(dns)
@@ -403,7 +381,7 @@ class TestSqliteForeignKeyCascade:
         assert db_session.get(DnsRecord, svc_id) is None
 
     def test_cascade_deletes_all_related_rows_at_once(self, db_session):
-        svc = self._create_service_in_db(db_session)
+        svc = create_service_db(db_session)
         svc_id = svc.id
         db_session.add(Certificate(service_id=svc_id, hostname=svc.hostname))
         db_session.add(DnsRecord(service_id=svc_id, hostname=svc.hostname))
@@ -422,9 +400,7 @@ class TestSqliteForeignKeyCascade:
             assert row[0] == 1, "PRAGMA foreign_keys should be ON (1)"
 
     def test_production_engine_has_pragma_listener(self):
-        from sqlalchemy import event as sa_event
 
-        from app.database import _set_sqlite_pragma, engine
 
         assert sa_event.contains(engine, "connect", _set_sqlite_pragma)
 
@@ -495,7 +471,6 @@ class TestNaiveUTCDateTime:
     stored values never raise."""
 
     def test_aware_datetime_persists_as_naive_utc(self, db_session):
-        from datetime import UTC, datetime, timedelta, timezone
 
         svc = Service(
             id="svc_tz", name="Tz", upstream_container_id="c1",
@@ -571,7 +546,6 @@ class TestJSONEncodedDict:
         assert db_session.get(Event, "evt_json3").details == {}
 
     def test_corrupt_json_in_db_decodes_to_none(self, db_session):
-        from sqlalchemy import text
 
         db_session.add(
             Event(id="evt_json4", kind="dns_created", message="m", details={"ok": True})
@@ -633,7 +607,6 @@ class TestDashboardHotPathIndexBackfill:
     @staticmethod
     def _legacy_engine():
         # Build the two tables WITHOUT the AR13 indexes, mirroring a pre-AR13 DB.
-        from sqlalchemy import create_engine, text
 
         eng = create_engine("sqlite:///:memory:")
         with eng.begin() as conn:
@@ -652,7 +625,6 @@ class TestDashboardHotPathIndexBackfill:
 
     @staticmethod
     def _indexed_columns(eng, table):
-        from sqlalchemy import inspect
 
         return {
             col
@@ -661,7 +633,6 @@ class TestDashboardHotPathIndexBackfill:
         }
 
     def test_backfills_certificate_expires_at_index(self):
-        from app.database import run_migrations
 
         eng = self._legacy_engine()
         assert "expires_at" not in self._indexed_columns(eng, "certificates")
@@ -669,7 +640,6 @@ class TestDashboardHotPathIndexBackfill:
         assert "expires_at" in self._indexed_columns(eng, "certificates")
 
     def test_backfills_service_status_phase_index(self):
-        from app.database import run_migrations
 
         eng = self._legacy_engine()
         assert "phase" not in self._indexed_columns(eng, "service_status")
@@ -677,7 +647,6 @@ class TestDashboardHotPathIndexBackfill:
         assert "phase" in self._indexed_columns(eng, "service_status")
 
     def test_backfill_is_idempotent(self):
-        from app.database import run_migrations
 
         eng = self._legacy_engine()
         run_migrations(eng)

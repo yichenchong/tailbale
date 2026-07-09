@@ -28,7 +28,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import docker
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 from app.version import __version__
 
@@ -164,8 +169,6 @@ class _Containers:
                     c = candidate
                     break
         if c is None:
-            import docker
-
             raise docker.errors.NotFound(f"container {ref} not found")
         return c
 
@@ -204,8 +207,6 @@ class _Networks:
     def get(self, name: str):
         net = self._client._networks.get(name)
         if net is None:
-            import docker
-
             raise docker.errors.NotFound(f"network {name} not found")
         return net
 
@@ -275,10 +276,6 @@ def write_valid_cert(certs_dir: Path, hostname: str) -> str:
     renewal window, so ``_ensure_cert`` treats it as current and never calls the
     (unavailable) ACME/lego path.
     """
-    from cryptography import x509
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
 
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])

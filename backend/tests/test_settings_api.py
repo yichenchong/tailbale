@@ -2,12 +2,20 @@
 
 import pytest
 
+import app.edge.docker_client as dc_mod
+import app.routers.settings as settings_router
+from app.models.job import Job
+from app.models.service import Service
+from app.models.user import User
+from app.routers.settings import docker
 from app.secrets import (
     CLOUDFLARE_TOKEN,
     TAILSCALE_API_KEY,
     TAILSCALE_AUTH_KEY,
     read_secret,
+    write_secret,
 )
+from app.settings_store import set_setting
 
 
 def _configure_setup_prerequisites(client):
@@ -57,7 +65,6 @@ class TestGetSettings:
         # Writes enforce ge=1, so a corrupt stored interval is data corruption
         # that could never have been written through the API. The settings
         # endpoint surfaces it loudly instead of masking it with a default.
-        from app.settings_store import set_setting
 
         set_setting(db_session, "reconcile_interval_seconds", "not-an-int")
         db_session.commit()
@@ -134,7 +141,6 @@ class TestUpdateGeneral:
         # comparison would see a spurious "change" and 409-lock the whole
         # /general section. DNS is case-insensitive, so re-submitting the same
         # domain (differing only in case) MUST 200, even with services present.
-        from app.settings_store import set_setting
 
         created = client.post("/api/services", json={
             "name": "Existing",
@@ -341,7 +347,6 @@ class TestUpdateCloudflare:
     def test_failed_db_write_leaves_no_orphaned_secret(self, client, tmp_data_dir, monkeypatch):
         """The token is persisted only after the DB write commits. A failing DB
         write must leave no orphaned secret on disk (a retry re-applies both)."""
-        import app.routers.settings as settings_router
 
         def _boom(*args, **kwargs):
             raise RuntimeError("db down")
@@ -412,7 +417,6 @@ class TestUpdateTailscale:
     def test_failed_db_write_leaves_no_orphaned_secret(self, client, tmp_data_dir, monkeypatch):
         """Auth/API keys are persisted only after the DB write commits. A failing
         DB write must leave no orphaned secret on disk (a retry re-applies both)."""
-        import app.routers.settings as settings_router
 
         def _boom(*args, **kwargs):
             raise RuntimeError("db down")
@@ -481,7 +485,6 @@ class TestSetupComplete:
         assert "api key" in detail
 
     def test_mark_setup_complete_rejects_blank_secret_files(self, client, tmp_data_dir):
-        from app.secrets import write_secret
 
         write_secret(TAILSCALE_AUTH_KEY, "   ")
         write_secret(TAILSCALE_API_KEY, "tskey-api-abc123")
@@ -531,8 +534,6 @@ class TestDeveloperActions:
         assert settings["tailscale"]["api_key_configured"] is True
 
     def test_reset_all_clears_services_users_settings_and_secrets(self, client, db_session, tmp_data_dir):
-        from app.models.user import User
-        from app.secrets import write_secret
 
         _configure_setup_prerequisites(client)
         client.put("/api/settings/general", json={"developer_mode": True, "base_domain": "custom.example"})
@@ -562,12 +563,10 @@ class TestDeveloperActions:
         assert settings["tailscale"]["api_key_configured"] is False
 
         assert db_session.query(User).count() == 0
-        from app.models.service import Service
         assert db_session.query(Service).count() == 0
 
 
     def test_reset_all_clears_dns_orphan_cleanup_jobs(self, client, db_session):
-        from app.models.job import Job
 
         client.put("/api/settings/general", json={"developer_mode": True})
         db_session.add(
@@ -633,7 +632,6 @@ class TestDeveloperActions:
     def test_main_logs_falls_back_to_known_container_name_and_closes_client(
         self, client, monkeypatch
     ):
-        from app.routers.settings import docker
 
         client.put("/api/settings/general", json={"developer_mode": True})
         state = {"closed": False, "lookups": []}
@@ -687,7 +685,6 @@ class TestDeveloperActions:
     def test_main_logs_404_when_no_container_found(self, client, monkeypatch):
         # No labeled container and every fallback name misses -> the endpoint
         # surfaces a 404 (not a 502): the container genuinely does not exist.
-        from app.routers.settings import docker
 
         client.put("/api/settings/general", json={"developer_mode": True})
 
@@ -745,7 +742,6 @@ class TestDeveloperActions:
 
 class TestConnectionTests:
     def test_tailscale_valid_key(self, client, tmp_data_dir):
-        from app.secrets import TAILSCALE_AUTH_KEY, write_secret
         write_secret(TAILSCALE_AUTH_KEY, "tskey-auth-abc123def456")
 
         resp = client.post("/api/settings/test/tailscale")
@@ -754,7 +750,6 @@ class TestConnectionTests:
         assert data["success"] is True
 
     def test_tailscale_invalid_key(self, client, tmp_data_dir):
-        from app.secrets import TAILSCALE_AUTH_KEY, write_secret
         write_secret(TAILSCALE_AUTH_KEY, "not-a-valid-key")
 
         resp = client.post("/api/settings/test/tailscale")
@@ -774,7 +769,6 @@ class TestConnectionTests:
         assert "token not configured" in data["message"]
 
     def test_cloudflare_no_zone(self, client, tmp_data_dir):
-        from app.secrets import CLOUDFLARE_TOKEN, write_secret
         write_secret(CLOUDFLARE_TOKEN, "cf_token_123")
 
         resp = client.post("/api/settings/test/cloudflare")
@@ -812,7 +806,6 @@ class TestConnectionTests:
         # the client must fall back to from_env() rather than
         # DockerClient(base_url="") which ignores DOCKER_HOST. Mirrors the
         # services/discovery socket-resolution convention.
-        import app.edge.docker_client as dc_mod
 
         orig_get_setting = dc_mod.get_setting
         monkeypatch.setattr(
@@ -877,7 +870,6 @@ class TestConnectionTests:
         )
 
     def _configure_cloudflare(self, client):
-        from app.secrets import CLOUDFLARE_TOKEN, write_secret
 
         write_secret(CLOUDFLARE_TOKEN, "cf-token")
         client.put("/api/settings/cloudflare", json={"zone_id": "zone123"})

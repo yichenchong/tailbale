@@ -1,46 +1,21 @@
-"""Tests for DNS reconciliation logic (reconcile_dns + cleanup_dns_record)."""
+"""Tests for DNS reconciliation adapter convergence (reconcile_dns)."""
 
+import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.adapters.cloudflare_adapter import CloudflareAPIError, ownership_comment
-from app.adapters.dns_reconciler import cleanup_dns_record, reconcile_dns
+from app.adapters.dns_reconciler import CF_CLEANUP_TIMEOUT, reconcile_dns
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
-from app.models.service import Service
-from app.models.service_status import ServiceStatus
-
-
-def _create_service(db, **overrides):
-    """Insert a service directly into the DB for testing."""
-    defaults = {
-        "name": "TestApp",
-        "upstream_container_id": "abc123",
-        "upstream_container_name": "testapp",
-        "upstream_scheme": "http",
-        "upstream_port": 80,
-        "hostname": "testapp.example.com",
-        "base_domain": "example.com",
-        "edge_container_name": "edge_testapp",
-        "network_name": "edge_net_testapp",
-        "ts_hostname": "edge-testapp",
-    }
-    defaults.update(overrides)
-    svc = Service(**defaults)
-    db.add(svc)
-    db.flush()
-    db.add(ServiceStatus(service_id=svc.id, phase="pending"))
-    db.commit()
-    return svc
+from tests._services_helpers import _create_service_in_db as _create_service
 
 
 class TestReconcileDns:
     @patch("app.adapters.dns_reconciler.create_a_record")
     @patch("app.adapters.dns_reconciler.list_a_records")
     def test_creates_record_when_absent(self, mock_list, mock_create, db_session):
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = []
         mock_create.return_value = {"id": "new_r1"}
@@ -64,7 +39,6 @@ class TestReconcileDns:
     def test_created_event_level_and_message(self, mock_list, mock_create, db_session):
         """Guard against a level/message argument-order swap when emitting events:
         the severity must land in `level` and the human string in `message`."""
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = []
         mock_create.return_value = {"id": "new_r1"}
@@ -84,7 +58,6 @@ class TestReconcileDns:
     def test_create_without_record_id_does_not_persist_stale_local_row(
         self, mock_list, mock_create, db_session
     ):
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = []
         mock_create.return_value = {"content": "100.64.0.1"}
@@ -105,7 +78,6 @@ class TestReconcileDns:
         clear 'did not return a DNS record id' RuntimeError (through the REAL
         create_a_record) rather than a cryptic AttributeError, and must leave no
         stale local row behind."""
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = []
         resp = MagicMock()
@@ -129,7 +101,6 @@ class TestReconcileDns:
         entry) must raise the clean 'find ... did not return a DNS record id' error
         via _require_record_id's find path -- never silently adopt/update it nor
         persist a phantom local row with record_id=None."""
-        from app.adapters.dns_reconciler import reconcile_dns
 
         # Correct IP + unmarked: would otherwise take the adopt branch, but the
         # missing id must short-circuit with a clean error before any CF write.
@@ -146,8 +117,6 @@ class TestReconcileDns:
     @patch("app.adapters.dns_reconciler.update_a_record")
     @patch("app.adapters.dns_reconciler.list_a_records")
     def test_updates_record_when_ip_changed(self, mock_list, mock_update, db_session):
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = [{"id": "r1", "content": "100.64.0.1"}]
         mock_update.return_value = {"id": "r1", "content": "100.64.0.2"}
@@ -170,8 +139,6 @@ class TestReconcileDns:
     @patch("app.adapters.dns_reconciler.update_a_record")
     @patch("app.adapters.dns_reconciler.list_a_records")
     def test_noop_when_ip_matches_and_already_marked(self, mock_list, mock_update, db_session):
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         # Record already correct AND already carries our marker -> pure no-op.
@@ -194,7 +161,6 @@ class TestReconcileDns:
     @patch("app.adapters.dns_reconciler.create_a_record")
     @patch("app.adapters.dns_reconciler.list_a_records")
     def test_creates_dns_record_entry(self, mock_list, mock_create, db_session):
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = []
         mock_create.return_value = {"id": "r1"}
@@ -210,8 +176,6 @@ class TestReconcileDns:
     @patch("app.adapters.dns_reconciler.update_a_record")
     @patch("app.adapters.dns_reconciler.list_a_records")
     def test_updates_existing_dns_record_entry(self, mock_list, mock_update, db_session):
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
 
@@ -240,8 +204,6 @@ class TestReconcileDns:
         never left stale while record_id/value already point at the new hostname's
         Cloudflare record -- otherwise the local mirror lies about which name the
         record serves."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)  # hostname testapp.example.com
         # Pre-existing row still carrying a STALE hostname from a prior name.
@@ -268,8 +230,6 @@ class TestReconcileDns:
     def test_reconcile_is_idempotent(self, mock_list, mock_create, db_session):
         """Re-running reconcile_dns converges: no duplicate row, no second remote
         create, and no spurious events on the second pass."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         # First pass: record absent -> created (stamped with our marker).
         mock_list.return_value = []
@@ -303,8 +263,6 @@ class TestReconcileDns:
         """When the local row holds a stale record_id but CF already has a matching
         record under a different id (already ours), reconcile adopts the live id
         without creating or updating a remote record (convergence, no orphan)."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="stale", value="100.64.0.1")
@@ -331,8 +289,6 @@ class TestReconcileDns:
         """A pre-existing/external record with the correct IP but NO ownership marker
         is adopted via an update that stamps our marker (so it is provably ours next
         time). No create, no duplicate deletes."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -362,8 +318,6 @@ class TestReconcileDns:
         """With several A records for one hostname, reconcile picks the one PROVABLY
         ours (our marker) even when an UNMARKED record has a lower id. The unmarked
         record is never adopted, never updated, and never deleted (not ours)."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -393,8 +347,6 @@ class TestReconcileDns:
         """2+ records carrying OUR marker -> the non-canonical owned duplicate(s) are
         deleted; a sibling record WITHOUT our marker is NEVER deleted. Emits a
         dns_duplicate_removed audit event naming exactly what was removed."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -439,8 +391,6 @@ class TestReconcileDns:
         dns_duplicate_removed audit event is emitted. Guards the per-delete
         try/except in _remove_owned_duplicates against a regression that would let a
         transient CF blip on a stray duplicate fail the entire reconcile."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -475,8 +425,6 @@ class TestReconcileDns:
         already gone (81044). That is the DESIRED end state, so the id still counts
         as removed and the audit event names it. Guards the is_not_found branch of
         the dedup loop."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -506,8 +454,6 @@ class TestReconcileDns:
         """With two owned duplicates where one delete succeeds and one fails, the
         loop attempts BOTH (a failure on one never short-circuits the rest) and
         reports only the successfully-removed id in the audit event."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError, ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -545,7 +491,6 @@ class TestReconcileDns:
         """reconcile_dns runs under the per-service reconcile lock, so every
         Cloudflare call is capped at CF_CLEANUP_TIMEOUT (10s) instead of
         the 30s default, bounding the worst-case lock hold (list+create/update)."""
-        from app.adapters.dns_reconciler import CF_CLEANUP_TIMEOUT, reconcile_dns
 
         assert CF_CLEANUP_TIMEOUT == 10.0
 
@@ -573,10 +518,7 @@ class TestReconcileDns:
         (likely wrong) IPs -- so reconcile must surface an operator warning (the
         reconcile-path equivalent of find_record's >1-record warning). The unmarked
         record is NEVER deleted."""
-        import logging
 
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -602,10 +544,7 @@ class TestReconcileDns:
         """When every other A record provably carries OUR marker (an owned duplicate
         that gets removed), there is no unmanaged sibling, so the conflict warning
         must NOT fire -- only the duplicate-removal path runs."""
-        import logging
 
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -630,8 +569,6 @@ class TestReconcileDns:
         out (never swallowed) and, because the LIST fails before any local write,
         persists NO phantom DnsRecord row. A create must NOT be attempted after a
         failed list."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.side_effect = CloudflareAPIError(
             "find_record", "Invalid token (code 10000)",
@@ -652,8 +589,6 @@ class TestReconcileDns:
     ):
         """A hard Cloudflare failure on the CREATE path bubbles out and leaves no
         stale local row behind (the db write section is never reached)."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError
-        from app.adapters.dns_reconciler import reconcile_dns
 
         mock_list.return_value = []
         mock_create.side_effect = CloudflareAPIError(
@@ -707,8 +642,6 @@ class TestReconcileDns:
         canonical -- the lowest-id owned record is authoritative) AND removes the
         owned duplicate, emitting BOTH a dns_updated and a dns_duplicate_removed
         event. Guards that update and dedup compose correctly in one reconcile."""
-        from app.adapters.cloudflare_adapter import ownership_comment
-        from app.adapters.dns_reconciler import reconcile_dns
 
         svc = _create_service(db_session)
         own = ownership_comment(svc.id)
@@ -737,395 +670,3 @@ class TestReconcileDns:
         assert len(dups) == 1
         assert dups[0].details["removed_record_ids"] == ["r2"]
         assert dups[0].details["canonical_record_id"] == "r1"
-
-
-class TestCleanupDnsRecord:
-    """cleanup_dns_record should return structured result and only delete local row on success."""
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_success_deletes_both(self, mock_delete, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_123", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result["deleted_remote"] is True
-        assert result["deleted_local"] is True
-        assert result["error"] is None
-
-        # Local row should be gone (flush + expire to see the deletion)
-        db_session.flush()
-        db_session.expire_all()
-        assert db_session.get(DnsRecord, svc.id) is None
-
-    @patch("app.adapters.dns_reconciler.delete_a_record", side_effect=RuntimeError("API error"))
-    def test_failure_preserves_local_row(self, mock_delete, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_456", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result["deleted_remote"] is False
-        assert result["deleted_local"] is False
-        assert result["error"] is not None
-        assert "API error" in result["error"]
-
-        # Local row should still exist
-        row = db_session.get(DnsRecord, svc.id)
-        assert row is not None
-        assert row.record_id == "cf_456"
-
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_not_found_deletes_stale_local_row(self, mock_delete, db_session):
-        from app.adapters.cloudflare_adapter import CloudflareAPIError
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        mock_delete.side_effect = CloudflareAPIError(
-            "delete_a_record",
-            "Record not found (code 1001)",
-            errors=[{"code": 1001, "message": "Record not found"}],
-        )
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_gone", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-
-        assert result == {"deleted_remote": False, "deleted_local": True, "error": None}
-        db_session.flush()
-        db_session.expire_all()
-        assert db_session.get(DnsRecord, svc.id) is None
-
-        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
-        assert len(events) == 1
-
-    def test_no_record_returns_noop(self, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result["deleted_remote"] is False
-        assert result["deleted_local"] is False
-        assert result["error"] is None
-
-    def test_no_record_id_returns_noop(self, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id=None)
-        db_session.add(dns)
-        db_session.commit()
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result["deleted_remote"] is False
-        assert result["deleted_local"] is False
-        assert result["error"] is None
-
-    @patch("app.adapters.dns_reconciler.delete_a_record", side_effect=Exception("timeout"))
-    def test_failure_emits_warning_event(self, mock_delete, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_789", value="5.6.7.8")
-        db_session.add(dns)
-        db_session.commit()
-
-        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        db_session.flush()
-
-        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
-        assert len(events) == 1
-        assert events[0].level == "warning"
-        assert "timeout" in events[0].message.lower()
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_success_emits_info_event(self, mock_delete, db_session):
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_aaa", value="1.1.1.1")
-        db_session.add(dns)
-        db_session.commit()
-
-        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        db_session.flush()
-
-        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
-        assert len(events) == 1
-        assert events[0].level == "info"
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_success_ownership_guard_keeps_reclaimed_row(self, mock_delete, db_session):
-        """If a concurrent reconcile repoints the local row at a NEW Cloudflare id
-        between the remote delete and the local delete, the success-path ownership
-        guard must NOT drop the freshly-reclaimed row."""
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_old", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        def _reclaim(*_args, **_kwargs):
-            row = db_session.get(DnsRecord, svc.id)
-            row.record_id = "cf_new"
-            row.value = "9.9.9.9"
-            db_session.flush()
-
-        mock_delete.side_effect = _reclaim
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result == {"deleted_remote": True, "deleted_local": False, "error": None}
-
-        row = db_session.get(DnsRecord, svc.id)
-        assert row is not None
-        assert row.record_id == "cf_new"
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_not_found_ownership_guard_keeps_reclaimed_row(self, mock_delete, db_session):
-        """Same ownership guard on the already-gone path: a record reclaimed under a
-        new id is not dropped when Cloudflare reports the old id absent."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_old", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        def _reclaim_then_gone(*_args, **_kwargs):
-            row = db_session.get(DnsRecord, svc.id)
-            row.record_id = "cf_new"
-            db_session.flush()
-            raise CloudflareAPIError(
-                "delete_a_record",
-                "Record does not exist. (code 81044)",
-                errors=[{"code": 81044, "message": "Record does not exist."}],
-            )
-
-        mock_delete.side_effect = _reclaim_then_gone
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result == {"deleted_remote": False, "deleted_local": False, "error": None}
-
-        row = db_session.get(DnsRecord, svc.id)
-        assert row is not None
-        assert row.record_id == "cf_new"
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_success_reclaim_emits_no_removal_event(self, mock_delete, db_session):
-        """When the local row is reclaimed under a new id between the remote delete
-        and the local guard, no 'dns_removed' event may be logged: the service's
-        DNS record is live (cf_new), so a removal event would be a false audit entry."""
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_old", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        def _reclaim(*_args, **_kwargs):
-            row = db_session.get(DnsRecord, svc.id)
-            row.record_id = "cf_new"
-            row.value = "9.9.9.9"
-            db_session.flush()
-
-        mock_delete.side_effect = _reclaim
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result == {"deleted_remote": True, "deleted_local": False, "error": None}
-        db_session.flush()
-
-        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
-        assert events == []
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_not_found_reclaim_emits_no_removal_event(self, mock_delete, db_session):
-        """Already-gone path: a row reclaimed under a new id must not produce a
-        'dns_removed' event, since nothing was actually removed."""
-        from app.adapters.cloudflare_adapter import CloudflareAPIError
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_old", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        def _reclaim_then_gone(*_args, **_kwargs):
-            row = db_session.get(DnsRecord, svc.id)
-            row.record_id = "cf_new"
-            db_session.flush()
-            raise CloudflareAPIError(
-                "delete_a_record",
-                "Record does not exist. (code 81044)",
-                errors=[{"code": 81044, "message": "Record does not exist."}],
-            )
-
-        mock_delete.side_effect = _reclaim_then_gone
-
-        result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert result == {"deleted_remote": False, "deleted_local": False, "error": None}
-        db_session.flush()
-
-        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
-        assert events == []
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_default_timeout_is_short_cleanup_cap(self, mock_delete, db_session):
-        """cleanup_dns_record runs under the lifecycle mutex, so by default it must
-        cap the Cloudflare delete at CF_CLEANUP_TIMEOUT (10s), not the 30s default."""
-        from app.adapters.dns_reconciler import CF_CLEANUP_TIMEOUT, cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_t", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        assert mock_delete.call_args.kwargs["timeout"] == CF_CLEANUP_TIMEOUT
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_custom_timeout_is_threaded_to_delete(self, mock_delete, db_session):
-        """An explicit timeout overrides the default and is threaded into the delete."""
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_t", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        cleanup_dns_record(db_session, svc, "cf-token", "zone123", timeout=3.5)
-        assert mock_delete.call_args.kwargs["timeout"] == 3.5
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_db_failure_after_remote_delete_is_not_a_remote_failure(self, mock_delete, db_session):
-        """The remote Cloudflare delete SUCCEEDS, then the local DB bookkeeping
-        fails. That is NOT a Cloudflare failure: it must report deleted_remote=True
-        with error=None (the record IS gone) -- never report a phantom remote
-        failure (deleted_remote=False, error=<db msg>) that makes callers raise a
-        misleading 'Cloudflare delete failed' 502 and log a false dns_cleanup_failed
-        audit event. Guards against re-coupling the remote and local try/except."""
-        import app.adapters.dns_reconciler as dns_mod
-        from app.adapters.dns_reconciler import cleanup_dns_record
-
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_db", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        # delete_a_record (mock) succeeds; only the FIRST commit (local bookkeeping)
-        # raises, mimicking a transient SQLite write failure after the remote delete.
-        real_commit = dns_mod.commit_with_lock
-        state = {"n": 0}
-
-        def _flaky_commit(db):
-            state["n"] += 1
-            if state["n"] == 1:
-                raise RuntimeError("database is locked")
-            return real_commit(db)
-
-        with patch.object(dns_mod, "commit_with_lock", _flaky_commit):
-            result = cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-
-        # The remote record is gone -> remote success, no error reported.
-        assert result["deleted_remote"] is True
-        assert result["error"] is None
-        # No FALSE dns_cleanup_failed audit event for a delete that actually worked.
-        events = db_session.query(Event).filter(Event.kind == "dns_cleanup_failed").all()
-        assert events == []
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_removal_event_message_when_deleted(self, mock_delete, db_session):
-        """The dns_removed audit message on the success path names the actual
-        removal ('Removed DNS record for <host>'), distinct from the already-absent
-        wording -- collapsing the two would blur the operator's audit trail."""
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_ok", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        db_session.flush()
-
-        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
-        assert len(events) == 1
-        assert events[0].message == f"Removed DNS record for {svc.hostname}"
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    def test_removal_event_message_when_already_absent(self, mock_delete, db_session):
-        """When Cloudflare reports the record already gone, the dns_removed message
-        must use the distinct 'stale local ... already absent' wording (never the
-        plain deleted wording), so the audit trail records that nothing was actually
-        removed remotely, only the stale local mirror was cleaned up."""
-        mock_delete.side_effect = CloudflareAPIError(
-            "delete_a_record", "Record does not exist. (code 81044)",
-            errors=[{"code": 81044, "message": "Record does not exist."}],
-        )
-        svc = _create_service(db_session)
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="cf_gone", value="1.2.3.4")
-        db_session.add(dns)
-        db_session.commit()
-
-        cleanup_dns_record(db_session, svc, "cf-token", "zone123")
-        db_session.flush()
-
-        events = db_session.query(Event).filter(Event.kind == "dns_removed").all()
-        assert len(events) == 1
-        assert "already absent" in events[0].message
-        assert events[0].message != f"Removed DNS record for {svc.hostname}"
-
-
-class TestDeleteWithDnsCleanup:
-    """Test the service delete endpoint with cleanup_dns parameter."""
-
-    def _create_via_api(self, client, **overrides):
-        body = {
-            "name": "Nextcloud",
-            "upstream_container_id": "abc123def456",
-            "upstream_container_name": "nextcloud",
-            "upstream_scheme": "http",
-            "upstream_port": 80,
-            "hostname": "nextcloud.example.com",
-            "base_domain": "example.com",
-        }
-        body.update(overrides)
-        return client.post("/api/services", json=body)
-
-    def test_delete_without_cleanup(self, client):
-        svc_id = self._create_via_api(client).json()["id"]
-        resp = client.delete(f"/api/services/{svc_id}")
-        assert resp.status_code == 204
-
-    def test_delete_with_cleanup_dns_param(self, client):
-        """cleanup_dns=true doesn't crash even without CF token configured."""
-        svc_id = self._create_via_api(client).json()["id"]
-        resp = client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
-        assert resp.status_code == 204
-
-    @patch("app.adapters.dns_reconciler.delete_a_record")
-    @patch("app.secrets.read_secret")
-    def test_delete_calls_cleanup_when_configured(self, mock_secret, mock_delete, client, db_session):
-        from app.settings_store import set_setting
-
-        svc_id = self._create_via_api(client).json()["id"]
-
-        # Set up CF token and zone
-        mock_secret.return_value = "cf-token"
-        set_setting(db_session, "cf_zone_id", "zone1")
-
-        # Create DNS record for this service
-        dns = DnsRecord(service_id=svc_id, hostname="nextcloud.example.com", record_id="r1", value="100.64.0.1")
-        db_session.add(dns)
-        db_session.commit()
-
-        resp = client.delete(f"/api/services/{svc_id}?cleanup_dns=true")
-        assert resp.status_code == 204
-        mock_delete.assert_called_once_with("cf-token", "zone1", "r1", timeout=10.0)

@@ -1,38 +1,23 @@
 """Service CRUD API endpoints.
 
-The HTTP handlers here are intentionally thin: they parse the request, run
-upstream validation (kept here because the test suite patches
-``app.routers.services._validate_upstream``), delegate the lifecycle
-orchestration to the :mod:`app.services` layer (imported as ``service_layer``),
-and map results / failures to HTTP responses. The error-mapping shells
-(``edge_action`` / ``_run_edge_job``) and their ``app.routers.services`` logger
-stay here so the no-leak tests keep asserting against this module.
-
-Only upstream Docker validation remains in this router because
-``_validate_upstream`` is a deliberate test patch point. Edge / reconcile /
-health / secret orchestration lives behind the service facade; tests patch those
-dependencies at their source modules.
+CRUD handlers here parse requests, keep upstream validation at the historical
+``app.routers.services._validate_upstream`` patch target, and delegate lifecycle
+orchestration to :mod:`app.services`. Edge, certificate, reconcile, and other
+service action endpoints live in :mod:`app.routers.service_actions`.
 """
 
-import asyncio
-import functools
 import logging
-from typing import NoReturn
 
 import docker
-import requests
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app import services as service_layer
 from app.auth import get_current_user
 from app.database import get_db
-from app.events.serialization import event_to_dict
 from app.models.certificate import Certificate
-from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
-from app.reconciler import reconcile_loop
 from app.schemas.services import (
     ServiceCreate,
     ServiceListResponse,
@@ -40,12 +25,7 @@ from app.schemas.services import (
     ServiceUpdate,
 )
 from app.services import docker_client, resolve_socket
-from app.services.errors import (
-    DockerUnavailable,
-    HostnameSuffixInvalid,
-    ServiceError,
-    ServiceNotFound,
-)
+from app.services.errors import DockerUnavailable, HostnameSuffixInvalid, ServiceNotFound
 from app.settings_store import get_setting
 
 logger = logging.getLogger(__name__)
@@ -57,82 +37,12 @@ router = APIRouter(
 )
 
 
-def _raise_edge_failure(exc: Exception, *, failure_detail: str) -> NoReturn:
-    """Translate an edge-action failure into the canonical HTTP status.
-
-    Single source for the mapping the sync :func:`edge_action` decorator and the
-    async :func:`_run_edge_job` wrapper both historically hand-rolled as an
-    identical four-arm ``except`` ladder:
-
-    * :class:`~app.services.errors.ServiceError` — re-raised unchanged so the
-      central ``@app.exception_handler`` maps the service layer's own
-      404/409/400/... to its canonical status + detail;
-    * ``HTTPException`` — re-raised unchanged (a handler's own mapped 4xx);
-    * ``RuntimeError`` — the operation failed → :class:`ServiceError` (500) with
-      *failure_detail*;
-    * Docker daemon unreachable (``docker`` ``DockerException`` or ``requests``
-      ``ConnectionError``) → :class:`~app.services.errors.DockerUnavailable`
-      (503 ``"Docker is unavailable"``);
-    * anything else → :class:`ServiceError` (500) with *failure_detail*.
-
-    Every arm raises a domain exception the central ``@app.exception_handler``
-    maps to the exact status + detail the routers used to raise inline. The full
-    exception (with traceback) is logged server-side via ``logger.exception``, so
-    only the generic *failure_detail* — never ``str(exc)`` — reaches the client.
-    """
-    if isinstance(exc, (ServiceError, HTTPException)):
-        raise exc
-    if isinstance(exc, RuntimeError):
-        logger.exception("Edge action failed: %s", failure_detail)
-        raise ServiceError(failure_detail, status_code=500) from None
-    if isinstance(exc, (docker.errors.DockerException, requests.exceptions.ConnectionError)):
-        logger.exception("Docker unavailable during edge action: %s", failure_detail)
-        raise DockerUnavailable() from None
-    logger.exception("Unexpected error during edge action: %s", failure_detail)
-    raise ServiceError(failure_detail, status_code=500) from None
-
-
-def edge_action(*, failure_detail: str):
-    """Wrap a sync edge-action handler so failures go through the shared mapping.
-
-    The reload / restart / recreate endpoints all touch the Docker daemon; this
-    funnels any failure through :func:`_raise_edge_failure` so the four-arm
-    mapping lives in exactly one place.
-    """
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            try:
-                return func(*args, **kwargs)
-            except Exception as exc:
-                _raise_edge_failure(exc, failure_detail=failure_detail)
-
-        return wrapper
-
-    return decorator
-
-
-async def _run_edge_job(work, *, failure_detail: str):
-    """Async counterpart to :func:`edge_action` for endpoints that offload their
-    Docker work to a worker thread.
-
-    Awaits ``asyncio.to_thread(work)`` and funnels failures through the SAME
-    :func:`_raise_edge_failure` mapping, keeping the async ``/reconcile`` and
-    ``/update-edge`` endpoints consistent with the sync reload / restart /
-    recreate endpoints (a Docker-unavailable failure → 503, not a generic 500).
-    """
-    try:
-        return await asyncio.to_thread(work)
-    except Exception as exc:
-        _raise_edge_failure(exc, failure_detail=failure_detail)
-
 
 def _validate_upstream(db: Session, container_id: str, port: int) -> None:
     """Validate that the upstream container exists and the port is plausible.
 
-    Raises HTTPException on failure (422 if container/port invalid, 503 if
-    Docker is unreachable).
+    Raises HTTPException on invalid container/port input and DockerUnavailable
+    when Docker is unreachable.
     """
     try:
         with docker_client(resolve_socket(db)) as client:
@@ -149,9 +59,8 @@ def _validate_upstream(db: Session, container_id: str, port: int) -> None:
         logger.exception(
             "Cannot connect to Docker to validate upstream container %s", container_id
         )
-        raise HTTPException(
-            status_code=503,
-            detail="Cannot connect to Docker to validate upstream container",
+        raise DockerUnavailable(
+            "Cannot connect to Docker to validate upstream container"
         ) from exc
 
 
@@ -301,147 +210,22 @@ def delete_service(
     service_layer.delete_service_record(db, svc, cleanup_dns=cleanup_dns)
 
 
-# --- Action endpoints ---
 
+# Compatibility exports for callers that imported the former action helpers
+# from app.routers.services before AR-N1 split them into service_actions.
+from app.routers.service_actions import (  # noqa: E402
+    _get_service_or_404,
+    _raise_edge_failure,
+    _run_edge_job,
+    edge_action,
+)
 
-def _get_service_or_404(service_id: str, db: Session) -> Service:
-    svc = db.get(Service, service_id)
-    if not svc:
-        raise ServiceNotFound()
-    return svc
-
-
-@router.post("/{service_id}/reload")
-@edge_action(failure_detail="Failed to reload Caddy config")
-def reload_service(service_id: str, db: Session = Depends(get_db)):
-    """Reload Caddy config inside edge container."""
-    return service_layer.reload_caddy_action(db, service_id)
-
-
-@router.post("/{service_id}/restart-edge")
-@edge_action(failure_detail="Failed to restart edge container")
-def restart_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
-    """Restart edge container."""
-    return service_layer.restart_edge_action(db, service_id)
-
-
-@router.post("/{service_id}/recreate-edge")
-@edge_action(failure_detail="Failed to recreate edge container")
-def recreate_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
-    """Destroy and recreate edge container."""
-    return service_layer.recreate_edge(db, service_id)
-
-
-@router.post("/{service_id}/renew-cert")
-def renew_cert(
-    service_id: str,
-    force: bool = Query(default=False),
-    db: Session = Depends(get_db),
-):
-    """Manually issue or renew a service's certificate.
-
-    Mirrors the background renewal loop's intent: when the cert is missing or
-    near/at/past expiry it issues/renews immediately. When the cert is healthy
-    and still far from expiry, renewing would contact Let's Encrypt for no real
-    benefit and risks rate limits, so the request is refused (``performed:
-    false``, ``needs_force: true``) and the caller must retry with
-    ``?force=true``. With ``force=true`` a renewal always happens, bypassing the
-    healthy-noop and the per-cert failure backoff. A DISABLED service is offline
-    and its cert is not served, and ``process_service_cert`` skips disabled
-    services outright — so a renewal is reported as not performed rather than
-    silently no-opping while claiming success.
-    """
-    svc = _get_service_or_404(service_id, db)
-    try:
-        return service_layer.renew_cert(db, svc, force=force)
-    except Exception:
-        logger.exception("Failed to renew certificate for service %s", service_id)
-        raise HTTPException(status_code=500, detail="Failed to renew certificate") from None
-
-
-@router.get("/{service_id}/logs/cert")
-def get_cert_logs(
-    service_id: str,
-    limit: int = Query(default=50, ge=1, le=500),
-    db: Session = Depends(get_db),
-):
-    """Get cert-related events for a service."""
-    _get_service_or_404(service_id, db)
-    events = (
-        db.query(Event)
-        .filter(
-            Event.service_id == service_id,
-            Event.kind.in_(["cert_issued", "cert_renewed", "cert_failed"]),
-        )
-        .order_by(Event.created_at.desc(), Event.id.desc())
-        .limit(limit)
-        .all()
-    )
-    return {
-        "events": [
-            event_to_dict(
-                evt, fields=("id", "kind", "level", "message", "created_at", "details")
-            )
-            for evt in events
-        ]
-    }
-
-
-@router.post("/{service_id}/reconcile")
-async def reconcile_service_endpoint(service_id: str, db: Session = Depends(get_db)):
-    """Trigger manual reconciliation for a single service."""
-
-    _get_service_or_404(service_id, db)
-    socket = resolve_socket(db)
-
-    result = await _run_edge_job(
-        functools.partial(reconcile_loop.spawn_reconcile, service_id, socket),
-        failure_detail="Failed to reconcile service",
-    )
-    return {"success": True, "phase": result["phase"], "error": result.get("error")}
-
-
-@router.get("/{service_id}/logs/edge")
-@edge_action(failure_detail="Failed to fetch edge logs")
-def get_edge_logs(
-    service_id: str,
-    tail: int = Query(default=100, ge=1, le=1000),
-    db: Session = Depends(get_db),
-):
-    """Get edge container logs."""
-
-    return service_layer.get_edge_logs(db, service_id, tail)
-
-
-@router.post("/{service_id}/health-check-full")
-def full_health_check(service_id: str, db: Session = Depends(get_db)):
-    """Run an extensive health check including live Cloudflare DNS verification.
-
-    This is manual-only (not part of the reconcile loop) to avoid API rate limits.
-    """
-
-    return service_layer.full_health_check(db, service_id)
-
-
-@router.get("/{service_id}/edge-version")
-def get_edge_version_endpoint(service_id: str, db: Session = Depends(get_db)):
-    """Check the version of a service's edge container vs the orchestrator version."""
-
-    return service_layer.get_edge_version(db, service_id)
-
-
-@router.post("/{service_id}/update-edge")
-async def update_edge_endpoint(service_id: str, db: Session = Depends(get_db)):
-    """Recreate an edge container with the current orchestrator version.
-
-    This rebuilds the edge image if needed and recreates the container,
-    stamping it with the current version label.
-    """
-    # Guard on the event loop (raises 404/409) before spawning the worker thread.
-    service_layer.get_enabled_service_for_edge_action(service_id, db)
-    socket = resolve_socket(db)
-
-    return await _run_edge_job(
-        functools.partial(service_layer.update_edge_job, service_id, socket),
-        failure_detail="Failed to update edge container",
-    )
+__all__ = [
+    "_get_service_or_404",
+    "_raise_edge_failure",
+    "_run_edge_job",
+    "_validate_upstream",
+    "_validate_upstream_port",
+    "edge_action",
+    "router",
+]

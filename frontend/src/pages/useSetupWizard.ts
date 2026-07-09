@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type ConnectionTestResult, type SetupProgress } from "@/lib/api"
 import { errorMessage } from "@/lib/utils"
-import { isEmailLike } from "@/lib/validation"
+import { isBaseDomain, isEmailLike, isPassword, isUsername } from "@/lib/validation"
 
 export const STEPS = [
   { key: "account", label: "Account" },
@@ -179,12 +179,12 @@ export function useSetupWizard(onSetupComplete?: () => void) {
     }
     if (step === 0) {
       return (
-        adminUsername.trim().length > 0 &&
-        adminPassword.length >= 8 &&
+        isUsername(adminUsername) &&
+        isPassword(adminPassword) &&
         adminPassword === adminPasswordConfirm
       )
     }
-    if (step === 1) return baseDomain.trim().length > 0
+    if (step === 1) return isBaseDomain(baseDomain)
     if (step === 2) return cfZoneId.trim().length > 0 && (cfToken.length > 0 || cfTokenConfigured)
     if (step === 3) return isEmailLike(acmeEmail)
     if (step === 4) return tsAuthKey.trim().length > 0 && tsApiKey.trim().length > 0

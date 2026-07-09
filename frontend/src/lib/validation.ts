@@ -82,6 +82,42 @@ export function isEmailLike(value: string): boolean {
 }
 
 /**
+ * Base domain: lowercase DNS labels, total length <= 253, label length <= 63.
+ * Mirrors `GeneralSettingsUpdate.normalize_base_domain`
+ * (backend/app/schemas/settings.py): the backend strips strings, lowercases the
+ * domain, applies the same label regex, then enforces the same DNS length
+ * ceilings. Uppercase input is accepted here because the server normalizes it
+ * before validation.
+ */
+export function isBaseDomain(value: string): boolean {
+  const domain = value.trim().toLowerCase()
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(domain)) {
+    return false
+  }
+  return domain.length <= 253 && domain.split(".").every((label) => label.length <= 63)
+}
+
+/**
+ * Setup username: non-blank after trimming. The auth router strips before
+ * storing/looking up usernames; block whitespace-only input client-side so the
+ * setup wizard cannot create an effectively empty admin username.
+ */
+export function isUsername(value: string): boolean {
+  return value.trim() !== ""
+}
+
+/** Password used for setup/new-password flows. Mirrors Field(min_length=8). */
+export function isPassword(value: string): boolean {
+  return value.length >= 8
+}
+
+/** Current/login password. Mirrors Field(min_length=1); do not trim passwords. */
+export function isPresentPassword(value: string): boolean {
+  return value.length > 0
+}
+
+
+/**
  * Upstream port: a whole number in the inclusive TCP range 1..65535. Mirrors the
  * backend `Field(..., ge=1, le=65535)` constraint on `upstream_port`
  * (backend/app/schemas/services.py:63 `ServiceCreate`, :98 `ServiceUpdate`),

@@ -14,3 +14,13 @@ export function errorMessage(e: unknown, fallback = ""): string {
   if (e instanceof Error) return e.message
   return fallback || String(e)
 }
+
+export async function getJsonSafe<T>(url: string): Promise<T | null> {
+  try {
+    const response = await fetch(url, { credentials: "same-origin" })
+    if (!response.ok) return null
+    return await response.json() as T
+  } catch {
+    return null
+  }
+}

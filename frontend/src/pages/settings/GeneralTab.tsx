@@ -1,5 +1,5 @@
 import { type AllSettings } from "@/lib/api"
-import { isPositiveInt, isNonBlank, isEmailLike } from "@/lib/validation"
+import { isPositiveInt, isNonBlank, isEmailLike, isBaseDomain } from "@/lib/validation"
 import { useDirtyForm } from "@/lib/useDirtyForm"
 import { Field } from "@/components/settings/Field"
 import { SaveButton } from "@/components/settings/SaveButton"
@@ -45,11 +45,11 @@ export function GeneralTab({
   // save() surfaces any backend rejection in the error banner regardless (the
   // server is authoritative), so the page never relies on this gate being
   // exhaustive. We mirror the backend constraints only for inline feedback + to
-  // skip an obviously-doomed PUT: base_domain -> Field(min_length=1); acme_email
+  // skip an obviously-doomed PUT: base_domain -> normalize_base_domain; acme_email
   // -> isEmailLike (same shape the backend enforces); numeric fields -> Field(ge=1),
   // with cert_renewal_window_days additionally capped at Field(le=10000) server-side.
   // Layers on top of the per-field dirty guard above without touching it.
-  const baseDomainValid = isNonBlank(values.base_domain)
+  const baseDomainValid = isBaseDomain(values.base_domain)
   const acmeEmailValid = isEmailLike(values.acme_email)
   const reconcileValid = isPositiveInt(values.reconcile_interval_seconds)
   const healthValid = isPositiveInt(values.health_check_interval_seconds)
@@ -78,7 +78,7 @@ export function GeneralTab({
 
   return (
     <div className="space-y-4">
-      <Field label="Base Domain" value={values.base_domain} onChange={bind("base_domain")} placeholder="mydomain.com" error={baseDomainValid ? undefined : "Required — cannot be blank"} />
+      <Field label="Base Domain" value={values.base_domain} onChange={bind("base_domain")} placeholder="mydomain.com" error={baseDomainValid ? undefined : isNonBlank(values.base_domain) ? "Enter a valid base domain" : "Required — cannot be blank"} />
       <Field label="ACME Email" value={values.acme_email} onChange={bind("acme_email")} type="email" placeholder="admin@mydomain.com" error={acmeEmailValid ? undefined : isNonBlank(values.acme_email) ? "Enter a valid email address" : "Required — cannot be blank"} />
       <Field
         label="Full reconciliation interval (seconds)"

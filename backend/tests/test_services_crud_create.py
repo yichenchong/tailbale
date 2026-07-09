@@ -2,15 +2,28 @@
 
 Mirrors app.services.crud (split from test_services_crud.py)."""
 
+import contextlib
+import hashlib
+import logging
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
+import docker
 import pytest
+from fastapi import HTTPException
+from sqlalchemy import event as sa_event
 
 from app.models.certificate import Certificate
+from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
-from app.routers.services import _validate_upstream as _real_validate_upstream
+from app.routers.services import (
+    _validate_upstream as _real_validate_upstream,
+)
+from app.routers.services import (
+    _validate_upstream_port,
+)
+from app.services.errors import DockerUnavailable
 from tests._services_helpers import (
     _create_service,
     _make_container,
@@ -246,8 +259,6 @@ class TestListServices:
         assert names == {"First", "Second"}
 
     def test_list_batches_status_cert_and_handles_missing(self, client, db_session, db_engine):
-        from sqlalchemy import event as sa_event
-
         id1 = _create_service(client, name="A", hostname="a.example.com").json()["id"]
         id2 = _create_service(client, name="B", hostname="b.example.com").json()["id"]
         id3 = _create_service(client, name="C", hostname="c.example.com").json()["id"]
@@ -325,14 +336,12 @@ class TestGetService:
 
 class TestServiceEvents:
     def test_create_generates_event(self, client, db_session):
-        from app.models.event import Event
         _create_service(client)
         events = db_session.query(Event).filter(Event.kind == "service_created").all()
         assert len(events) == 1
         assert "Nextcloud" in events[0].message
 
     def test_update_generates_event(self, client, db_session):
-        from app.models.event import Event
         svc_id = _create_service(client).json()["id"]
         client.put(f"/api/services/{svc_id}", json={"name": "Renamed"})
         events = db_session.query(Event).filter(Event.kind == "service_updated").all()
@@ -345,7 +354,6 @@ class TestServiceEvents:
         # straight to the central emit_event. The representative service_updated
         # emit must keep its level (default "info"), message, and *dict* details
         # (serialized centrally) intact across the consolidation.
-        from app.models.event import Event
         svc_id = _create_service(client).json()["id"]
         client.put(f"/api/services/{svc_id}", json={"name": "Renamed"})
         event = (
@@ -356,14 +364,12 @@ class TestServiceEvents:
         assert event.details == {"name": "Renamed"}
 
     def test_disable_generates_event(self, client, db_session):
-        from app.models.event import Event
         svc_id = _create_service(client).json()["id"]
         client.post(f"/api/services/{svc_id}/disable")
         events = db_session.query(Event).filter(Event.kind == "service_disabled").all()
         assert len(events) == 1
 
     def test_delete_generates_event(self, client, db_session):
-        from app.models.event import Event
         svc_id = _create_service(client).json()["id"]
         client.delete(f"/api/services/{svc_id}")
         events = db_session.query(Event).filter(Event.kind == "service_deleted").all()
@@ -371,7 +377,6 @@ class TestServiceEvents:
         assert events[0].service_id is None
 
     def test_noop_update_no_event(self, client, db_session):
-        from app.models.event import Event
         svc_id = _create_service(client).json()["id"]
         client.put(f"/api/services/{svc_id}", json={})
         events = db_session.query(Event).filter(Event.kind == "service_updated").all()
@@ -389,7 +394,6 @@ class TestSnippetAuditEvents:
     _SNIPPET2 = "header X-Content-Type-Options nosniff"
 
     def _snippet_events(self, db, service_id=None):
-        from app.models.event import Event
         q = db.query(Event).filter(Event.kind == "service_snippet_changed")
         if service_id is not None:
             q = q.filter(Event.service_id == service_id)
@@ -399,7 +403,6 @@ class TestSnippetAuditEvents:
         return {e.details["action"]: e for e in events}
 
     def test_create_with_snippet_emits_warning_event(self, client, db_session):
-        import hashlib
         _create_service(client, custom_caddy_snippet=self._SNIPPET)
         events = self._snippet_events(db_session)
         assert len(events) == 1
@@ -425,7 +428,6 @@ class TestSnippetAuditEvents:
         assert events[0].details["action"] == "set"
 
     def test_update_change_snippet_emits_changed(self, client, db_session):
-        import hashlib
         svc_id = _create_service(client, custom_caddy_snippet=self._SNIPPET).json()["id"]
         # The create emitted one 'set'; modifying must add a DISTINCT 'changed'.
         client.put(f"/api/services/{svc_id}", json={"custom_caddy_snippet": self._SNIPPET2})
@@ -576,7 +578,6 @@ class TestUpstreamContainerValidation:
             assert args[0][2] == 80
 
     def test_validate_upstream_not_found_via_api(self, client):
-        from fastapi import HTTPException
         with patch(
             "app.routers.services._validate_upstream",
             side_effect=HTTPException(status_code=422, detail="Upstream container 'x' not found"),
@@ -586,7 +587,6 @@ class TestUpstreamContainerValidation:
             assert "not found" in resp.json()["detail"].lower()
 
     def test_validate_upstream_docker_unreachable_via_api(self, client):
-        from fastapi import HTTPException
         with patch(
             "app.routers.services._validate_upstream",
             side_effect=HTTPException(status_code=503, detail="Cannot connect to Docker"),
@@ -598,10 +598,6 @@ class TestUpstreamContainerValidation:
     def test_validate_upstream_docker_unreachable_detail_is_generic(self, db_session, caplog):
         """_validate_upstream's 503 must NOT leak the socket path / DOCKER_HOST in
         str(exc); the real error is logged server-side instead."""
-        import logging
-
-        import docker
-        from fastapi import HTTPException
 
         secret = "unix:///run/secret-docker.sock connection refused"
         # The default docker_socket_path setting is truthy, so the DockerClient
@@ -611,7 +607,7 @@ class TestUpstreamContainerValidation:
         with (
             patch("docker.DockerClient", side_effect=docker.errors.DockerException(secret)),
             caplog.at_level(logging.ERROR, logger="app.routers.services"),
-            pytest.raises(HTTPException) as exc_info,
+            pytest.raises(DockerUnavailable) as exc_info,
         ):
             _real_validate_upstream(db_session, "abc123", 80)
 
@@ -625,10 +621,6 @@ class TestUpstreamContainerValidation:
         containers.get to a 422 (container missing) — distinct from the
         daemon-down 503 path. Exercises the actual NotFound arm rather than a
         fully-patched _validate_upstream."""
-        import contextlib
-
-        import docker
-        from fastapi import HTTPException
 
         fake_client = MagicMock()
         fake_client.containers.get.side_effect = docker.errors.NotFound("no such container")
@@ -651,31 +643,26 @@ class TestUpstreamPortValidation:
     """_validate_upstream_port should check exposed ports on the container."""
 
     def test_port_in_exposed_ports_passes(self):
-        from app.routers.services import _validate_upstream_port
         container = _make_container(exposed_ports={"80/tcp": {}, "443/tcp": {}})
         _validate_upstream_port(container, 80)
 
     def test_port_not_in_exposed_ports_raises(self):
-        from app.routers.services import _validate_upstream_port
         container = _make_container(exposed_ports={"80/tcp": {}, "443/tcp": {}})
-        with pytest.raises(__import__("fastapi").HTTPException) as exc_info:
+        with pytest.raises(HTTPException) as exc_info:
             _validate_upstream_port(container, 8080)
         assert exc_info.value.status_code == 422
         assert "8080" in exc_info.value.detail
         assert "80" in exc_info.value.detail
 
     def test_port_in_host_bindings_passes(self):
-        from app.routers.services import _validate_upstream_port
         container = _make_container(port_bindings={"3000/tcp": [{"HostPort": "3000"}]})
         _validate_upstream_port(container, 3000)
 
     def test_no_exposed_ports_allows_any(self):
-        from app.routers.services import _validate_upstream_port
         container = _make_container()
         _validate_upstream_port(container, 9999)
 
     def test_merged_exposed_and_bindings(self):
-        from app.routers.services import _validate_upstream_port
         container = _make_container(
             exposed_ports={"80/tcp": {}},
             port_bindings={"8080/tcp": [{"HostPort": "8080"}]},
@@ -684,11 +671,10 @@ class TestUpstreamPortValidation:
         _validate_upstream_port(container, 8080)
 
     def test_rejects_port_when_others_exist(self):
-        from app.routers.services import _validate_upstream_port
         container = _make_container(
             exposed_ports={"80/tcp": {}},
             port_bindings={"8080/tcp": [{"HostPort": "8080"}]},
         )
-        with pytest.raises(__import__("fastapi").HTTPException) as exc_info:
+        with pytest.raises(HTTPException) as exc_info:
             _validate_upstream_port(container, 3000)
         assert exc_info.value.status_code == 422

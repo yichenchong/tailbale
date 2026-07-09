@@ -1,8 +1,13 @@
 """Tests for edge Caddyfile config renderer."""
 
+import os
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+
+from app.edge import config_renderer
+from app.edge.config_renderer import render_caddyfile, write_caddyfile
 
 
 def _make_service(**overrides):
@@ -21,7 +26,6 @@ def _make_service(**overrides):
 
 class TestRenderCaddyfile:
     def test_basic_caddyfile(self):
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service()
         result = render_caddyfile(svc)
@@ -37,7 +41,6 @@ class TestRenderCaddyfile:
 
     def test_preserve_host_header_enabled(self):
         """When True, Caddy's default behavior preserves the original Host — no override emitted."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(preserve_host_header=True)
         result = render_caddyfile(svc)
@@ -46,7 +49,6 @@ class TestRenderCaddyfile:
 
     def test_preserve_host_header_disabled(self):
         """When False, rewrite Host to upstream address so the app sees its own name."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(preserve_host_header=False)
         result = render_caddyfile(svc)
@@ -54,7 +56,6 @@ class TestRenderCaddyfile:
         assert "header_up Host {upstream_hostport}" in result
 
     def test_https_upstream_scheme(self):
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(upstream_scheme="https", upstream_port=443)
         result = render_caddyfile(svc)
@@ -62,7 +63,6 @@ class TestRenderCaddyfile:
         assert "reverse_proxy https://nextcloud:443" in result
 
     def test_custom_caddy_snippet(self):
-        from app.edge.config_renderer import render_caddyfile
 
         snippet = "header X-Custom true\nlog { output stdout }"
         svc = _make_service(custom_caddy_snippet=snippet)
@@ -75,7 +75,6 @@ class TestRenderCaddyfile:
         """Document current behavior: a whitespace-only snippet is still truthy,
         so render_snippet_block runs but yields only a newline — no directives
         are emitted. The output gains blank padding but still closes correctly."""
-        from app.edge.config_renderer import render_caddyfile
 
         none = render_caddyfile(_make_service(custom_caddy_snippet=None))
         ws = render_caddyfile(_make_service(custom_caddy_snippet="   \n  \t "))
@@ -86,7 +85,6 @@ class TestRenderCaddyfile:
         assert ws == none[:-2] + "\n\n}\n"
 
     def test_no_custom_snippet(self):
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(custom_caddy_snippet=None)
         result = render_caddyfile(svc)
@@ -96,7 +94,6 @@ class TestRenderCaddyfile:
         assert lines[-1] == "}"
 
     def test_custom_port(self):
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(upstream_port=8096)
         result = render_caddyfile(svc)
@@ -104,7 +101,6 @@ class TestRenderCaddyfile:
         assert "reverse_proxy nextcloud:8096" in result
 
     def test_different_hostname(self):
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(hostname="jellyfin.mydomain.com")
         result = render_caddyfile(svc)
@@ -113,7 +109,6 @@ class TestRenderCaddyfile:
 
     def test_deterministic_output(self):
         """Same input should always produce same output."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service()
         result1 = render_caddyfile(svc)
@@ -121,7 +116,6 @@ class TestRenderCaddyfile:
         assert result1 == result2
 
     def test_different_container_name(self):
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(upstream_container_name="my-jellyfin-app")
         result = render_caddyfile(svc)
@@ -130,7 +124,6 @@ class TestRenderCaddyfile:
 
     def test_http_scheme_with_port_443_omits_scheme(self):
         """Caddy rejects http:// with port 443. Omitting scheme avoids the conflict."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(upstream_scheme="http", upstream_port=443)
         result = render_caddyfile(svc)
@@ -142,7 +135,6 @@ class TestRenderCaddyfile:
 
     def test_uses_tab_indentation(self):
         """Caddy expects tab indentation (caddy fmt standard)."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service()
         result = render_caddyfile(svc)
@@ -160,7 +152,6 @@ class TestRenderCaddyfile:
 
     def test_https_scheme_keeps_prefix(self):
         """When upstream is genuinely HTTPS, the scheme prefix is included."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(upstream_scheme="https", upstream_port=8443)
         result = render_caddyfile(svc)
@@ -172,7 +163,6 @@ class TestRenderCaddyfile:
         ``http://host:443``). For an HTTPS upstream on port 80 the renderer must
         dial the bare address and force TLS via the transport directive instead
         of emitting the rejected scheme prefix."""
-        from app.edge.config_renderer import render_caddyfile
 
         svc = _make_service(upstream_scheme="https", upstream_port=80)
         result = render_caddyfile(svc)
@@ -189,7 +179,6 @@ class TestRenderCaddyfile:
         upstream on port 80. Broadening it to all HTTPS upstreams (or to HTTP)
         would re-break the conventional ``https://host:443`` case and emit an
         invalid Caddyfile — the exact regression the port-80 special-case fixed."""
-        from app.edge.config_renderer import render_caddyfile
 
         https_443 = render_caddyfile(_make_service(upstream_scheme="https", upstream_port=443))
         assert "transport http {" not in https_443
@@ -203,7 +192,6 @@ class TestRenderCaddyfile:
 
 class TestWriteCaddyfile:
     def test_writes_file(self, tmp_path):
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_test123")
         path = write_caddyfile(svc, tmp_path)
@@ -217,7 +205,6 @@ class TestWriteCaddyfile:
         assert "https://nextcloud.example.com" in content
 
     def test_creates_service_directory(self, tmp_path):
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_newdir")
         write_caddyfile(svc, tmp_path)
@@ -226,7 +213,6 @@ class TestWriteCaddyfile:
         assert service_dir.is_dir()
 
     def test_overwrites_existing(self, tmp_path):
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_overwrite")
         path = write_caddyfile(svc, tmp_path)
@@ -242,7 +228,6 @@ class TestWriteCaddyfile:
         assert "9999" not in original
 
     def test_atomic_write_no_tmp_leftover(self, tmp_path):
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_atomic")
         write_caddyfile(svc, tmp_path)
@@ -258,10 +243,7 @@ class TestWriteCaddyfile:
         """The temp file must be uniquely named (pid+thread+uuid), not a fixed
         'Caddyfile.tmp', so concurrent writers to one service dir cannot collide
         on the same temp path."""
-        import os
-        from pathlib import Path
 
-        from app.edge import config_renderer
 
         recorded = []
         original = Path.write_text
@@ -289,7 +271,6 @@ class TestWriteCaddyfile:
     def test_accepts_str_generated_dir(self, tmp_path):
         """generated_dir may arrive as a str (e.g. from settings); it is coerced
         to Path so ``generated_dir / service.id`` doesn't TypeError."""
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_strpath")
         path = write_caddyfile(svc, str(tmp_path))
@@ -302,7 +283,6 @@ class TestWriteCaddyfile:
         """If a step AFTER the temp file is created fails (here the fsync), the
         partial temp file must be removed and the error re-raised — a failed
         render leaves neither a stray .tmp nor a half-written Caddyfile."""
-        from app.edge import config_renderer
 
         def boom(_path):
             raise OSError("disk full")
@@ -322,7 +302,6 @@ class TestWriteCaddyfile:
         its temp and the atomic rename leaves a ``.Caddyfile.*.tmp`` orphan. The
         next write must reclaim those crash orphans (it runs under the per-service
         reconcile lock, so no concurrent writer owns an in-flight temp here)."""
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_staletmp")
         service_dir = tmp_path / "svc_staletmp"
@@ -344,9 +323,7 @@ class TestWriteCaddyfile:
     def test_sweep_failure_does_not_block_write(self, tmp_path, monkeypatch):
         """The stale-temp sweep is best-effort: an unlink error (e.g. a temp
         vanishing or a permission glitch) must not abort the actual write."""
-        from pathlib import Path
 
-        from app.edge.config_renderer import write_caddyfile
 
         svc = _make_service(id="svc_sweepfail")
         service_dir = tmp_path / "svc_sweepfail"

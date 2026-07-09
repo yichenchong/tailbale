@@ -1,24 +1,25 @@
 """Tests for the Events API endpoints."""
 
+from datetime import UTC, datetime
+
+from sqlalchemy import text
+
+from app.events.event_emitter import EVENT_KINDS
 from app.models.event import Event
-from app.models.service import Service
-from app.models.service_status import ServiceStatus
+from tests._services_helpers import create_service_db
 
 
 def _create_service(db, name="TestApp"):
     slug = name.lower().replace(" ", "")
-    svc = Service(
-        name=name, upstream_container_id="abc123",
-        upstream_container_name=slug, upstream_scheme="http",
-        upstream_port=80, hostname=f"{slug}.example.com",
-        base_domain="example.com", edge_container_name=f"edge_{slug}",
-        network_name=f"edge_net_{slug}", ts_hostname=f"edge-{slug}",
+    return create_service_db(
+        db,
+        name=name,
+        upstream_container_name=slug,
+        hostname=f"{slug}.example.com",
+        edge_container_name=f"edge_{slug}",
+        network_name=f"edge_net_{slug}",
+        ts_hostname=f"edge-{slug}",
     )
-    db.add(svc)
-    db.flush()
-    db.add(ServiceStatus(service_id=svc.id, phase="pending"))
-    db.commit()
-    return svc
 
 
 def _add_event(db, service_id=None, kind="test_event", level="info", message="Test"):
@@ -116,7 +117,6 @@ class TestListEvents:
         # created_at alone leaves ties unspecified, so OFFSET/LIMIT pagination
         # could skip or duplicate events across pages. The query breaks ties by
         # id, so paging must yield every event exactly once in a stable order.
-        from datetime import UTC, datetime
 
         ts = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
         for i in range(10):
@@ -155,7 +155,6 @@ class TestListEvents:
         assert data["events"][0]["details"]["hostname"] == "app.example.com"
 
     def test_invalid_event_details_do_not_break_listing(self, client, db_session):
-        from sqlalchemy import text
 
         evt = Event(kind="legacy_event", level="info", message="Legacy", details={"ok": True})
         db_session.add(evt)
@@ -228,7 +227,6 @@ class TestServiceEvents:
 
 class TestEventKinds:
     def test_returns_full_sorted_registry(self, client):
-        from app.events.event_emitter import EVENT_KINDS
 
         resp = client.get("/api/events/kinds")
         assert resp.status_code == 200

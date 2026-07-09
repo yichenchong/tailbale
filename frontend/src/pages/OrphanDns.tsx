@@ -4,44 +4,39 @@ import { useTimezone, formatDateTimeOrDash } from "@/lib/useTimezone"
 import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-react"
 import { cn, errorMessage } from "@/lib/utils"
 import { jobStatusStyle } from "@/lib/statusStyles"
-import { useResource } from "@/lib/useResource"
-import { usePagination } from "@/lib/usePagination"
+import { usePaginatedResource } from "@/lib/usePaginatedResource"
 import { Pagination } from "@/components/Pagination"
 
 export default function OrphanDns() {
   const tz = useTimezone()
   const [actionLoading, setActionLoading] = useState<Record<string, string>>({})
   const [successMessage, setSuccessMessage] = useState("")
-  const { offset, limit, total, page, pageCount, setOffset, setTotal, prev, next, goToPage, clampToContent } =
-    usePagination()
-
-  const fetcher = useCallback(
-    () => api.jobs.list({ kind: "dns_orphan_cleanup", limit, offset }),
-    [limit, offset],
+  const loadJobs = useCallback(
+    ({ limit, offset }: { limit: number; offset: number }) =>
+      api.jobs.list({ kind: "dns_orphan_cleanup", limit, offset }),
+    [],
   )
-  // Post-process each fetch: sync `total` for the pager, then clamp the offset
-  // when the current page fell off the end (the last record on a later page was
-  // dismissed/retried away and `total` shrank). Returning `true` makes
-  // useResource keep the spinner up and skip storing the empty page, so the
-  // offset change retriggers the load instead of flashing "All clean!" over
-  // still-reachable records.
-  const onData = useCallback(
-    (data: JobsResponse): boolean => {
-      setTotal(data.total)
-      const clamped = clampToContent(data.total, data.jobs.length)
-      if (clamped !== null) {
-        setOffset(clamped)
-        return true
-      }
-      return false
-    },
-    [setTotal, clampToContent, setOffset],
-  )
-  const { data, loading, error, refresh, setError } = useResource(fetcher, {
-    onData,
+  const getJobs = useCallback((response: JobsResponse) => response.jobs, [])
+  const {
+    items,
+    loading,
+    error,
+    refresh,
+    setError,
+    offset,
+    limit,
+    total,
+    page,
+    pageCount,
+    prev,
+    next,
+    goToPage,
+  } = usePaginatedResource<JobsResponse, OrphanJob>({
+    load: loadJobs,
+    getItems: getJobs,
     mapError: (e) => (errorMessage(e, "Failed to load orphan records")),
   })
-  const jobs = data?.jobs ?? []
+  const jobs = items
 
   async function handleRetry(job: OrphanJob) {
     setActionLoading((prev) => ({ ...prev, [job.id]: "retry" }))
