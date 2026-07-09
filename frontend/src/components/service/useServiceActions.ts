@@ -19,7 +19,9 @@ export interface UseServiceActionsParams {
  * action bar (AR10). Extracted from `ServiceActions` so that component stays
  * purely presentational. Behavior is unchanged: successes/soft-failures route
  * through `showActionMsg`, delete/toggle hard errors through `setError`, and a
- * background `refresh` follows each mutating action.
+ * background `refresh` follows each mutating action — except the enable/disable
+ * toggle, which installs the authoritative response directly, and delete, which
+ * navigates away to the list.
  */
 export function useServiceActions({
   service,

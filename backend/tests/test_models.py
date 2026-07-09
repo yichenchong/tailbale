@@ -16,6 +16,7 @@ from app.models import (
     Service,
     ServiceStatus,
     Setting,
+    User,
 )
 from app.models.service import generate_id
 from app.models.types import NaiveUTCDateTime
@@ -48,6 +49,44 @@ class TestSettingModel:
         # Adding same key should raise
 
         db_session.add(Setting(key="k1", value="v2"))
+        with pytest.raises(IntegrityError):
+            db_session.commit()
+
+
+class TestUserModel:
+    def test_defaults(self, db_session):
+        # A fresh User must pick up the ORM column defaults. token_version in
+        # particular is auth-critical: auth compares the JWT `ver` claim against
+        # it, so a non-zero / NULL default would silently invalidate every token.
+        u = User(username="admin", password_hash="hashed")
+        db_session.add(u)
+        db_session.commit()
+        uid = u.id
+        db_session.expire_all()  # force a fresh DB load, not the identity map
+
+        row = db_session.get(User, uid)
+        assert row.id.startswith("usr_")
+        assert row.token_version == 0
+        assert row.is_active is True
+        assert row.role == "admin"
+        assert row.display_name is None
+        # Timestamp columns are stored tz-naive (NaiveUTCDateTime contract).
+        assert row.created_at.tzinfo is None
+        assert row.updated_at.tzinfo is None
+
+    def test_token_version_explicit_value_persists(self, db_session):
+        db_session.add(User(username="u2", password_hash="h", token_version=7))
+        db_session.commit()
+        db_session.expire_all()
+
+        row = db_session.query(User).filter_by(username="u2").one()
+        assert row.token_version == 7
+
+    def test_unique_username(self, db_session):
+        db_session.add(User(username="dup", password_hash="h1"))
+        db_session.commit()
+
+        db_session.add(User(username="dup", password_hash="h2"))
         with pytest.raises(IntegrityError):
             db_session.commit()
 

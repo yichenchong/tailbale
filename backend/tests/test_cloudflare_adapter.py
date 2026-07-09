@@ -317,6 +317,32 @@ class TestSharedErrorHandling:
             find_record("cf-token", "z1", "app.example.com")
         assert exc_info.value.action == "find_record"
 
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_empty_body_failure_falls_back_to_http_status(self, mock_get):
+
+        # A ``success: false`` envelope with an EMPTY errors list AND an empty body
+        # must still yield a CONCRETE reason -- the HTTP status -- never a dangling
+        # "Cloudflare find_record failed: " with nothing after the colon that an
+        # operator cannot act on (regression guard for the bounded status fallback).
+        resp = MagicMock()
+        resp.status_code = 500
+        resp.text = ""
+        resp.json.return_value = {"success": False, "errors": []}
+        mock_get.return_value = resp
+
+        with pytest.raises(CloudflareAPIError, match="HTTP 500") as exc_info:
+            find_record("cf-token", "z1", "app.example.com")
+        assert exc_info.value.action == "find_record"
+
+    def test_format_error_code_only_renders_code_not_dict_repr(self):
+
+        # A structured CF error carrying a code but no message must render as a
+        # legible "code N", not a raw Python dict repr like "{'code': 81058}",
+        # so the operator-facing failure reason stays readable.
+        assert cf._format_error({"code": 81058}) == "code 81058"
+        # A code of 0 (falsy but present) is still surfaced, not dropped.
+        assert cf._format_error({"code": 0}) == "code 0"
+
 
 class TestFindRecord:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")

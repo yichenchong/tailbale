@@ -19,9 +19,10 @@ def render_snippet_block(snippet: str) -> str:
     r"""Embed a custom Caddy snippet into a per-service site block.
 
     Strips edge whitespace, then indents each line with one tab under a leading
-    newline. ``str.splitlines()`` normalises every Python line break (``\r``,
-    ``\v``, ``\f``, ``\x1c``-``\x1e``, ``\x85``, ``\u2028``, ``\u2029`` …) to
-    ``\n``, which is exactly what Caddy then tokenizes.
+    newline. ``str.splitlines()`` treats every Python line break (``\r``,
+    ``\v``, ``\f``, ``\x1c``-``\x1e``, ``\x85``, ``\u2028``, ``\u2029`` …) as a
+    line boundary and discards it; re-joining the pieces with ``\n`` collapses
+    them all to ``\n``, which is exactly what Caddy then tokenizes.
 
     Single source of truth for snippet embedding: the snippet-containment
     validator (``edge/caddy_snippet.py`` ``validate_caddy_snippet``) lexes the

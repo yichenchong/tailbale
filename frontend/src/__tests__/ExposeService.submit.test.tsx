@@ -293,4 +293,74 @@ describe("ExposeService page - submit", () => {
       expect(screen.getByTestId("matched-id")).toHaveTextContent("svc/odd id")
     })
   })
+
+  it("submits the detected app_profile and the edited optional fields", async () => {
+    // The create POST must carry the auto-detected app_profile (so the backend
+    // applies profile-specific behavior) plus every optional field the user
+    // edits — scheme, healthcheck path, the enable toggle, and the custom Caddy
+    // snippet. Prior submit tests only exercised the all-default path.
+    const fetchMock = vi.fn((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+      }
+      if (String(url).includes("/profiles/detect")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({
+            detected_profile: "nextcloud",
+            profile: {
+              name: "Nextcloud",
+              recommended_port: 80,
+              healthcheck_path: "/status.php",
+              preserve_host_header: false,
+              post_setup_reminder: null,
+              image_patterns: ["nextcloud"],
+            },
+          }),
+        })
+      }
+      if (opts?.method === "POST") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockCreatedService) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(
+      <MemoryRouter initialEntries={["/expose?container_id=c1&container_name=nextcloud&image=nextcloud:28&ports=[]"]}>
+        <ExposeService />
+      </MemoryRouter>
+    )
+
+    // Wait for the profile to be detected (its defaults have been applied).
+    await waitFor(() => {
+      expect(screen.getByText(/Detected/)).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Upstream Scheme" }), { target: { value: "https" } })
+    fireEvent.change(screen.getByRole("textbox", { name: "Healthcheck Path (optional)" }), { target: { value: "/custom-health" } })
+    fireEvent.click(screen.getByRole("checkbox", { name: "Enable immediately" }))
+    fireEvent.change(screen.getByPlaceholderText("Additional Caddy directives..."), { target: { value: "header X-Test 1" } })
+
+    fireEvent.click(screen.getByText("Create Service"))
+
+    await waitFor(() => {
+      const createCall = fetchMock.mock.calls.find(
+        (c: unknown[]) =>
+          String(c[0]).includes("/api/services") &&
+          typeof c[1] === "object" &&
+          (c[1] as RequestInit).method === "POST"
+      )
+      expect(createCall).toBeTruthy()
+      expect(JSON.parse(String((createCall?.[1] as RequestInit).body))).toMatchObject({
+        name: "nextcloud",
+        app_profile: "nextcloud",
+        upstream_scheme: "https",
+        healthcheck_path: "/custom-health",
+        enabled: false,
+        custom_caddy_snippet: "header X-Test 1",
+        preserve_host_header: false,
+      })
+    })
+  })
 })

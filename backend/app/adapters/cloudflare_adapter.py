@@ -70,6 +70,8 @@ def _format_error(error: Any) -> str:
             return f"{message} (code {code})"
         if message:
             return str(message)
+        if code is not None:
+            return f"code {code}"
     return str(error)
 
 
@@ -106,6 +108,13 @@ def _headers(token: str) -> dict[str, str]:
     }
 
 
+def _body_snippet(resp: httpx2.Response) -> str:
+    """Whitespace-collapsed, length-bounded view of a raw Cloudflare response body
+    for operator-facing error messages -- never unbounded, since an HTML 5xx edge
+    page or a giant body would otherwise bloat logs, audit events and the UI."""
+    return " ".join((resp.text or "").split())[:200]
+
+
 def _check_response(resp: httpx2.Response, action: str) -> dict:
     """Raise on Cloudflare API error, return result dict on success.
 
@@ -118,7 +127,7 @@ def _check_response(resp: httpx2.Response, action: str) -> dict:
     try:
         data = resp.json()
     except (json.JSONDecodeError, ValueError) as exc:
-        snippet = " ".join((resp.text or "").split())[:200]
+        snippet = _body_snippet(resp)
         message = f"non-JSON response (HTTP {resp.status_code})" + (
             f": {snippet}" if snippet else ""
         )
@@ -132,7 +141,9 @@ def _check_response(resp: httpx2.Response, action: str) -> dict:
         if isinstance(errors, list) and errors:
             msg = "; ".join(_format_error(error) for error in errors)
             raise CloudflareAPIError(action, msg, errors=errors)
-        raise CloudflareAPIError(action, resp.text)
+        snippet = _body_snippet(resp)
+        message = f"HTTP {resp.status_code}" + (f": {snippet}" if snippet else "")
+        raise CloudflareAPIError(action, message)
     return data
 
 

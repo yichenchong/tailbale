@@ -1,6 +1,7 @@
 """Tests for the shared capped-exponential backoff helper (app.backoff)."""
 
 import asyncio
+import logging
 import random
 
 import pytest
@@ -201,6 +202,43 @@ class TestRunPeriodic:
             )
         # No on_error -> error backoff defaults to interval_fn().
         assert sleeps == [3, 5]
+
+    def test_cancellation_during_error_backoff_is_logged_and_propagates(self, monkeypatch):
+        # A shutdown landing while the loop is mid error-backoff must still
+        # terminate cleanly (CancelledError re-raised) AND log the "cancelled"
+        # line -- the same clean-shutdown signal as a cancel during work/interval.
+        # Pre-fix the error-backoff sleep sat outside the CancelledError guard, so
+        # the loop terminated but the cancellation was never logged.
+        sleeps: list[float] = []
+        records: list[str] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        logger = logging.getLogger("test.run_periodic.cancel_backoff")
+        logger.addHandler(_Capture())
+        logger.setLevel(logging.INFO)
+
+        async def work():
+            raise RuntimeError("boom")
+
+        # startup sleep runs; the on_error backoff sleep (2nd) gets cancelled.
+        monkeypatch.setattr(asyncio, "sleep", self._stop_after(sleeps, 2))
+        with pytest.raises(asyncio.CancelledError):
+            asyncio.run(
+                run_periodic(
+                    name="Backoff loop",
+                    startup_delay=1,
+                    interval_fn=lambda: 5,
+                    work=work,
+                    on_error=lambda exc: 99,
+                    logger=logger,
+                )
+            )
+        # startup, then the on_error backoff that got cancelled.
+        assert sleeps == [1, 99]
+        assert "Backoff loop cancelled" in records
 
 
 class TestRetrySync:

@@ -17,6 +17,7 @@ from app.database import (
     flush_with_lock,
     run_migrations,
 )
+from app.migrations import _COLUMN_MIGRATIONS
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.job import Job
@@ -458,6 +459,24 @@ def test_run_migrations_backfills_users_token_version_column(tmp_path):
         assert value == 0, "the existing row must be backfilled with the DEFAULT 0"
     finally:
         engine.dispose()
+
+
+def test_column_migrations_are_additive_only():
+    """Structural guard for the documented additive-only migration invariant.
+
+    run_migrations may ONLY ``ADD COLUMN`` that SQLite can backfill on an
+    existing non-empty table: a nullable column, or a NOT NULL column WITH a
+    DEFAULT. A ``NOT NULL`` column without a DEFAULT makes ``ALTER TABLE ... ADD
+    COLUMN`` fail on any table that already has rows, breaking every in-place
+    upgrade. Adding such an entry to ``_COLUMN_MIGRATIONS`` must fail loudly here
+    (the column analogue of ``test_index_migrations_cover_every_core_model_index``).
+    """
+    for table, column, sql_type in _COLUMN_MIGRATIONS:
+        upper = sql_type.upper()
+        assert "NOT NULL" not in upper or "DEFAULT" in upper, (
+            f"{table}.{column} ({sql_type}) is a non-additive NOT NULL column "
+            "without a DEFAULT; SQLite cannot backfill it on a non-empty table"
+        )
 
 
 # ---------------------------------------------------------------------------

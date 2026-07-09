@@ -406,6 +406,93 @@ class TestRunAndPersistHealthStep:
         )
         assert len(completed) == 1
 
+    def test_reconcile_completed_event_level_tracks_phase(self, db_session, tmp_data_dir):
+        # The reconcile_completed event level MUST track the aggregate phase so the
+        # Events page shows the right severity (healthy->info, warning->warning,
+        # error->error). Only the healthy path was pinned before; a regression
+        # flattening the level ternary (e.g. always "info") would silently
+        # mislabel every degraded reconcile's completion event.
+        cases = [("healthy", "info"), ("warning", "warning"), ("error", "error")]
+        for i, (phase, expected_level) in enumerate(cases):
+            svc = create_service_db(
+                db_session,
+                hostname=f"lvl{i}.example.com",
+                edge_container_name=f"edge_lvl{i}",
+                network_name=f"edge_net_lvl{i}",
+                ts_hostname=f"edge-lvl{i}",
+            )
+            checks = {"edge_container_running": True}
+            with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value=phase):
+                steps._run_and_persist_health(
+                    db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
+                )
+            evt = (
+                db_session.query(Event)
+                .filter(Event.service_id == svc.id, Event.kind == "reconcile_completed")
+                .one()
+            )
+            assert evt.level == expected_level
+            assert evt.details == {"phase": phase, "checks": checks}
+
+
+class TestMaybeScheduleProbeRetryStep:
+    """``_maybe_schedule_probe_retry`` was the only reconcile step in ``steps.py``
+    with no direct per-step unit test (its guard was exercised solely through full
+    ``reconcile_service`` runs). Pin its contract directly: schedule a probe retry
+    IFF only the HTTPS probe failed while every CRITICAL check passed and the phase
+    is degraded, and swallow a scheduling failure (best-effort).
+    """
+
+    _P_SCHEDULE = "app.reconciler.probe_retry.schedule_probe_retry"
+
+    def _checks(self, *, https_ok, critical_ok=True):
+        checks = {name: critical_ok for name in steps.CRITICAL_CHECKS}
+        checks["https_probe_ok"] = https_ok
+        return checks
+
+    def test_schedules_when_only_probe_failed_and_critical_ok(self):
+        with patch(self._P_SCHEDULE) as mock_schedule:
+            steps._maybe_schedule_probe_retry(
+                self._checks(https_ok=False), "warning", "svc_probe", "unix:///s.sock"
+            )
+        mock_schedule.assert_called_once_with("svc_probe", "unix:///s.sock")
+
+    def test_not_scheduled_when_probe_passed(self):
+        # The HTTPS probe passing is the sole reason no retry is scheduled here
+        # (the phase is still degraded), isolating the ``not https_probe_ok`` guard.
+        with patch(self._P_SCHEDULE) as mock_schedule:
+            steps._maybe_schedule_probe_retry(
+                self._checks(https_ok=True), "warning", "svc_probe", None
+            )
+        mock_schedule.assert_not_called()
+
+    def test_not_scheduled_when_phase_healthy(self):
+        # A healthy aggregate must not spawn a retry even with the probe flag
+        # false: the guard requires a degraded (warning/error) phase.
+        with patch(self._P_SCHEDULE) as mock_schedule:
+            steps._maybe_schedule_probe_retry(
+                self._checks(https_ok=False), "healthy", "svc_probe", None
+            )
+        mock_schedule.assert_not_called()
+
+    def test_not_scheduled_when_a_critical_check_failed(self):
+        # A failing CRITICAL check means a full reconcile — not a lightweight probe
+        # retry — is the right repair, so no retry is scheduled.
+        with patch(self._P_SCHEDULE) as mock_schedule:
+            steps._maybe_schedule_probe_retry(
+                self._checks(https_ok=False, critical_ok=False), "error", "svc_probe", None
+            )
+        mock_schedule.assert_not_called()
+
+    def test_schedule_failure_is_swallowed(self):
+        # Best-effort: a raising schedule_probe_retry (e.g. thread exhaustion) must
+        # NOT propagate out of the step and flip an already-committed reconcile.
+        with patch(self._P_SCHEDULE, side_effect=RuntimeError("no threads")) as mock_schedule:
+            steps._maybe_schedule_probe_retry(
+                self._checks(https_ok=False), "warning", "svc_probe", None
+            )  # must not raise
+        mock_schedule.assert_called_once()
+
 
 class TestIntermediatePhaseVisibility:
     """AR-R3-5 (behavior-preserving guard): every phase-progress write must land

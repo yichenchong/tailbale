@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest"
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react"
 import { renderRoute } from "./testkit"
+import { MemoryRouter, Routes, Route } from "react-router-dom"
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -193,6 +194,42 @@ describe("Login page", () => {
     const { default: Login } = await import("@/pages/Login")
     renderRoute(<Login />)
     expect(screen.getByRole("main")).toBeInTheDocument()
+  })
+
+  it("calls onLogin and navigates to the dashboard on a successful login", async () => {
+    // Dynamic import matches this suite's module-loading-boundary pattern: stub
+    // fetch before the api client module loads.
+    vi.stubGlobal("fetch", vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/auth/login") && opts?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ user: { id: "u1", username: "admin", display_name: null, role: "admin" } }),
+        })
+      }
+      return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) })
+    }))
+    const { default: Login } = await import("@/pages/Login")
+    const onLogin = vi.fn()
+    render(
+      <MemoryRouter initialEntries={["/login"]}>
+        <Routes>
+          <Route path="/login" element={<Login onLogin={onLogin} />} />
+          <Route path="/" element={<div>Dashboard Home</div>} />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    fireEvent.change(screen.getByPlaceholderText("Username"), { target: { value: "admin" } })
+    fireEvent.change(screen.getByPlaceholderText("Password"), { target: { value: "password123" } })
+    fireEvent.click(screen.getByText("Sign In").closest("button")!)
+
+    // A successful login invokes onLogin (App flips to authenticated) and
+    // navigate("/") lands on the dashboard route.
+    await waitFor(() => {
+      expect(screen.getByText("Dashboard Home")).toBeInTheDocument()
+    })
+    expect(onLogin).toHaveBeenCalledTimes(1)
   })
 })
 

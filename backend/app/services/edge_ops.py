@@ -177,20 +177,27 @@ def full_health_check(db: Session, service_id: str) -> dict:
     svc = get_service_for_edge_query(service_id, db)
     runtime = settings_store.get_runtime_paths(db)
 
-    # Standard checks run through the health layer. The manual-only live
-    # Cloudflare lookup below uses the same health-layer predicate that
-    # ``run_health_checks(..., live_dns=True)`` uses, while keeping the endpoint
-    # to one Cloudflare request and returning its extended fields.
+    socket = resolve_socket(db)
+    # Standard checks run through the health layer.
     checks = health_checker.run_health_checks(
         db,
         svc,
         runtime["generated_dir"],
         runtime["certs_dir"],
-        resolve_socket(db),
+        socket,
     )
 
     status = db.get(ServiceStatus, svc.id)
-    current_ip = status.tailscale_ip if status else None
+    # Verify live Cloudflare DNS against the service's LIVE Tailscale IP -- the
+    # same one run_health_checks' live_dns path compares against internally -- not
+    # the persisted ServiceStatus.tailscale_ip, which lags a tailnet IP change
+    # until the next reconcile and would make a now-stale DNS record read as
+    # matching. Fall back to the stored IP only when the edge/Docker is
+    # unreachable, so a transient outage yields the best-known value rather than a
+    # false negative.
+    current_ip = health_checker.get_live_tailscale_ip(svc, socket)
+    if current_ip is None and status is not None:
+        current_ip = status.tailscale_ip
     dns_record_present, dns_matches_ip, extended = health_checker.check_live_dns(
         db, svc, current_ip,
     )

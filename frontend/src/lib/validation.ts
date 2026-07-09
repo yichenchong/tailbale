@@ -38,12 +38,18 @@ export function hostnamePrefix(containerName: string): string {
 }
 
 /**
- * Whole number >= 1. Mirrors the backend `Field(ge=1)` constraint on the
- * General tab's numeric settings (`reconcile_interval_seconds`,
- * `cert_renewal_window_days` in backend/app/schemas/settings.py), which are
- * typed `int` server-side. The API rejects a blank/zeroed field AND a fractional
+ * Whole number >= 1. Mirrors the shared backend `ge=1` lower bound on the
+ * General tab's numeric settings — `reconcile_interval_seconds`,
+ * `health_check_interval_seconds`, `event_retention_days`, and the lower half
+ * of `cert_renewal_window_days` (backend/app/schemas/settings.py), all typed
+ * `int` server-side. The API rejects a blank/zeroed field AND a fractional
  * value (e.g. 1.5 -> 422 "valid integer"), so accept only a whole number >= 1.
  * `<input type=number>` permits decimals, so the isInteger check is load-bearing.
+ *
+ * This checks ONLY the `ge=1` floor. `cert_renewal_window_days` additionally
+ * carries a `Field(le=10000)` ceiling (guarding a downstream OverflowError);
+ * that upper bound is layered on at the GeneralTab call site, not here, so the
+ * other three fields (which have no ceiling) stay unconstrained above 1.
  */
 export function isPositiveInt(value: string): boolean {
   const n = Number(value)

@@ -68,3 +68,29 @@ class TestSaltConcurrentCreationRace:
         assert result == concurrent_salt
         assert settings_store.get_setting(db_session, auth_module.SALT_SETTING_KEY) == concurrent_salt
         assert state["n"] == 1  # racy commit exercised; recovery re-read did not re-commit
+
+
+class TestLongPasswordPrehash:
+    """The salted SHA-256 pre-hash lets bcrypt accept passwords beyond its
+    72-byte limit while preserving the whole password's contribution."""
+
+    def test_password_longer_than_72_bytes_round_trips(self, db_session):
+        # Modern bcrypt REJECTS a >72-byte password with ValueError; the pre-hash
+        # collapses any length to a fixed 64-byte hex digest, so a long password
+        # hashes and verifies without raising. A regression dropping the pre-hash
+        # would 500 setup/change-password for such a password.
+        long_pw = "A" * 100
+        hashed = auth_module.hash_password(long_pw, db_session)
+        assert auth_module.verify_password(long_pw, hashed, db_session) is True
+
+    def test_prehash_defeats_bcrypt_72_byte_truncation(self, db_session):
+        # Two passwords sharing a 72-byte prefix but differing only afterwards
+        # must NOT cross-verify. Feeding bcrypt the raw password (no pre-hash) or a
+        # manual ``[:72]`` truncation would collapse both to the same 72 bytes and
+        # wrongly accept the impostor; the SHA-256 pre-hash covers the full input.
+        prefix = "A" * 72
+        real = prefix + "-real-suffix"
+        impostor = prefix + "-impostor-suffix"
+        hashed = auth_module.hash_password(real, db_session)
+        assert auth_module.verify_password(impostor, hashed, db_session) is False
+        assert auth_module.verify_password(real, hashed, db_session) is True

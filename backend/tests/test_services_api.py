@@ -320,3 +320,68 @@ class TestHealthCheckFullDockerSocket:
         resp = client.post("/api/services/svc_nonexistent/health-check-full")
         assert resp.status_code == 404
         assert resp.json()["detail"] == "Service not found"
+
+
+class TestFullHealthCheckLiveTailscaleIp:
+    """The manual full-health-check must verify live Cloudflare DNS against the
+    service's LIVE Tailscale IP, not the persisted ServiceStatus.tailscale_ip.
+
+    A tailnet IP change lags in ServiceStatus until the next reconcile, so
+    comparing the live Cloudflare A record against the STORED IP produced a false
+    dns_matches_ip / cf_ip_matches_tailscale. edge_ops now sources the live IP via
+    health_checker.get_live_tailscale_ip (the same connect -> _check_edge ->
+    _check_tailscale path run_health_checks' live_dns predicate uses), falling
+    back to the stored IP only when the edge/Docker is unreachable."""
+
+    @patch("app.health.health_checker.get_live_tailscale_ip", return_value="100.64.0.2")
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.health.health_checker.run_health_checks", return_value={})
+    def test_matches_against_live_ip_not_stored(
+        self, mock_rhc, mock_secret, mock_find, mock_live_ip, client, db_session,
+    ):
+        set_setting(db_session, "cf_zone_id", "zone-abc123")
+        db_session.commit()
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # Stored IP is STALE (last reconcile); the tailnet reassigned the edge a
+        # new IP, and the live CF A record already tracks that new IP.
+        status = db_session.get(ServiceStatus, svc_id)
+        status.tailscale_ip = "100.64.0.1"
+        db_session.commit()
+        mock_find.return_value = {"id": "rec1", "content": "100.64.0.2"}
+
+        resp = client.post(f"/api/services/{svc_id}/health-check-full")
+        assert resp.status_code == 200
+        body = resp.json()
+        # Pre-fix: compared the live CF record against the stored 100.64.0.1 and
+        # reported a mismatch. Post-fix: compares against the live 100.64.0.2.
+        assert body["tailscale_ip"] == "100.64.0.2"
+        assert body["checks"]["dns_matches_ip"] is True
+        assert body["extended"]["cf_record_ip"] == "100.64.0.2"
+        assert body["extended"]["cf_ip_matches_tailscale"] is True
+
+    @patch("app.health.health_checker.get_live_tailscale_ip", return_value=None)
+    @patch("app.adapters.cloudflare_adapter.find_record")
+    @patch("app.secrets.read_secret", return_value="cf-token")
+    @patch("app.health.health_checker.run_health_checks", return_value={})
+    def test_falls_back_to_stored_ip_when_edge_unreachable(
+        self, mock_rhc, mock_secret, mock_find, mock_live_ip, client, db_session,
+    ):
+        set_setting(db_session, "cf_zone_id", "zone-abc123")
+        db_session.commit()
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+
+        # Edge/Docker unreachable -> no live IP; the stored IP is the best-known
+        # value, so the check still runs against it rather than None.
+        status = db_session.get(ServiceStatus, svc_id)
+        status.tailscale_ip = "100.64.0.1"
+        db_session.commit()
+        mock_find.return_value = {"id": "rec1", "content": "100.64.0.1"}
+
+        resp = client.post(f"/api/services/{svc_id}/health-check-full")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["tailscale_ip"] == "100.64.0.1"
+        assert body["checks"]["dns_matches_ip"] is True
+        assert body["extended"]["cf_ip_matches_tailscale"] is True

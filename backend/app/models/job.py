@@ -28,7 +28,7 @@ class Job(Base):
     )  # pending/running/failed — a successful job deletes its row (no "completed" state)
     progress: Mapped[int] = mapped_column(Integer, default=0)
     message: Mapped[str | None] = mapped_column(String, nullable=True)
-    details: Mapped[dict | None] = mapped_column(JSONEncodedDict, nullable=True)  # JSON
+    details: Mapped[dict | None] = mapped_column(JSONEncodedDict, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         NaiveUTCDateTime, server_default=func.now(), nullable=False, index=True
     )

@@ -8,6 +8,10 @@ import {
   isEmailLike,
   isUpstreamPort,
   isServiceName,
+  isBaseDomain,
+  isUsername,
+  isPassword,
+  isPresentPassword,
 } from "@/lib/validation"
 
 /**
@@ -192,5 +196,104 @@ describe("isServiceName (mirrors Field(min_length=1, max_length=128)+strip, back
     expect(isServiceName("😀".repeat(65))).toBe(true)
     expect(isServiceName("😀".repeat(128))).toBe(true) // exactly 128 code points
     expect(isServiceName("😀".repeat(129))).toBe(false) // 129 code points > max
+  })
+})
+
+describe("isBaseDomain (mirrors normalize_base_domain, backend/app/schemas/settings.py:35-53)", () => {
+  // Backend lowercases first, then re.fullmatch the same label regex, then
+  // rejects total length > 253 and any label length > 63. The client lowercases
+  // (accepting uppercase input the server normalizes) and enforces <= 253 / <= 63.
+  it("accepts well-formed multi-label domains", () => {
+    expect(isBaseDomain("example.com")).toBe(true)
+    expect(isBaseDomain("a.b.c.example.co.uk")).toBe(true)
+    expect(isBaseDomain("a")).toBe(true) // single-char single label is valid
+    expect(isBaseDomain("my-app.example.com")).toBe(true) // internal hyphens ok
+  })
+
+  it("lowercases before validating (uppercase accepted, server normalizes it)", () => {
+    expect(isBaseDomain("Example.COM")).toBe(true)
+  })
+
+  it("trims surrounding whitespace first (mirrors the backend strip_strings)", () => {
+    expect(isBaseDomain("  example.com  ")).toBe(true)
+  })
+
+  it("rejects charset/structure the backend regex also rejects", () => {
+    expect(isBaseDomain("")).toBe(false) // empty
+    expect(isBaseDomain("-example.com")).toBe(false) // leading hyphen
+    expect(isBaseDomain("example-.com")).toBe(false) // label ends in hyphen
+    expect(isBaseDomain("example..com")).toBe(false) // empty inner label
+    expect(isBaseDomain("example.com.")).toBe(false) // trailing dot (empty last label)
+    expect(isBaseDomain("ex_ample.com")).toBe(false) // underscore not in charset
+    expect(isBaseDomain("exa mple.com")).toBe(false) // embedded whitespace
+  })
+
+  it("enforces the 63-char label ceiling at the boundary (off-by-one guard)", () => {
+    // Backend rejects len(label) > 63, so 63 passes and 64 fails.
+    expect(isBaseDomain("a".repeat(63))).toBe(true)
+    expect(isBaseDomain("a".repeat(64))).toBe(false)
+  })
+
+  it("enforces the 253-char total ceiling at the boundary (off-by-one guard)", () => {
+    // Backend rejects len(domain) > 253, so 253 passes and 254 fails; every
+    // label stays within 63 so only the total length crosses the boundary.
+    const label = "a".repeat(63)
+    const domain253 = `${label}.${label}.${label}.${"a".repeat(61)}` // 63+1+63+1+63+1+61 = 253
+    const domain254 = `${label}.${label}.${label}.${"a".repeat(62)}` // = 254
+    expect(domain253.length).toBe(253)
+    expect(domain254.length).toBe(254)
+    expect(isBaseDomain(domain253)).toBe(true)
+    expect(isBaseDomain(domain254)).toBe(false)
+  })
+})
+
+describe("isUsername (non-blank after trim; setup/login usernames)", () => {
+  // Backend Field(min_length=1); the auth router additionally strips
+  // (_normalize_username). The client trims first and requires content, so it
+  // is INTENTIONALLY stricter than the raw schema min_length: a whitespace-only
+  // value passes the pre-strip schema check but the router would store it as an
+  // empty username, which this blocks before the request fires.
+  it("accepts any value with non-whitespace content", () => {
+    expect(isUsername("admin")).toBe(true)
+    expect(isUsername("  padded  ")).toBe(true)
+  })
+
+  it("rejects empty and whitespace-only usernames (would strip to empty server-side)", () => {
+    expect(isUsername("")).toBe(false)
+    expect(isUsername("   ")).toBe(false)
+    expect(isUsername("\t\n")).toBe(false)
+  })
+})
+
+describe("isPassword (mirrors Field(min_length=8); setup/new-password)", () => {
+  // SetupUserRequest.password / ChangePasswordRequest.new_password: min_length=8,
+  // NOT stripped server-side — so length is measured raw, matching the client.
+  it("accepts a password at or above the 8-char minimum (boundary)", () => {
+    expect(isPassword("12345678")).toBe(true) // exactly 8
+    expect(isPassword("a-longer-passphrase")).toBe(true)
+  })
+
+  it("rejects a password below 8 chars", () => {
+    expect(isPassword("1234567")).toBe(false) // 7 -> just under
+    expect(isPassword("")).toBe(false)
+  })
+
+  it("does NOT trim — length is counted raw like the un-stripped backend field", () => {
+    // 8 spaces is length 8 and the backend field has no strip validator, so the
+    // server accepts it; the client must not trim it down to a failing 0.
+    expect(isPassword("        ")).toBe(true)
+  })
+})
+
+describe("isPresentPassword (mirrors Field(min_length=1); current/login password)", () => {
+  // LoginRequest.password / ChangePasswordRequest.current_password: min_length=1,
+  // un-stripped — a lone space is a valid 1-char password on both sides.
+  it("accepts any non-empty password", () => {
+    expect(isPresentPassword("x")).toBe(true)
+    expect(isPresentPassword(" ")).toBe(true) // 1 char, not trimmed
+  })
+
+  it("rejects only the empty string", () => {
+    expect(isPresentPassword("")).toBe(false)
   })
 })

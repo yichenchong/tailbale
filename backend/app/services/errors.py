@@ -1,6 +1,7 @@
 """Transport-agnostic domain exceptions for the service layer.
 
-The orchestration layer (:mod:`app.services.crud`, :mod:`app.services.edge_ops`,
+The orchestration layer (the :mod:`app.services.create` / :mod:`app.services.update`
+/ :mod:`app.services.delete` lifecycle ops, :mod:`app.services.edge_ops`,
 :mod:`app.services.cert_ops`) raises these instead of FastAPI ``HTTPException`` so
 it stays reusable off-HTTP (reconciler / background paths can call the same
 functions without importing FastAPI's request/response machinery). One set of

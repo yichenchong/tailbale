@@ -77,14 +77,21 @@ export function ServiceActions({
   })
 
   const dialogRef = useRef<HTMLDivElement | null>(null)
-  const forceRenewTriggerRef = useRef<HTMLElement | null>(null)
+  const renewButtonRef = useRef<HTMLButtonElement | null>(null)
 
-  // Focus management for the force-renew dialog (WCAG 2.4.3): on open, remember
-  // the element that triggered it and move focus into the dialog; trap Tab
-  // within it and close on Escape; on close, restore focus to the trigger.
+  // Focus management for the force-renew dialog (WCAG 2.4.3): on open, move
+  // focus into the dialog; trap Tab within it and close on Escape; on close,
+  // restore focus to the "Renew certificate" trigger. We restore to a dedicated
+  // ref on that button rather than `document.activeElement`: the async renew
+  // disables (and so blurs) the trigger *before* the modal opens, so by the time
+  // this effect runs the active element is already <body> — capturing it would
+  // strand focus on <body> when the dialog closes.
   useEffect(() => {
     if (!confirmForceRenew) return
-    forceRenewTriggerRef.current = document.activeElement as HTMLElement | null
+    // Capture the trigger up front: the button is mounted for the effect's whole
+    // life, so `renewButtonRef.current` is stable, but reading a ref in cleanup
+    // trips react-hooks/exhaustive-deps — hold it in a local instead.
+    const trigger = renewButtonRef.current
     const focusables = () =>
       dialogRef.current?.querySelectorAll<HTMLElement>(
         'button:not([disabled]), [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
@@ -112,7 +119,7 @@ export function ServiceActions({
     document.addEventListener("keydown", onKeyDown)
     return () => {
       document.removeEventListener("keydown", onKeyDown)
-      forceRenewTriggerRef.current?.focus()
+      trigger?.focus()
     }
   }, [confirmForceRenew, setConfirmForceRenew])
 
@@ -176,7 +183,7 @@ export function ServiceActions({
               )}
             </>
           )}
-          <button onClick={handleRenewCert} disabled={renewing}
+          <button ref={renewButtonRef} onClick={handleRenewCert} disabled={renewing}
             className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-50 disabled:opacity-50">
             {renewing ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />} Renew certificate
           </button>

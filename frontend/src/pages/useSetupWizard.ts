@@ -111,7 +111,6 @@ export function useSetupWizard(onSetupComplete?: () => void) {
             const result = await api.settings.test("cloudflare")
             setTestResult(result)
             if (!result.success) {
-              setSaving(false)
               return
             }
           }
@@ -130,7 +129,6 @@ export function useSetupWizard(onSetupComplete?: () => void) {
             const result = await api.settings.test("tailscale")
             setTestResult(result)
             if (!result.success) {
-              setSaving(false)
               return
             }
           }
@@ -142,7 +140,6 @@ export function useSetupWizard(onSetupComplete?: () => void) {
         const result = await api.settings.test("docker")
         setTestResult(result)
         if (!result.success) {
-          setSaving(false)
           return
         }
       }

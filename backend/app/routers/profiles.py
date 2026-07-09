@@ -103,6 +103,7 @@ def _repository_path(image_name: str) -> str:
         image = image[:last_colon]
     return image
 
+
 def _repository_component_matches(component: str, pattern: str) -> bool:
     return (
         component == pattern

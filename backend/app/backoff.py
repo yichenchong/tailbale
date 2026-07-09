@@ -19,6 +19,10 @@ policies live in one place even where the math is trivial):
   after a per-cert failure, 86400s (24h) between full renewal scans. Stated in
   this vocabulary as ``base == cap`` fixed intervals; left as plain constants
   because they are durations stored/slept directly, with no per-attempt growth.
+- ``events.retention_task`` — fixed daily cadence: ``86400s`` (24h) between
+  event-log purges (``RETENTION_INTERVAL_SECONDS``). A ``base == cap`` fixed
+  interval; it passes no ``on_error``, so a scan error backs off the same daily
+  interval (``run_periodic`` defaults the error backoff to ``interval_fn()``).
 """
 
 from __future__ import annotations
@@ -109,8 +113,11 @@ async def run_periodic(
       to ``interval_fn()`` (the fixed-cadence loops keep retrying on their normal
       interval; the reconcile/health loops pass a shorter error backoff).
 
-    Cancellation (``asyncio.CancelledError``) is logged once and re-raised so the
-    task terminates cleanly on shutdown — never swallowed by the error branch.
+    Cancellation (``asyncio.CancelledError``) raised at ANY await point — ``work``,
+    the interval sleep, or the error-backoff sleep — is logged once and re-raised so
+    the task terminates cleanly on shutdown. It is NEVER swallowed by the error
+    branch: ``CancelledError`` is a ``BaseException``, so the ``except Exception``
+    branch cannot catch it.
     """
     log = logger if logger is not None else _module_logger
     await asyncio.sleep(startup_delay)
@@ -118,15 +125,16 @@ async def run_periodic(
 
     while True:
         try:
-            await work()
-            await asyncio.sleep(interval_fn())
+            try:
+                await work()
+                backoff = interval_fn()
+            except Exception as exc:
+                log.error("Error in %s", name, exc_info=True)
+                backoff = on_error(exc) if on_error is not None else interval_fn()
+            await asyncio.sleep(backoff)
         except asyncio.CancelledError:
             log.info("%s cancelled", name)
             raise
-        except Exception as exc:
-            log.error("Error in %s", name, exc_info=True)
-            backoff = on_error(exc) if on_error is not None else interval_fn()
-            await asyncio.sleep(backoff)
 
 
 def retry_sync(attempts: int, delay: float) -> Iterator[int]:

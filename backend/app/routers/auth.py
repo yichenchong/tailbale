@@ -30,8 +30,6 @@ from app.setup_state import compute_setup_progress
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 
-_LoginAttempts = login_ratelimit._LoginAttempts
-_LoginRateLimiter = login_ratelimit._LoginRateLimiter
 _login_rate_limiter = login_ratelimit._login_rate_limiter
 
 

@@ -206,8 +206,9 @@ It is not re-created per deploy, so it never accumulates. Remove it with
 | `COOKIE_SECURE` | No | `false` (auto on HTTPS) | Force the session cookie's `Secure` flag. Auto-enabled when the request arrives over HTTPS (incl. `X-Forwarded-Proto`); set `true` to force it always. |
 | `CORS_ORIGINS` | No | `(empty — CORS middleware disabled; same-origin only)` | Comma-separated allowed origins |
 | `PORT` | No | `8080` | Container listen port |
+| `HOST_PORT` | No | `6780` | Host port the admin UI is published on: the full mapping is `BIND_ADDR:HOST_PORT` → container `PORT`. Reach the UI at `http://<host-or-tailnet-ip>:HOST_PORT`. |
 | `HOST` | No | `0.0.0.0` | Listen address **inside the container** (leave as `0.0.0.0`; Docker forwards the published port to it) |
-| `BIND_ADDR` | No | `127.0.0.1` | Host interface the published port binds to. Loopback by default; set to your tailnet IP for `http://<tailnet-ip>:PORT`, or `0.0.0.0` to expose on all host interfaces. |
+| `BIND_ADDR` | No | `127.0.0.1` | Host interface the published port binds to. Loopback by default; set to your tailnet IP for `http://<tailnet-ip>:HOST_PORT`, or `0.0.0.0` to expose on all host interfaces. |
 | `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path |
 
 ## Updating

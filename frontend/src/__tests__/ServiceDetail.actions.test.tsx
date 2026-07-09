@@ -390,4 +390,58 @@ describe("ServiceDetail page - actions", () => {
     // After updating, the edge reports up-to-date and the button/banner clear.
     await waitFor(() => expect(screen.queryByText("Update Edge")).not.toBeInTheDocument())
   })
+
+  it("restores focus to the Renew button after the force-renew dialog closes even when renewing blurred the trigger", async () => {
+    // In a real browser the async renew disables (and so blurs) the focused
+    // "Renew certificate" trigger before the modal opens, moving activeElement
+    // to <body>. jsdom doesn't blur on disable, so we simulate it. The dialog
+    // must still return focus to the Renew button — not <body> — on close.
+    const edgeVer = { orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }
+    const renewGate = Promise.withResolvers<{ ok: boolean; json: () => Promise<unknown> }>()
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(edgeVer) })
+      }
+      if (init?.method === "POST" && String(url).includes("/renew-cert")) {
+        return renewGate.promise
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockService) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Renew certificate")).toBeInTheDocument())
+
+    const trigger = screen.getByText("Renew certificate").closest("button")!
+    trigger.focus()
+    expect(document.activeElement).toBe(trigger)
+
+    // Start the renew: the button disables while the request is in flight.
+    fireEvent.click(trigger)
+    expect(trigger).toBeDisabled()
+    // Simulate the browser moving focus off the now-disabled trigger (to <body>
+    // in a real browser; jsdom won't blur a disabled element, so move focus to
+    // another control explicitly).
+    const other = screen.getByText("Re-run Reconcile").closest("button")!
+    act(() => other.focus())
+    expect(document.activeElement).not.toBe(trigger)
+
+    // The refused (needs_force) response opens the modal.
+    await act(async () => {
+      renewGate.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({ success: true, performed: false, needs_force: true, message: "healthy", expires_at: null, last_failure: null }),
+      })
+      const settle = Promise.withResolvers<void>()
+      setTimeout(settle.resolve, 0)
+      await settle.promise
+    })
+    expect(screen.getByText("Force certificate renewal?")).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: "Escape" })
+    await waitFor(() =>
+      expect(screen.queryByText("Force certificate renewal?")).not.toBeInTheDocument()
+    )
+    expect(document.activeElement).toBe(trigger)
+  })
 })

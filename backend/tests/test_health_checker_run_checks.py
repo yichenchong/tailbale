@@ -447,3 +447,60 @@ class TestEdgeLookupResilienceOnTransientDaemonFault:
         client.containers.list.return_value = []
 
         assert health_checker._check_edge(client, self._service()) == (False, False)
+
+
+class TestGetLiveTailscaleIp:
+    """Standalone live-IP helper used by the manual full health check to verify
+    live Cloudflare DNS against the current tailnet IP (not the persisted, and
+    potentially stale, ServiceStatus.tailscale_ip). It reuses the exact live-IP
+    path run_health_checks follows internally: connect -> _check_edge ->
+    _check_tailscale."""
+
+    def _edge_with_ts_ip(self, ip):
+        edge = MagicMock()
+        edge.status = "running"
+        result = MagicMock()
+        result.exit_code = 0
+        result.output = json.dumps(
+            {"BackendState": "Running", "Self": {"TailscaleIPs": [ip]}}
+        ).encode()
+        edge.exec_run.return_value = result
+        return edge
+
+    def test_returns_none_when_docker_unavailable(self, db_session):
+        service = create_service_in_db(db_session)
+        with patch.object(health_checker, "connect", side_effect=Exception("no docker")):
+            assert health_checker.get_live_tailscale_ip(service) is None
+
+    def test_returns_live_ip_via_real_edge_and_tailscale_helpers(self, db_session):
+        service = create_service_in_db(db_session)
+        client = MagicMock()
+        client.containers.get.return_value = self._edge_with_ts_ip("100.64.0.5")
+
+        with patch.object(health_checker, "connect", return_value=client):
+            assert health_checker.get_live_tailscale_ip(service) == "100.64.0.5"
+
+    def test_returns_none_when_edge_not_running(self, db_session):
+        service = create_service_in_db(db_session)
+        edge = MagicMock()
+        edge.status = "exited"
+        client = MagicMock()
+        client.containers.get.return_value = edge
+
+        with patch.object(health_checker, "connect", return_value=client):
+            assert health_checker.get_live_tailscale_ip(service) is None
+
+    def test_closes_client_even_on_success(self, db_session):
+        # The helper opens its own Docker client; it MUST close it in a finally so
+        # the manual full check never leaks a connection per invocation.
+        service = create_service_in_db(db_session)
+        client = MagicMock()
+        client.containers.get.return_value = self._edge_with_ts_ip("100.64.0.9")
+
+        with (
+            patch.object(health_checker, "connect", return_value=client),
+            patch.object(health_checker, "close_client") as mock_close,
+        ):
+            assert health_checker.get_live_tailscale_ip(service) == "100.64.0.9"
+
+        mock_close.assert_called_once_with(client)

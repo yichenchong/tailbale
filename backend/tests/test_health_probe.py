@@ -133,6 +133,23 @@ class TestCheckHttpsProbe:
 
         assert probe.check_https_probe(_service(id="svc-transient"), "100.64.0.5", client) is True
 
+    def test_exec_error_is_swallowed_and_reported_false(self, caplog):
+        # Defensive outer guard: check_https_probe runs inside run_health_checks'
+        # try/finally, so if the in-container exec itself raises (e.g. a Docker
+        # APIError mid-exec) the exception must NOT escape and crash the whole
+        # health sweep for the service — it is logged and the probe reports False.
+        container = MagicMock()
+        container.status = "running"
+        container.exec_run.side_effect = docker.errors.APIError("exec failed mid-flight")
+        client = _client_with_edge(container)
+
+        result = probe.check_https_probe(
+            _service(hostname="exec.example.com"), "100.64.0.1", client
+        )
+
+        assert result is False
+        assert "HTTPS probe exec failed" in caplog.text
+
 
 class TestClassifyProbeResult:
     @pytest.mark.parametrize(

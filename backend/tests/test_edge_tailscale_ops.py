@@ -107,3 +107,30 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
 
         assert result is None
         mock_container.exec_run.assert_not_called()
+
+    @patch("app.backoff.time.sleep")
+    @patch("app.edge.tailscale_ops._wait_for_running")
+    @patch("app.edge.container_manager._find_edge_container")
+    def test_skips_exec_when_container_leaves_running_state(
+        self, mock_find, mock_wait, mock_sleep
+    ):
+        """The container clears the initial 'running' gate but then leaves running
+        state mid-detection. Each retry re-checks (container.reload + a bounded
+        _wait_for_running) and skips the exec rather than shelling into a
+        non-running container; when it never recovers, every attempt skips and
+        detection returns None without ever exec-ing tailscale."""
+
+        mock_container = MagicMock()
+        mock_container.status = "restarting"  # not 'running' on the in-loop recheck
+        mock_find.return_value = mock_container
+        # Entry gate (True) admits the loop; every in-loop recheck reports the
+        # container never regained 'running' (False).
+        mock_wait.side_effect = [True, False, False]
+
+        result = detect_tailscale_ip("svc_123", "edge_test", max_retries=2, retry_delay=0)
+
+        assert result is None
+        mock_container.exec_run.assert_not_called()
+        # State was re-checked on every attempt (entry gate + one per retry).
+        assert mock_wait.call_count == 3
+        mock_container.reload.assert_called()

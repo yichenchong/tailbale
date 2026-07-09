@@ -517,7 +517,8 @@ tailscale:
 docker:
   socket_path: /var/run/docker.sock
 runtime:
-  reconcile_interval_seconds: 60
+  reconcile_interval_seconds: 3600
+  health_check_interval_seconds: 60
   cert_renewal_window_days: 30
   generated_root: /opt/orchestrator/generated
   cert_root: /opt/orchestrator/certs
@@ -1142,8 +1143,8 @@ The regular health check compares the stored `DnsRecord.value` in the database
 against the current Tailscale IP.  It does **not** make a live Cloudflare API
 call on every reconcile cycle.  This is a deliberate trade-off:
 
-- **Avoids Cloudflare API rate limits** — the reconciler runs every 60 seconds
-  for every enabled service.
+- **Avoids Cloudflare API rate limits** — the lightweight health sweep re-runs
+  these checks every 60 seconds for every enabled service (full reconcile hourly).
 - **Stored state is authoritative** — the orchestrator is the only actor that
   creates or updates these DNS records.  External drift (someone manually
   editing Cloudflare) is an unusual edge case.
@@ -1151,9 +1152,9 @@ call on every reconcile cycle.  This is a deliberate trade-off:
   `POST /api/services/:id/health-check-full` endpoint performs a live Cloudflare
   API lookup and reports whether the live record matches the expected IP.
 
-If external DNS mutations become a concern, a periodic (e.g. hourly) full-health
-sweep could be added as a background task without impacting the per-minute
-reconcile loop.
+The implemented cadence is a full reconcile hourly plus a lightweight 60-second
+health sweep that escalates a drifting service to a full reconcile; the live
+Cloudflare lookup stays on the on-demand full-health endpoint described above.
 
 ### 18.2 Aggregate status rules
 

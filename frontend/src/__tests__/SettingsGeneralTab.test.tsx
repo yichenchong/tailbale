@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { render, screen, waitFor, fireEvent, act } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
 import { mockSettings, mockFetch } from "./settingsTestUtils"
+import { GeneralTab } from "@/pages/settings/GeneralTab"
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -441,6 +442,28 @@ describe("SettingsGeneralTab numeric validation", () => {
     expect(onSave).toHaveBeenCalledWith(
       expect.objectContaining({ reconcile_interval_seconds: 120, cert_renewal_window_days: 15 })
     )
+  })
+
+  it("gives the numeric fields native min/max/step bounds matching the backend (FN1)", () => {
+    // The peer number inputs (ExposeService, ServiceEditForm) set native
+    // min/max/step; the settings numeric fields must do the same so the spinner
+    // cannot step to 0/negative/fractional values and AT can announce the range.
+    // cert_renewal_window_days additionally mirrors the backend Field(le=10000).
+    const onSave = vi.fn().mockResolvedValue(undefined)
+    render(<GeneralTab settings={general} onSave={onSave} saving={false} version={null} />)
+
+    for (const displayValue of ["60", "45", "90"]) {
+      const input = screen.getByDisplayValue(displayValue)
+      expect(input).toHaveAttribute("type", "number")
+      expect(input).toHaveAttribute("min", "1")
+      expect(input).toHaveAttribute("step", "1")
+      expect(input).not.toHaveAttribute("max")
+    }
+
+    const renewal = screen.getByDisplayValue("30")
+    expect(renewal).toHaveAttribute("min", "1")
+    expect(renewal).toHaveAttribute("max", "10000")
+    expect(renewal).toHaveAttribute("step", "1")
   })
 })
 

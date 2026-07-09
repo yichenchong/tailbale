@@ -85,6 +85,8 @@ export function GeneralTab({
         value={values.reconcile_interval_seconds}
         onChange={bind("reconcile_interval_seconds")}
         type="number"
+        min={1}
+        step={1}
         hint="How often the reconciler runs a full sweep of all services (default 3600)"
         error={reconcileValid ? undefined : "Must be a whole number of at least 1"}
       />
@@ -93,6 +95,8 @@ export function GeneralTab({
         value={values.health_check_interval_seconds}
         onChange={bind("health_check_interval_seconds")}
         type="number"
+        min={1}
+        step={1}
         hint="How often the edge runs container health checks"
         error={healthValid ? undefined : "Must be a whole number of at least 1"}
       />
@@ -101,6 +105,9 @@ export function GeneralTab({
         value={values.cert_renewal_window_days}
         onChange={bind("cert_renewal_window_days")}
         type="number"
+        min={1}
+        max={10000}
+        step={1}
         hint="Renew certs this many days before expiry"
         error={renewalValid ? undefined : "Must be a whole number from 1 to 10000"}
       />
@@ -109,6 +116,8 @@ export function GeneralTab({
         value={values.event_retention_days}
         onChange={bind("event_retention_days")}
         type="number"
+        min={1}
+        step={1}
         hint="Older event-log entries are pruned after this many days"
         error={retentionValid ? undefined : "Must be a whole number of at least 1"}
       />

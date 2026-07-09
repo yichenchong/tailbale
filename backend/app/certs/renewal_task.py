@@ -32,7 +32,6 @@ from app.events.event_emitter import emit_event
 from app.models.certificate import Certificate
 from app.models.service import Service
 from app.secrets import CLOUDFLARE_TOKEN, read_secret
-from app.settings_store import get_positive_int_setting, get_setting
 from app.timeutil import as_utc, days_from_now
 
 logger = logging.getLogger(__name__)
@@ -82,8 +81,8 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
         logger.warning("Cloudflare token not configured, skipping cert for %s", svc.hostname)
         return
 
-    acme_email = get_setting(db, "acme_email")
-    renewal_window = get_positive_int_setting(db, "cert_renewal_window_days")
+    acme_email = settings_store.get_setting(db, "acme_email")
+    renewal_window = settings_store.get_positive_int_setting(db, "cert_renewal_window_days")
 
     certs_root = _get_certs_root(db)
     cert_dir = certs_root / svc.hostname

@@ -37,7 +37,6 @@ router = APIRouter(
 )
 
 
-
 def _validate_upstream(db: Session, container_id: str, port: int) -> None:
     """Validate that the upstream container exists and the port is plausible.
 
@@ -208,7 +207,6 @@ def delete_service(
         raise ServiceNotFound()
 
     service_layer.delete_service_record(db, svc, cleanup_dns=cleanup_dns)
-
 
 
 # Compatibility exports for callers that imported the former action helpers

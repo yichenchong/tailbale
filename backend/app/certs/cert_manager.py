@@ -28,9 +28,7 @@ import contextlib as contextlib
 import logging
 import os as os
 import shutil as shutil
-import signal as signal
 import subprocess as subprocess
-import threading as threading
 from pathlib import Path
 
 from app.certs import lego_runner as _lego_runner

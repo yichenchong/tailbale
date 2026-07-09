@@ -144,6 +144,31 @@ def run_health_checks(
         close_client(client)
 
 
+def get_live_tailscale_ip(service: Service, socket_path: str | None = None) -> str | None:
+    """Return *service*'s current live Tailscale IP, or ``None`` if unavailable.
+
+    One-shot (no retry loop, unlike ``edge.tailscale_ops.detect_tailscale_ip``):
+    connect to Docker, resolve the edge container, read ``tailscale status`` once.
+    This is the SAME live-IP path ``run_health_checks`` follows internally
+    (``connect`` -> :func:`_check_edge` -> :func:`_check_tailscale`) but exposed
+    standalone so the manual full health check can verify live Cloudflare DNS
+    against the *live* IP rather than the persisted ``ServiceStatus.tailscale_ip``,
+    which lags a tailnet IP change until the next reconcile. Returns ``None`` on
+    any Docker/edge/Tailscale failure so callers degrade gracefully.
+    """
+    try:
+        client = connect(socket_path)
+    except Exception:
+        logger.info("Cannot connect to Docker for live Tailscale IP", exc_info=True)
+        return None
+    try:
+        _edge_present, edge_running = _check_edge(client, service)
+        _ready, _ip_present, live_ip = _check_tailscale(client, service, edge_running)
+        return live_ip
+    finally:
+        close_client(client)
+
+
 # ---- Individual check helpers ----
 
 

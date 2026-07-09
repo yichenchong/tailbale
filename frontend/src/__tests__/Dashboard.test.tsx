@@ -198,6 +198,49 @@ describe("Dashboard page", () => {
     ).toBeInTheDocument()
   })
 
+  it("links to all events when more than ten recent events are truncated", async () => {
+    // The Recent Events panel renders only the first 10 events; the sibling of
+    // the recent-errors truncation. mockSummary keeps recent_errors short (1),
+    // so the single "View all events" link must come from this panel.
+    const events = Array.from({ length: 11 }, (_, i) => ({
+      id: `evt_${i}`,
+      service_id: null,
+      kind: "reconcile_completed",
+      level: "info",
+      message: `Event number ${i}`,
+      created_at: new Date().toISOString(),
+    }))
+    vi.stubGlobal("fetch", jsonOk({ ...mockSummary, recent_events: events }))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Event number 9")).toBeInTheDocument()
+    })
+    // Only the first ten render; the eleventh is truncated behind the link.
+    expect(screen.queryByText("Event number 10")).not.toBeInTheDocument()
+    const link = screen.getByRole("link", { name: "View all events" })
+    expect(link).toHaveAttribute("href", "/events")
+  })
+
+  it("omits the recent-events truncation link when ten or fewer events fit", async () => {
+    const events = Array.from({ length: 10 }, (_, i) => ({
+      id: `evt_${i}`,
+      service_id: null,
+      kind: "reconcile_completed",
+      level: "info",
+      message: `Event number ${i}`,
+      created_at: new Date().toISOString(),
+    }))
+    // recent_errors also short (1) so neither panel shows a truncation link.
+    vi.stubGlobal("fetch", jsonOk({ ...mockSummary, recent_events: events }))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Event number 9")).toBeInTheDocument()
+    })
+    expect(screen.queryByText("View all events")).not.toBeInTheDocument()
+  })
+
   it("shows level badges on events", async () => {
     vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")

@@ -11,6 +11,9 @@ export function Field({
   error,
   autoComplete,
   describedById,
+  min,
+  max,
+  step,
 }: {
   label: string
   value: string
@@ -22,6 +25,10 @@ export function Field({
   autoComplete?: string
   /** Extra element id(s) to append to `aria-describedby` (e.g. a SecretStatus). */
   describedById?: string
+  /** Native numeric bounds for `type="number"` inputs (mirrors the service forms). */
+  min?: number
+  max?: number
+  step?: number
 }) {
   const id = useId()
   const inputId = `${id}-input`
@@ -41,6 +48,9 @@ export function Field({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         autoComplete={autoComplete}
+        min={min}
+        max={max}
+        step={step}
         aria-invalid={error ? true : undefined}
         aria-describedby={describedBy}
         className={cn(

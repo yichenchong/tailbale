@@ -178,8 +178,8 @@ class TestEdgeLogsEndpoint:
 
         client.get(f"/api/services/{svc_id}/logs/edge?tail=50")
         mock_logs.assert_called_once()
-        call_args = mock_logs.call_args
-        assert call_args.kwargs.get("tail") == 50 or (len(call_args) > 1 and call_args[1].get("tail") == 50)
+        # The router forwards tail as a keyword argument to get_edge_logs.
+        assert mock_logs.call_args.kwargs["tail"] == 50
 
     def test_logs_rejects_invalid_tail(self, client):
         resp = client.get("/api/services/svc_nonexistent/logs/edge?tail=0")

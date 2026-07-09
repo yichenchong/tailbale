@@ -1,5 +1,6 @@
 """Tests for the Settings API endpoints."""
 
+import httpx2
 import pytest
 
 import app.edge.docker_client as dc_mod
@@ -917,6 +918,48 @@ class TestConnectionTests:
         data = resp.json()
         assert data["success"] is False
         assert "Unexpected" in data["message"]
+
+    def test_cloudflare_test_caps_timeout_at_ten_seconds(self, client, tmp_data_dir, monkeypatch):
+        # RT3: the /test/cloudflare seam runs the blocking verify_zone in a
+        # threadpool under a ~10s cap so a slow/unreachable Cloudflare cannot
+        # hang the request. Pin the exact timeout threaded through to the call.
+        self._configure_cloudflare(client)
+        captured = {}
+
+        class _FakeCFResp:
+            status_code = 200
+            text = ""
+
+            def json(self):
+                return {"success": True, "result": {"name": "example.com"}}
+
+        def _fake_get(*args, **kwargs):
+            captured["timeout"] = kwargs.get("timeout")
+            return _FakeCFResp()
+
+        monkeypatch.setattr("app.adapters.cloudflare_adapter.httpx2.get", _fake_get)
+
+        resp = client.post("/api/settings/test/cloudflare")
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        assert captured["timeout"] == 10
+
+    def test_cloudflare_network_error_degrades_to_failure(self, client, tmp_data_dir, monkeypatch):
+        # RT4: a raw transport error (not a structured CloudflareAPIError) from
+        # verify_zone must surface as success=False, never a 500 — the endpoint's
+        # generic-Exception fallback keeps the connection test diagnostic.
+        self._configure_cloudflare(client)
+
+        def _boom(*args, **kwargs):
+            raise httpx2.ConnectError("connection refused")
+
+        monkeypatch.setattr("app.adapters.cloudflare_adapter.httpx2.get", _boom)
+
+        resp = client.post("/api/settings/test/cloudflare")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is False
+        assert data["message"]
 
 
 class TestHealthEndpoint:

@@ -32,7 +32,7 @@ LEGO_FORCE_RENEW_DAYS = 36500  # ~100 years
 
 # Every lego invocation shares one ACME account + cert store under the certs
 # root (.lego/). Serialize them process-wide so concurrent per-service
-# issuances cannot clobber the shared account file; see _run_lego.
+# issuances cannot clobber the shared account file; see cert_manager._run_lego.
 _LEGO_MUTEX = threading.Lock()
 
 
@@ -64,26 +64,6 @@ def _kill_process_tree(proc: subprocess.Popen) -> None:
             os.killpg(os.getpgid(pid), signal.SIGKILL)
     with contextlib.suppress(Exception):
         proc.kill()
-
-
-def _run_lego(
-    args: list[str],
-    cloudflare_token: str,
-    lego_dir: Path,
-) -> subprocess.CompletedProcess:
-    """Serialize every lego invocation across the whole process.
-
-    All services share one ACME account + cert store under ``lego_dir`` (the
-    ``.lego/`` tree). Since reconcile locking went per-service, two services can
-    issue/renew at once; concurrent first-issuance would have each lego register
-    its own account key and clobber the shared account file. The mutex is held
-    ONLY around the subprocess, so a fast steady-state reconcile (no lego call)
-    never waits on it - only simultaneous issuances serialize, which is required
-    for ``.lego`` safety regardless. Innermost lock: nothing acquires a
-    per-service/lifecycle lock while holding it, so the order graph stays acyclic.
-    """
-    with _LEGO_MUTEX:
-        return _exec_lego(args, cloudflare_token, lego_dir)
 
 
 def _exec_lego(

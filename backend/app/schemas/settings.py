@@ -93,6 +93,7 @@ class GeneralSettingsResponse(BaseModel):
     timezone: str
     developer_mode: bool
 
+
 class CloudflareSettingsResponse(BaseModel):
     zone_id: str
     token_configured: bool

@@ -25,7 +25,7 @@ class Event(Base):
     kind: Mapped[str] = mapped_column(String, nullable=False, index=True)
     level: Mapped[str] = mapped_column(String, nullable=False, default="info")
     message: Mapped[str] = mapped_column(String, nullable=False)
-    details: Mapped[dict | None] = mapped_column(JSONEncodedDict, nullable=True)  # JSON
+    details: Mapped[dict | None] = mapped_column(JSONEncodedDict, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         NaiveUTCDateTime, server_default=func.now(), nullable=False, index=True
     )

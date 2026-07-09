@@ -113,6 +113,51 @@ class TestCheckLiveDns:
         assert matches is True
         assert extended["cf_ip_matches_tailscale"] is True
 
+    def test_find_record_error_surfaces_cf_error_and_forces_no_match(self, db_session):
+        # Live-verification exception branch (previously covered only via
+        # return_value): when find_record raises, DB presence is still reported
+        # (the row exists) but the match is forced False — we could not verify
+        # live — and a cf_error names the exception type. A regression that
+        # reported a phantom match or dropped the cf_error would slip past every
+        # other test.
+        service = create_service_in_db(db_session)
+        _add_dns_record(db_session, service, value="100.64.0.1")
+        _configure_cloudflare(db_session)
+
+        with patch(
+            "app.adapters.cloudflare_adapter.find_record",
+            side_effect=RuntimeError("cloudflare exploded"),
+        ):
+            present, matches, extended = health_checker.check_live_dns(
+                db_session, service, "100.64.0.1",
+            )
+
+        assert present is True
+        assert matches is False
+        assert extended == {"cf_error": "Cloudflare verification failed (RuntimeError)"}
+
+    def test_credentials_load_error_falls_back_to_db_without_cf_error(self, db_session):
+        # If loading Cloudflare credentials raises (a transient settings/secret
+        # read failure, distinct from missing config), check_live_dns degrades to
+        # the stored-DB booleans with an empty extended dict — it must never crash
+        # the health sweep, and unlike the not-configured path it surfaces no
+        # cf_error.
+        service = create_service_in_db(db_session)
+        _add_dns_record(db_session, service, value="100.64.0.1")
+
+        with patch.object(
+            health_checker,
+            "cloudflare_credentials",
+            side_effect=RuntimeError("secret read failed"),
+        ):
+            present, matches, extended = health_checker.check_live_dns(
+                db_session, service, "100.64.0.1",
+            )
+
+        assert present is True
+        assert matches is True
+        assert extended == {}
+
 
 class TestRunHealthChecksDnsFlow:
     @patch("app.adapters.cloudflare_adapter.find_record")

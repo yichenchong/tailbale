@@ -374,6 +374,20 @@ class TestJwtTokens:
         resp = auth_client.get("/api/auth/me")
         assert resp.status_code == 401
 
+    def test_token_signed_with_wrong_secret_is_rejected(self):
+        """A structurally valid JWT signed with a DIFFERENT key must fail
+        signature verification. Guards the core JWT property against a regression
+        that weakened the decode (e.g. dropped the secret / disabled
+        verify_signature): forging a session must require the server's signing
+        secret, not merely a well-formed token."""
+        token = jwt.encode(
+            {"sub": "usr_forged", "exp": datetime.now(UTC) + timedelta(hours=1)},
+            "a-different-secret-than-the-app-uses",
+            algorithm="HS256",
+        )
+
+        assert auth_module.decode_access_token(token) is None
+
 
 class TestAuthStatus:
     def test_before_setup(self, auth_client):
