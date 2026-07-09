@@ -1,6 +1,5 @@
 # ruff: noqa: E402
 import asyncio
-import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,8 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 import app.models
+from app import startup as startup_module
 from app.config import settings
-from app.database import Base, engine
 from app.routers.auth import router as auth_router
 from app.routers.connection_tests import router as connection_tests_router
 from app.routers.dashboard import router as dashboard_router
@@ -33,48 +32,17 @@ from app.version import __version__
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: ensure data directories and database tables exist
-    settings.ensure_dirs()
-    Base.metadata.create_all(bind=engine)
-    from app.database import SessionLocal, run_migrations
-    run_migrations()
-
-    # Recover jobs left "running" by a previous crash so they can be retried
-    # or dismissed again (the retry/dismiss endpoints reject "running").
-    from app.routers.jobs import reset_stale_running_jobs
-    with SessionLocal() as startup_db:
-        reset_stale_running_jobs(startup_db)
-
-    # Build the edge image in the background so it never blocks startup: ASGI
-    # holds off accepting connections (including /api/health) until lifespan
-    # startup returns, and a fresh build can take minutes. The reconcile and
-    # recreate paths also call ensure_edge_image lazily, so this is best-effort.
-    async def _build_edge_image_bg() -> None:
-        from app.edge.image_builder import ensure_edge_image
-        try:
-            await asyncio.to_thread(ensure_edge_image)
-        except Exception:
-            logging.getLogger(__name__).warning(
-                "Could not build edge image at startup — will retry on first service reconcile",
-                exc_info=True,
-            )
-
-    # Start background tasks
-    from app.certs.renewal_task import cert_renewal_loop
-    from app.events.retention_task import retention_loop
-    from app.reconciler.reconcile_loop import health_check_loop, reconcile_loop
-
-    image_task = asyncio.create_task(_build_edge_image_bg())
-    renewal_task = asyncio.create_task(cert_renewal_loop())
-    reconcile_task = asyncio.create_task(reconcile_loop())
-    health_task = asyncio.create_task(health_check_loop())
-    retention_task = asyncio.create_task(retention_loop())
+    # Startup: ensure data directories, database tables, migrations, job recovery,
+    # and background loops are ready without any function-local imports in this
+    # entrypoint.
+    startup_module.prepare_database()
+    startup_module.recover_stale_running_jobs()
+    background_tasks = startup_module.create_background_tasks()
     yield
     # Shutdown: cancel every background task, then await them all so none leak.
     # Cancel ALL first, then gather with return_exceptions so a task that already
     # exited with an error (or is mid-cancellation) can't short-circuit awaiting
     # the rest — every task is cancelled and reaped regardless of its state.
-    background_tasks = (image_task, renewal_task, reconcile_task, health_task, retention_task)
     for task in background_tasks:
         task.cancel()
     await asyncio.gather(*background_tasks, return_exceptions=True)

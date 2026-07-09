@@ -9,7 +9,6 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 import app.database as database_module
-import app.main as main_module
 from app import config as config_module
 from app import secrets as secrets_module
 from app import settings_store as settings_store_module
@@ -79,11 +78,6 @@ def _client_for_engine(db_engine, *, bypass_auth: bool):
         finally:
             session.close()
 
-    # The lifespan runs create_all(bind=engine) against main's import-time engine
-    # binding; point it at the in-memory test engine so startup never opens (and
-    # leaks) a connection on the real file engine.
-    original_main_engine = main_module.engine
-    main_module.engine = db_engine
 
     app.dependency_overrides[get_db] = _override_get_db
     if bypass_auth:
@@ -106,7 +100,6 @@ def _client_for_engine(db_engine, *, bypass_auth: bool):
         app.dependency_overrides.clear()
         database_module.engine = original_engine
         database_module.SessionLocal = original_session_local
-        main_module.engine = original_main_engine
 
 
 @pytest.fixture()

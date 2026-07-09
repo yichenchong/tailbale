@@ -29,7 +29,6 @@ def auth_client(tmp_data_dir) -> Iterator[TestClient]:
     """TestClient WITHOUT the suite-wide auth bypass, for auth endpoint tests."""
     original_engine = database_module.engine
     original_session_local = database_module.SessionLocal
-    original_main_engine = main_module.engine
 
     engine = create_engine(
         "sqlite:///:memory:",
@@ -39,7 +38,6 @@ def auth_client(tmp_data_dir) -> Iterator[TestClient]:
     Base.metadata.create_all(bind=engine)
     database_module.engine = engine
     database_module.SessionLocal = sessionmaker(bind=engine)
-    main_module.engine = engine
     test_session = sessionmaker(bind=engine)
 
     def _override_get_db():
@@ -57,7 +55,6 @@ def auth_client(tmp_data_dir) -> Iterator[TestClient]:
     main_module.app.dependency_overrides.clear()
     database_module.engine = original_engine
     database_module.SessionLocal = original_session_local
-    main_module.engine = original_main_engine
     engine.dispose()
 
 

@@ -1,13 +1,11 @@
-import logging
 import threading
 from contextlib import contextmanager
 
-from sqlalchemy import Engine, create_engine, event, inspect, text
+from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from app import migrations as migration_runner
 from app.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 class Base(DeclarativeBase):
@@ -131,57 +129,4 @@ def run_migrations(target_engine: Engine | None = None) -> None:
     -- there is no migration framework.
     """
     eng = target_engine if target_engine is not None else engine
-
-    _MIGRATIONS: list[tuple[str, str, str]] = [
-        # (table, column, SQL type)
-        ("service_status", "probe_retry_at", "DATETIME"),
-        ("service_status", "probe_retry_attempt", "INTEGER"),
-        ("service_status", "last_probe_at", "DATETIME"),
-        ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
-    ]
-    # (table, index name, column) — index name matches SQLAlchemy's default
-    # ``ix_<table>_<column>`` so it is a no-op on databases already created
-    # from the current models. __tablename__ values are read from the models.
-    from app.models.certificate import Certificate
-    from app.models.event import Event
-    from app.models.job import Job
-    from app.models.service_status import ServiceStatus
-
-    _INDEX_MIGRATIONS: list[tuple[str, str, str]] = [
-        (Event.__tablename__, f"ix_{Event.__tablename__}_service_id", "service_id"),
-        (Event.__tablename__, f"ix_{Event.__tablename__}_created_at", "created_at"),
-        (Event.__tablename__, f"ix_{Event.__tablename__}_kind", "kind"),
-        (Job.__tablename__, f"ix_{Job.__tablename__}_service_id", "service_id"),
-        (Job.__tablename__, f"ix_{Job.__tablename__}_status", "status"),
-        (Job.__tablename__, f"ix_{Job.__tablename__}_kind", "kind"),
-        (Job.__tablename__, f"ix_{Job.__tablename__}_created_at", "created_at"),
-        (
-            Certificate.__tablename__,
-            f"ix_{Certificate.__tablename__}_expires_at",
-            "expires_at",
-        ),
-        (
-            ServiceStatus.__tablename__,
-            f"ix_{ServiceStatus.__tablename__}_phase",
-            "phase",
-        ),
-    ]
-
-    insp = inspect(eng)
-    with eng.begin() as conn:
-        for table, column, sql_type in _MIGRATIONS:
-            if not insp.has_table(table):
-                continue
-            existing = {c["name"] for c in insp.get_columns(table)}
-            if column not in existing:
-                conn.execute(text(
-                    f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"
-                ))
-                logger.info("Migration: added %s.%s (%s)", table, column, sql_type)
-
-        for table, index_name, column in _INDEX_MIGRATIONS:
-            if not insp.has_table(table):
-                continue
-            conn.execute(text(
-                f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({column})"
-            ))
+    migration_runner.run_schema_migrations(eng)
