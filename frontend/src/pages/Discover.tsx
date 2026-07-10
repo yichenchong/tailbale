@@ -3,11 +3,11 @@ import { useNavigate } from "react-router-dom"
 import { api, type DiscoveredContainer } from "@/lib/api"
 import { cn } from "@/lib/utils"
 import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
 import { Search, Globe } from "lucide-react"
 import { useTimezone } from "@/lib/useTimezone"
-import { useResource } from "@/lib/useResource"
+import { usePolledResource } from "@/lib/usePolledResource"
 import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
-import { usePolledFreshness } from "@/lib/usePolledFreshness"
 
 const POLL_INTERVAL = 30_000 // 30 seconds
 
@@ -23,7 +23,6 @@ export default function Discover() {
   const [search, setSearch] = useState("")
   const [appliedSearch, setAppliedSearch] = useState("")
   const [runningOnly, setRunningOnly] = useState(true)
-  const { lastRefresh, markFresh } = usePolledFreshness()
 
   // Composite fetcher: merge the discovery + services endpoints and derive each
   // container's exposure count. Memoized over its inputs so a filter/search
@@ -44,10 +43,10 @@ export default function Discover() {
 
   // Shared fetch/loading/error/race-guard/poll machine. The background poll keeps
   // the current list visible and clears the error only on success (no flicker);
-  // the 30s cadence matches the old hand-rolled setInterval.
-  const { data, loading, error, refresh } = useResource(fetcher, {
-    pollMs: POLL_INTERVAL,
-    onData: markFresh,
+  // the 30s cadence matches the old hand-rolled setInterval. `lastSuccessAt`
+  // drives the "Updated ..." / stale-data affordances.
+  const { data, loading, error, refresh, lastSuccessAt } = usePolledResource(fetcher, {
+    intervalMs: POLL_INTERVAL,
   })
   const containers = data?.containers ?? []
   const exposureCounts = data?.exposureCounts ?? {}
@@ -78,7 +77,7 @@ export default function Discover() {
           <p className="mt-1 text-sm text-zinc-500">Find running Docker containers to expose as HTTPS services.</p>
         </div>
         <PolledRefreshControl
-          lastRefresh={lastRefresh}
+          lastRefresh={lastSuccessAt}
           timezone={tz}
           loading={loading}
           onRefresh={() => { void refresh() }}
@@ -118,75 +117,78 @@ export default function Discover() {
 
       {/* Content */}
       <div className="mt-4">
-        {loading && containers.length === 0 ? (
-          <PageLoading className="flex items-center gap-2 py-8 text-zinc-500">
-            Loading containers...
-          </PageLoading>
-        ) : error && containers.length === 0 ? (
-          <PageError>{error}</PageError>
-        ) : containers.length === 0 ? (
-          <div className="rounded-md bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
-            No containers found. Make sure Docker is accessible and containers are running.
-          </div>
-        ) : (
-          <>
-            <StaleDataBanner error={error} lastRefresh={lastRefresh} timezone={tz} className="mb-3" />
-            <div className="overflow-x-auto rounded-md border border-zinc-200">
-              <table className="min-w-full divide-y divide-zinc-200">
-                <thead className="bg-zinc-50">
-                  <tr>
-                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
-                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
-                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
-                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
-                    <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
-                    <th scope="col" className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-zinc-100 bg-white">
-                  {containers.map((c) => (
-                    <tr key={c.id} className="hover:bg-zinc-50">
-                      <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-zinc-900">{c.name}</td>
-                      <td className="px-4 py-3 text-sm text-zinc-500 max-w-[200px] truncate" title={c.image}>{c.image}</td>
-                      <td className="px-4 py-3">
-                        <span className={cn(
-                          "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                          c.state === "running" ? "bg-green-100 text-green-700" : "bg-zinc-100 text-zinc-600"
-                        )}>
-                          {c.state}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-sm text-zinc-500">
-                        {c.ports.length > 0
-                          ? c.ports.map((p) => `${p.container_port}/${p.protocol}`).join(", ")
-                          : "\u2014"}
-                      </td>
-                      <td className="px-4 py-3 text-sm text-zinc-500">
-                        {c.networks.length > 0 ? c.networks.join(", ") : "\u2014"}
-                      </td>
-                      <td className="whitespace-nowrap px-4 py-3 text-right">
-                        <div className="inline-flex items-center gap-2">
-                          {exposureCounts[c.id] ? (
-                            <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
-                              {exposureCounts[c.id]} svc
-                            </span>
-                          ) : null}
-                          <button
-                            onClick={() => handleExpose(c)}
-                            className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
-                          >
-                            <Globe className="hidden h-3 w-3 sm:inline" />
-                            Expose
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+        <ResourceBoundary
+          loading={loading && containers.length === 0}
+          errored={!!error && containers.length === 0}
+          empty={containers.length === 0}
+          loadingSlot={
+            <PageLoading className="flex items-center gap-2 py-8 text-zinc-500">
+              Loading containers...
+            </PageLoading>
+          }
+          errorSlot={<PageError>{error}</PageError>}
+          emptySlot={
+            <div className="rounded-md bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
+              No containers found. Make sure Docker is accessible and containers are running.
             </div>
-          </>
-        )}
+          }
+        >
+          <StaleDataBanner error={error} lastRefresh={lastSuccessAt} timezone={tz} className="mb-3" />
+          <div className="overflow-x-auto rounded-md border border-zinc-200">
+            <table className="min-w-full divide-y divide-zinc-200">
+              <thead className="bg-zinc-50">
+                <tr>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
+                  <th scope="col" className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-100 bg-white">
+                {containers.map((c) => (
+                  <tr key={c.id} className="hover:bg-zinc-50">
+                    <td className="whitespace-nowrap px-4 py-3 text-sm font-medium text-zinc-900">{c.name}</td>
+                    <td className="px-4 py-3 text-sm text-zinc-500 max-w-[200px] truncate" title={c.image}>{c.image}</td>
+                    <td className="px-4 py-3">
+                      <span className={cn(
+                        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+                        c.state === "running" ? "bg-green-100 text-green-700" : "bg-zinc-100 text-zinc-600"
+                      )}>
+                        {c.state}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-sm text-zinc-500">
+                      {c.ports.length > 0
+                        ? c.ports.map((p) => `${p.container_port}/${p.protocol}`).join(", ")
+                        : "\u2014"}
+                    </td>
+                    <td className="px-4 py-3 text-sm text-zinc-500">
+                      {c.networks.length > 0 ? c.networks.join(", ") : "\u2014"}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right">
+                      <div className="inline-flex items-center gap-2">
+                        {exposureCounts[c.id] ? (
+                          <span className="inline-flex items-center rounded-full bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-700">
+                            {exposureCounts[c.id]} svc
+                          </span>
+                        ) : null}
+                        <button
+                          onClick={() => handleExpose(c)}
+                          className="inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800"
+                        >
+                          <Globe className="hidden h-3 w-3 sm:inline" />
+                          Expose
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </ResourceBoundary>
       </div>
     </div>
   )

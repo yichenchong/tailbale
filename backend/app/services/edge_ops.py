@@ -22,6 +22,7 @@ from app.database import commit_with_lock, db_write_section, session_scope
 from app.edge import caddy_admin, container_manager, image_builder
 from app.edge.docker_client import resolve_socket
 from app.events.event_emitter import emit_event
+from app.events.types import EventKind
 from app.health import health_checker
 from app.locks import service_reconcile_lock
 from app.models.service import Service
@@ -62,7 +63,7 @@ def reload_caddy_action(db: Session, service_id: str) -> dict:
         svc = get_enabled_service_for_edge_action(service_id, db)
         output = caddy_admin.reload_caddy(svc.id, svc.edge_container_name, resolve_socket(db))
         with db_write_section(db):
-            emit_event(db, svc.id, "caddy_reloaded", f"Caddy reloaded for '{svc.name}'")
+            emit_event(db, svc.id, EventKind.CADDY_RELOADED, f"Caddy reloaded for '{svc.name}'")
             commit_with_lock(db)
         return {"success": True, "message": "Caddy config reloaded", "output": output}
 
@@ -73,7 +74,7 @@ def restart_edge_action(db: Session, service_id: str) -> dict:
         svc = get_enabled_service_for_edge_action(service_id, db)
         container_manager.restart_edge(svc.id, svc.edge_container_name, resolve_socket(db))
         with db_write_section(db):
-            emit_event(db, svc.id, "edge_restarted", f"Edge container restarted for '{svc.name}'")
+            emit_event(db, svc.id, EventKind.EDGE_RESTARTED, f"Edge container restarted for '{svc.name}'")
             commit_with_lock(db)
     return {"success": True, "message": "Edge container restarted"}
 
@@ -106,7 +107,7 @@ def recreate_edge(db: Session, service_id: str) -> dict:
             if status:
                 status.edge_container_id = container_id
 
-            emit_event(db, svc.id, "edge_recreated", f"Edge container recreated for '{svc.name}'")
+            emit_event(db, svc.id, EventKind.EDGE_RECREATED, f"Edge container recreated for '{svc.name}'")
             commit_with_lock(db)
     return {"success": True, "message": "Edge container recreated", "container_id": container_id}
 
@@ -148,7 +149,7 @@ def update_edge_job(service_id: str, socket: str | None) -> dict:
             if status:
                 status.edge_container_id = container_id
             emit_event(
-                thread_db, service_id, "edge_updated",
+                thread_db, service_id, EventKind.EDGE_UPDATED,
                 f"Edge container updated to v{__version__} for '{thread_svc.name}'",
             )
             commit_with_lock(thread_db)

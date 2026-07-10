@@ -950,7 +950,7 @@ class TestBackgroundReconcilePassesSocket:
     """The post-create / post-enable reconcile is fire-and-forget in a background
     thread, but the round-4 refactor's whole point is that the Docker socket is
     resolved in the REQUEST thread (where the request DB session is still alive)
-    and threaded through _reconcile_in_background to reconcile_one(socket_path=).
+    and threaded through reconcile_in_background to reconcile_one(socket_path=).
     A regression that resolved the socket in the background task (using a
     torn-down request session) or dropped the arg would converge against the
     wrong daemon. Invariant guard for both call sites (create + update-enable)."""
@@ -1102,7 +1102,7 @@ class TestDisablePreservesCertState:
     artifacts) so a later re-enable reuses the existing certificate instead of
     forcing a fresh Let's Encrypt issue (ACME rate-limit risk). This is the
     ``remove_cert_state=False`` contract in disable_service's
-    _teardown_hostname_resources call — delete, by contrast, removes it."""
+    teardown_hostname_resources call — delete, by contrast, removes it."""
 
     _LEGO_SUFFIXES = (".crt", ".key", ".json", ".issuer.crt")
 

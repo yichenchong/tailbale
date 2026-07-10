@@ -1,7 +1,3 @@
-import logging
-import os
-
-import docker
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -15,9 +11,7 @@ from app.models.service import Service
 from app.models.setting import Setting
 from app.models.user import User
 from app.secrets import ALL_SECRETS, delete_secret
-from app.services import UpstreamApiError, delete_service_record, docker_client, resolve_socket
-
-logger = logging.getLogger(__name__)
+from app.services import delete_service_record, diagnostics
 
 router = APIRouter(
     prefix="/api/settings",
@@ -31,53 +25,13 @@ def _require_developer_mode(db: Session) -> None:
         raise HTTPException(status_code=403, detail="Developer Mode must be enabled first")
 
 
-def _find_main_container(client: docker.DockerClient):
-    containers = client.containers.list(all=True, filters={"label": "tailbale.main=true"})
-    if containers:
-        return containers[0]
-
-    fallback_names = (
-        "tailbale",
-        "backend",
-        "tailbale-tailbale-1",
-        "tailbale-backend-1",
-        os.environ.get("HOSTNAME"),
-    )
-    for name in fallback_names:
-        if not name:
-            continue
-        try:
-            return client.containers.get(name)
-        except docker.errors.NotFound:
-            continue
-
-    raise HTTPException(status_code=404, detail="tailBale container not found")
-
-
 @router.get("/developer/main-logs")
 def get_main_container_logs(
     tail: int = Query(200, ge=1, le=1000),
     db: Session = Depends(get_db),
 ):
     _require_developer_mode(db)
-    try:
-        with docker_client(resolve_socket(db)) as client:
-            container = _find_main_container(client)
-            output = container.logs(stdout=True, stderr=True, tail=tail, timestamps=True)
-            logs = (
-                output.decode("utf-8", errors="replace")
-                if isinstance(output, bytes)
-                else str(output)
-            )
-            return {
-                "container": getattr(container, "name", None) or getattr(container, "id", "unknown"),
-                "logs": logs,
-            }
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("Could not read tailBale container logs", exc_info=True)
-        raise UpstreamApiError("Could not read tailBale logs") from exc
+    return diagnostics.get_main_logs(db, tail)
 
 
 @router.post("/developer/reset-setup-complete")

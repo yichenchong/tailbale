@@ -8,6 +8,7 @@ import { phaseStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { useTransientMessage } from "@/lib/useTransientMessage"
 import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
 import { Plus, ExternalLink } from "lucide-react"
 import { RowActionsMenu } from "@/components/service/RowActionsMenu"
 import { useRowActionMenu, type RowActionMenuItem } from "@/components/service/useRowActionMenu"
@@ -73,28 +74,34 @@ export default function Services() {
         <div role="status" className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{message}</div>
       )}
 
-      {error && services.length > 0 && (
-        <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800">
-          Unable to refresh services: {error}
-        </div>
-      )}
-
-      {error && services.length === 0 ? (
-        <PageError className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
-          Unable to load services: {error}
-        </PageError>
-      ) : services.length === 0 ? (
-        <div className="mt-8 rounded-md bg-zinc-50 px-4 py-12 text-center">
-          <p className="text-sm text-zinc-500">No services exposed yet.</p>
-          <button
-            onClick={() => navigate("/discover")}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-          >
-            <Plus className="h-4 w-4" />
-            Discover Containers
-          </button>
-        </div>
-      ) : (
+      <ResourceBoundary
+        errored={!!error && services.length === 0}
+        empty={services.length === 0}
+        errorSlot={
+          <PageError className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+            Unable to load services: {error}
+          </PageError>
+        }
+        emptySlot={
+          <div className="mt-8 rounded-md bg-zinc-50 px-4 py-12 text-center">
+            <p className="text-sm text-zinc-500">No services exposed yet.</p>
+            <button
+              onClick={() => navigate("/discover")}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+            >
+              <Plus className="h-4 w-4" />
+              Discover Containers
+            </button>
+          </div>
+        }
+        refreshErrorSlot={
+          error && services.length > 0 ? (
+            <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800">
+              Unable to refresh services: {error}
+            </div>
+          ) : null
+        }
+      >
         <div className="mt-6 overflow-x-auto rounded-md border border-zinc-200">
           <table className="min-w-full divide-y divide-zinc-200">
             <thead className="bg-zinc-50">
@@ -166,7 +173,7 @@ export default function Services() {
             </tbody>
           </table>
         </div>
-      )}
+      </ResourceBoundary>
     </div>
   )
 }

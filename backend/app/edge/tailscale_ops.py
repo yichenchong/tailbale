@@ -3,10 +3,10 @@
 Split out of ``container_manager`` (AR-R3-15): detecting the Tailscale IPv4
 assigned to a running edge container by exec-ing ``tailscale ip``/``status``
 inside it is a distinct concern from container lifecycle. It needs the shared
-client-lifecycle primitive :func:`~app.edge.container_manager.edge_container`
+client-lifecycle primitive :func:`~app.edge.container_session.edge_container`
 and the container-state helper
-:func:`~app.edge.container_manager._wait_for_running`, imported one-way from
-``container_manager`` (which does not import this module — the graph is acyclic).
+:func:`~app.edge.container_session._wait_for_running`, imported one-way from the
+``container_session`` leaf (which does not import this module — the graph is acyclic).
 
 The control-plane counterpart (Tailscale admin-API device delete) lives in the
 leaf :mod:`app.edge.tailscale_device`, which ``container_manager.remove_edge``
@@ -19,7 +19,7 @@ import json
 import logging
 
 from app.backoff import retry_sync
-from app.edge.container_manager import _wait_for_running, edge_container
+from app.edge.container_session import _wait_for_running, edge_container
 
 logger = logging.getLogger(__name__)
 

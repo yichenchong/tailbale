@@ -21,7 +21,7 @@ from app.secrets import cloudflare_credentials
 
 logger = logging.getLogger(__name__)
 
-def _mark_status_disabled(status: ServiceStatus, message: str) -> None:
+def mark_status_disabled(status: ServiceStatus, message: str) -> None:
     status.phase = "disabled"
     status.message = message
     status.health_checks = None  # Stale checks are misleading while offline
@@ -29,7 +29,7 @@ def _mark_status_disabled(status: ServiceStatus, message: str) -> None:
     status.probe_retry_attempt = None
 
 
-def _reconcile_in_background(service_id: str, socket: str | None) -> None:
+def reconcile_in_background(service_id: str, socket: str | None) -> None:
     """Run a one-off reconcile for *service_id* in a fresh session.
 
     Used as a fire-and-forget background task after create / enable /
@@ -68,7 +68,7 @@ def _remove_lego_cert_artifacts(certs_dir: Path, hostname: str) -> None:
             logger.warning("Failed to remove lego cert artifact %s", artifact, exc_info=True)
 
 
-def _teardown_hostname_resources(
+def teardown_hostname_resources(
     db: Session,
     svc: Service,
     hostname: str,

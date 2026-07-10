@@ -12,6 +12,7 @@ from app.database import commit_with_lock, db_write_section
 from app.edge import container_manager
 from app.edge.docker_client import resolve_socket
 from app.events.event_emitter import emit_event
+from app.events.types import EventKind
 from app.locks import lifecycle_then_reconcile
 from app.models.certificate import Certificate
 from app.models.dns_record import DnsRecord
@@ -26,11 +27,12 @@ from app.services.errors import (
     ServiceNotFound,
 )
 from app.services.lifecycle import (
-    _mark_status_disabled,
-    _reconcile_in_background,
-    _teardown_hostname_resources,
+    mark_status_disabled,
+    reconcile_in_background,
+    teardown_hostname_resources,
 )
 from app.services.mapping import to_response
+from app.services.service_fields import CONFIG_AFFECTING_FIELDS, UPDATABLE_FIELDS
 
 
 def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> dict:
@@ -86,7 +88,7 @@ def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> 
     # artifacts). The DNS teardown above stays inline: a hostname change must
     # ABORT on a Cloudflare failure, unlike the best-effort DNS cleanup the
     # helper performs for disable/delete.
-    _teardown_hostname_resources(db, svc, old_hostname, cleanup_dns=False)
+    teardown_hostname_resources(db, svc, old_hostname, cleanup_dns=False)
 
     # base_domain always tracks the configured domain (validated above).
     return {"hostname": body.hostname, "base_domain": configured_domain}
@@ -95,10 +97,7 @@ def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> 
 def _apply_field_changes(body) -> dict:
     """Collect the non-hostname field edits present in the request body."""
     changes: dict = {}
-    for field in (
-        "name", "upstream_scheme", "upstream_port", "healthcheck_path",
-        "enabled", "preserve_host_header", "custom_caddy_snippet", "app_profile",
-    ):
+    for field in UPDATABLE_FIELDS:
         if field in body.model_fields_set:
             changes[field] = getattr(body, field)
     return changes
@@ -116,7 +115,7 @@ def _transition_status(
     if status is None:
         return
     if disabling_service:
-        _mark_status_disabled(status, "Service disabled by user")
+        mark_status_disabled(status, "Service disabled by user")
     elif enabling_service:
         status.phase = "pending"
         status.message = "Awaiting reconciliation after enable"
@@ -157,7 +156,7 @@ def _emit_update_events(
                 k: ("<redacted: see service_snippet_changed>" if k == "custom_caddy_snippet" else v)
                 for k, v in changes.items()
             }
-        emit_event(db, svc.id, "service_updated", f"Service '{svc.name}' updated", details=audit_changes)
+        emit_event(db, svc.id, EventKind.SERVICE_UPDATED, f"Service '{svc.name}' updated", details=audit_changes)
 
     if snippet_in_update:
         new_snippet = svc.custom_caddy_snippet
@@ -171,7 +170,7 @@ def _emit_update_events(
             emit_event(
                 db,
                 svc.id,
-                "service_snippet_changed",
+                EventKind.SERVICE_SNIPPET_CHANGED,
                 f"Custom Caddy snippet {action} for '{svc.name}'",
                 level="warning",
                 details={
@@ -212,7 +211,130 @@ def _schedule_post_update_reconcile(
     if not disabling_service and (
         enabling_service or ((changing_hostname or config_changed) and enabled)
     ):
-        background_tasks.add_task(_reconcile_in_background, service_id, resolve_socket(db))
+        background_tasks.add_task(reconcile_in_background, service_id, resolve_socket(db))
+
+
+def _persist_update(
+    db: Session,
+    service_id: str,
+    body,
+    changes: dict,
+    *,
+    changing_hostname: bool,
+    disabling_service: bool,
+    enabling_service: bool,
+) -> tuple[Service, bool]:
+    """Persist the planned update inside the DB write section.
+
+    Re-reads the service under the lock (``populate_existing``) and re-runs the
+    ``HostnameInUse`` guard — the second of the two checks bracketing the
+    destructive teardown — before mutating. Syncs the cert/DNS hostname on a
+    hostname change, applies the status transition and audit events, commits,
+    then refreshes. Returns the refreshed service plus the ``config_changed``
+    flag the convergence step needs; the flag is computed against the pre-change
+    values, so it is captured before the ``setattr`` loop.
+    """
+    with db_write_section(db):
+        svc = db.get(Service, service_id, populate_existing=True)
+        if not svc:
+            raise ServiceNotFound()
+
+        if changing_hostname:
+            existing = db.query(Service).filter(
+                Service.hostname == body.hostname, Service.id != service_id
+            ).first()
+            if existing:
+                raise HostnameInUse(body.hostname)
+
+        # Capture the pre-change snippet so we can emit a dedicated,
+        # high-visibility audit event on any snippet delta (tamper vector).
+        snippet_in_update = "custom_caddy_snippet" in body.model_fields_set
+        old_snippet = svc.custom_caddy_snippet if snippet_in_update else None
+
+        # Detect whether any config-affecting field actually changed so we can
+        # schedule an immediate reconcile below. Computed against the
+        # pre-change svc values, so it MUST run before the setattr loop.
+        config_changed = any(
+            field in changes and changes[field] != getattr(svc, field)
+            for field in CONFIG_AFFECTING_FIELDS
+        )
+
+        for field, val in changes.items():
+            setattr(svc, field, val)
+
+        if changing_hostname:
+            cert = db.get(Certificate, svc.id)
+            if cert:
+                cert.hostname = body.hostname
+                cert.expires_at = None
+                cert.last_renewed_at = None
+                cert.last_failure = None
+                cert.next_retry_at = None
+
+            dns_record = db.get(DnsRecord, svc.id)
+            if dns_record:
+                dns_record.hostname = body.hostname
+
+        status = db.get(ServiceStatus, svc.id)
+        _transition_status(
+            status,
+            disabling_service=disabling_service,
+            enabling_service=enabling_service,
+            changing_hostname=changing_hostname,
+            enabled=svc.enabled,
+        )
+
+        _emit_update_events(
+            db, svc, changes, snippet_in_update=snippet_in_update, old_snippet=old_snippet
+        )
+
+        commit_with_lock(db)
+
+    db.refresh(svc)
+    return svc, config_changed
+
+
+def _converge_post_update(
+    db: Session,
+    background_tasks: BackgroundTasks,
+    svc: Service,
+    *,
+    disabling_service: bool,
+    enabling_service: bool,
+    changing_hostname: bool,
+    config_changed: bool,
+) -> None:
+    """Run the post-commit edge side effects and schedule any needed reconcile.
+
+    Strictly ordered after the commit and still inside the lifecycle+reconcile
+    lock: stop the edge on disable, drop the stale edge container on a hostname
+    change, then schedule the convergence reconcile. Best-effort Docker calls —
+    the daemon may be unreachable.
+    """
+    if disabling_service:
+        with contextlib.suppress(Exception):
+            container_manager.stop_edge(svc.id, svc.edge_container_name, resolve_socket(db))
+
+    # A hostname change moves the per-hostname cert directory, but the edge
+    # container's /certs bind mount (certs_dir/<hostname>) is fixed at create
+    # time. The stale container would keep mounting the now-deleted old
+    # hostname's cert dir and never see the new cert, so remove it; the
+    # reconcile scheduled below (or the next enable) recreates it with the
+    # correct mount. Best-effort: Docker may be unreachable.
+    if changing_hostname:
+        with contextlib.suppress(Exception):
+            container_manager.remove_edge(svc.id, svc.edge_container_name, resolve_socket(db), delete_device=False)
+
+    _schedule_post_update_reconcile(
+        db,
+        background_tasks,
+        svc.id,
+        disabling_service=disabling_service,
+        enabling_service=enabling_service,
+        changing_hostname=changing_hostname,
+        config_changed=config_changed,
+        enabled=svc.enabled,
+    )
 
 
 def update_service(
@@ -223,12 +345,13 @@ def update_service(
 ) -> ServiceResponse:
     """Apply a service update under the lifecycle/reconcile locks.
 
-    Orchestrates the cohesive helpers above: validate + tear down a hostname
-    change, collect field edits, persist everything inside the DB write section,
-    then finish the post-commit edge/reconcile work OUTSIDE it. The caller
-    (router) has already revalidated the upstream port *before* taking any lock,
-    so the destructive DNS/cert teardown only runs after a valid request —
-    preserving the validate-before-teardown discipline.
+    Thin sequencer over the cohesive collaborators above: plan the change
+    (validate + tear down a hostname change, collect field edits), persist it
+    inside the DB write section, then converge the edge state and schedule any
+    reconcile OUTSIDE it. The caller (router) has already revalidated the
+    upstream port *before* taking any lock, so the destructive DNS/cert teardown
+    only runs after a valid request — preserving the validate-before-teardown
+    discipline.
     """
     with lifecycle_then_reconcile(service_id):
         svc = db.get(Service, service_id, populate_existing=True)
@@ -247,90 +370,24 @@ def update_service(
         disabling_service = "enabled" in changes and changes["enabled"] is False and was_enabled
         enabling_service = "enabled" in changes and changes["enabled"] is True and not was_enabled
 
-        with db_write_section(db):
-            svc = db.get(Service, service_id, populate_existing=True)
-            if not svc:
-                raise ServiceNotFound()
+        svc, config_changed = _persist_update(
+            db,
+            service_id,
+            body,
+            changes,
+            changing_hostname=changing_hostname,
+            disabling_service=disabling_service,
+            enabling_service=enabling_service,
+        )
 
-            if changing_hostname:
-                existing = db.query(Service).filter(
-                    Service.hostname == body.hostname, Service.id != service_id
-                ).first()
-                if existing:
-                    raise HostnameInUse(body.hostname)
-
-            # Capture the pre-change snippet so we can emit a dedicated,
-            # high-visibility audit event on any snippet delta (tamper vector).
-            snippet_in_update = "custom_caddy_snippet" in sent
-            old_snippet = svc.custom_caddy_snippet if snippet_in_update else None
-
-            # Detect whether any config-affecting field actually changed so we can
-            # schedule an immediate reconcile below. Computed against the
-            # pre-change svc values, so it MUST run before the setattr loop.
-            config_changed = any(
-                field in changes and changes[field] != getattr(svc, field)
-                for field in (
-                    "upstream_port", "upstream_scheme", "preserve_host_header",
-                    "custom_caddy_snippet", "healthcheck_path",
-                )
-            )
-
-            for field, val in changes.items():
-                setattr(svc, field, val)
-
-            if changing_hostname:
-                cert = db.get(Certificate, svc.id)
-                if cert:
-                    cert.hostname = body.hostname
-                    cert.expires_at = None
-                    cert.last_renewed_at = None
-                    cert.last_failure = None
-                    cert.next_retry_at = None
-
-                dns_record = db.get(DnsRecord, svc.id)
-                if dns_record:
-                    dns_record.hostname = body.hostname
-
-            status = db.get(ServiceStatus, svc.id)
-            _transition_status(
-                status,
-                disabling_service=disabling_service,
-                enabling_service=enabling_service,
-                changing_hostname=changing_hostname,
-                enabled=svc.enabled,
-            )
-
-            _emit_update_events(
-                db, svc, changes, snippet_in_update=snippet_in_update, old_snippet=old_snippet
-            )
-
-            commit_with_lock(db)
-
-        db.refresh(svc)
-
-        if disabling_service:
-            with contextlib.suppress(Exception):
-                container_manager.stop_edge(svc.id, svc.edge_container_name, resolve_socket(db))
-
-        # A hostname change moves the per-hostname cert directory, but the edge
-        # container's /certs bind mount (certs_dir/<hostname>) is fixed at create
-        # time. The stale container would keep mounting the now-deleted old
-        # hostname's cert dir and never see the new cert, so remove it; the
-        # reconcile scheduled below (or the next enable) recreates it with the
-        # correct mount. Best-effort: Docker may be unreachable.
-        if changing_hostname:
-            with contextlib.suppress(Exception):
-                container_manager.remove_edge(svc.id, svc.edge_container_name, resolve_socket(db), delete_device=False)
-
-        _schedule_post_update_reconcile(
+        _converge_post_update(
             db,
             background_tasks,
-            service_id,
+            svc,
             disabling_service=disabling_service,
             enabling_service=enabling_service,
             changing_hostname=changing_hostname,
             config_changed=config_changed,
-            enabled=svc.enabled,
         )
 
         status = db.get(ServiceStatus, service_id)

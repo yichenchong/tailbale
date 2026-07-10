@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from app.certs import cert_manager
-from app.certs.cert_manager import (
+from app.certs import lego_runner
+from app.certs.lego_runner import (
     LEGO_OVERALL_REQUEST_LIMIT,
     LEGO_TIMEOUT_SECONDS,
     _kill_process_tree,
@@ -20,7 +20,7 @@ from tests._cert_helpers import _fake_lego_proc
 
 
 class TestRunLego:
-    @patch("app.certs.cert_manager.subprocess.Popen")
+    @patch("app.certs.lego_runner.subprocess.Popen")
     def test_runs_lego_with_cloudflare_env(self, mock_popen, tmp_path):
 
         mock_popen.return_value = _fake_lego_proc(["ok\n"], returncode=0)
@@ -49,7 +49,7 @@ class TestRunLego:
         mock_popen.return_value.wait.assert_called_with(timeout=LEGO_TIMEOUT_SECONDS)
         assert LEGO_TIMEOUT_SECONDS >= 120
 
-    @patch("app.certs.cert_manager.subprocess.Popen")
+    @patch("app.certs.lego_runner.subprocess.Popen")
     def test_streams_each_output_line_to_log(self, mock_popen, tmp_path, caplog):
 
         mock_popen.return_value = _fake_lego_proc(
@@ -57,13 +57,13 @@ class TestRunLego:
             returncode=0,
         )
 
-        with caplog.at_level(logging.INFO, logger="app.certs.cert_manager"):
+        with caplog.at_level(logging.INFO, logger="app.certs.lego_runner"):
             _run_lego(["run"], cloudflare_token="cf-token", lego_dir=tmp_path)
 
         assert "[lego] [INFO] acme: registering account" in caplog.text
         assert "[lego] [INFO] acme: obtaining cert" in caplog.text
 
-    @patch("app.certs.cert_manager.subprocess.Popen")
+    @patch("app.certs.lego_runner.subprocess.Popen")
     def test_raises_on_failure(self, mock_popen, tmp_path):
 
         mock_popen.return_value = _fake_lego_proc(["auth error\n"], returncode=1)
@@ -71,7 +71,7 @@ class TestRunLego:
         with pytest.raises(RuntimeError, match="lego failed"):
             _run_lego(["run"], cloudflare_token="bad", lego_dir=tmp_path)
 
-    @patch("app.certs.cert_manager.subprocess.Popen")
+    @patch("app.certs.lego_runner.subprocess.Popen")
     def test_raises_on_timeout(self, mock_popen, tmp_path):
 
         # First wait() (with timeout) raises; the post-kill wait() returns.
@@ -88,8 +88,8 @@ class TestRunLego:
             _run_lego(["run"], cloudflare_token="cf-token", lego_dir=tmp_path)
         proc.kill.assert_called_once()
 
-    @patch("app.certs.cert_manager.os.killpg")
-    @patch("app.certs.cert_manager.os.getpgid")
+    @patch("app.certs.lego_runner.os.killpg")
+    @patch("app.certs.lego_runner.os.getpgid")
     def test_timeout_kill_ignores_non_integer_pid(self, mock_getpgid, mock_killpg):
 
         proc = MagicMock()
@@ -101,8 +101,8 @@ class TestRunLego:
         mock_killpg.assert_not_called()
         proc.kill.assert_called_once()
 
-    @patch("app.certs.cert_manager.os.killpg")
-    @patch("app.certs.cert_manager.os.getpgid")
+    @patch("app.certs.lego_runner.os.killpg")
+    @patch("app.certs.lego_runner.os.getpgid")
     def test_timeout_kill_ignores_non_positive_pid(self, mock_getpgid, mock_killpg):
 
         proc = MagicMock()
@@ -114,8 +114,8 @@ class TestRunLego:
         mock_killpg.assert_not_called()
         proc.kill.assert_called_once()
 
-    @patch("app.certs.cert_manager.os.killpg")
-    @patch("app.certs.cert_manager.os.getpgid")
+    @patch("app.certs.lego_runner.os.killpg")
+    @patch("app.certs.lego_runner.os.getpgid")
     def test_timeout_kill_signals_whole_process_group(self, mock_getpgid, mock_killpg):
         """A real (positive int) pid must SIGKILL the entire process group, not
         just the immediate child: a descendant lego spawn that inherited the
@@ -152,10 +152,10 @@ class TestRunLego:
                 active -= 1
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
-        with patch("app.certs.cert_manager._exec_lego", side_effect=fake_exec):
+        with patch("app.certs.lego_runner._exec_lego", side_effect=fake_exec):
             threads = [
                 threading.Thread(
-                    target=cert_manager._run_lego,
+                    target=lego_runner._run_lego,
                     args=([], "cf-token", tmp_path),
                 )
                 for _ in range(8)

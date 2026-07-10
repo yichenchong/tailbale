@@ -37,7 +37,7 @@ order never occurs. A caller that needs BOTH sub-tiers MUST take 2a before 2b.
 
 LEAF locks live in their own modules and are NEVER held while taking a
 tier-1/2 lock, so they cannot take part in a deadlock cycle:
-  * cert_manager._LEGO_MUTEX   — serializes lego/ACME shared account+store.
+  * lego_runner._LEGO_MUTEX     — serializes lego/ACME shared account+store.
   * image_builder._BUILD_LOCK  — serializes edge-image rebuilds.
 
 The reconcile lock is PER SERVICE (not one process-global mutex) so a single

@@ -4,10 +4,11 @@ import { useTimezone, formatDateTimeOrDash } from "@/lib/useTimezone"
 import { AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
 import { cn, errorMessage } from "@/lib/utils"
 import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
 import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { usePaginatedResource } from "@/lib/usePaginatedResource"
-import { Pagination } from "@/components/Pagination"
+import { PaginationBar } from "@/components/PaginationBar"
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -29,24 +30,12 @@ export default function Events() {
     [search, levelFilter, kindFilter],
   )
   const getEvents = useCallback((response: EventsResponse) => response.events, [])
-  const {
-    items,
-    loading,
-    error,
-    offset,
-    limit,
-    total,
-    page,
-    pageCount,
-    setOffset,
-    prev,
-    next,
-    goToPage,
-  } = usePaginatedResource<EventsResponse, EventItem>({
+  const resource = usePaginatedResource<EventsResponse, EventItem>({
     load: loadEvents,
     getItems: getEvents,
     mapError: (e) => (errorMessage(e, "Failed to load events")),
   })
+  const { items, loading, error, total, setOffset } = resource
   const events = items
 
   // Kind filter options come from the backend registry (GET /events/kinds) —
@@ -118,94 +107,86 @@ export default function Events() {
       </div>
 
       {/* Content */}
-      {loading ? (
-        <PageLoading className="mt-8 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
-          Loading events...
-        </PageLoading>
-      ) : error ? (
-        <PageError className="mt-4 rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>
-      ) : events.length === 0 ? (
-        <div className="mt-8 text-zinc-500">No events found.</div>
-      ) : (
-        <>
-          <div className="mt-4 border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-zinc-50 text-left text-zinc-600">
-                <tr>
-                  <th scope="col" className="px-3 py-2 w-8"><span className="sr-only">Details</span></th>
-                  <th scope="col" className="px-3 py-2">Time</th>
-                  <th scope="col" className="px-3 py-2">Level</th>
-                  <th scope="col" className="px-3 py-2">Kind</th>
-                  <th scope="col" className="px-3 py-2">Message</th>
-                </tr>
-              </thead>
-              <tbody>
-                {events.map((evt) => {
-                  const Icon = LEVEL_ICONS[evt.level] || Info
-                  const expanded = expandedId === evt.id
-                  return (
-                    <Fragment key={evt.id}>
-                      <tr
-                        className={cn("border-t hover:bg-zinc-50", evt.details && "cursor-pointer")}
-                        onClick={() => toggleEventDetails(evt)}
-                      >
-                        <td className="px-3 py-2">
-                          {evt.details ? (
-                            <button
-                              type="button"
-                              aria-label={`${expanded ? "Collapse" : "Expand"} details for ${evt.message}`}
-                              aria-expanded={expanded}
-                              aria-controls={`event-details-${evt.id}`}
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                toggleEventDetails(evt)
-                              }}
-                              className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-zinc-500"
-                            >
-                              {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
-                            </button>
-                          ) : null}
+      <ResourceBoundary
+        loading={loading}
+        errored={!!error}
+        empty={events.length === 0}
+        loadingSlot={
+          <PageLoading className="mt-8 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
+            Loading events...
+          </PageLoading>
+        }
+        errorSlot={<PageError className="mt-4 rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>}
+        emptySlot={<div className="mt-8 text-zinc-500">No events found.</div>}
+      >
+        <div className="mt-4 border rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead className="bg-zinc-50 text-left text-zinc-600">
+              <tr>
+                <th scope="col" className="px-3 py-2 w-8"><span className="sr-only">Details</span></th>
+                <th scope="col" className="px-3 py-2">Time</th>
+                <th scope="col" className="px-3 py-2">Level</th>
+                <th scope="col" className="px-3 py-2">Kind</th>
+                <th scope="col" className="px-3 py-2">Message</th>
+              </tr>
+            </thead>
+            <tbody>
+              {events.map((evt) => {
+                const Icon = LEVEL_ICONS[evt.level] || Info
+                const expanded = expandedId === evt.id
+                return (
+                  <Fragment key={evt.id}>
+                    <tr
+                      className={cn("border-t hover:bg-zinc-50", evt.details && "cursor-pointer")}
+                      onClick={() => toggleEventDetails(evt)}
+                    >
+                      <td className="px-3 py-2">
+                        {evt.details ? (
+                          <button
+                            type="button"
+                            aria-label={`${expanded ? "Collapse" : "Expand"} details for ${evt.message}`}
+                            aria-expanded={expanded}
+                            aria-controls={`event-details-${evt.id}`}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              toggleEventDetails(evt)
+                            }}
+                            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-zinc-500"
+                          >
+                            {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+                          </button>
+                        ) : null}
+                      </td>
+                      <td className="px-3 py-2 whitespace-nowrap text-zinc-500 font-mono text-xs">
+                        {formatDateTimeOrDash(evt.created_at, tz)}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", eventLevelStyle(evt.level))}>
+                          <Icon className="h-3 w-3" />
+                          {evt.level}
+                        </span>
+                      </td>
+                      <td className="px-3 py-2 font-mono text-xs text-zinc-600">{evt.kind}</td>
+                      <td className="px-3 py-2">{evt.message}</td>
+                    </tr>
+                    {expanded && evt.details && (
+                      <tr id={`event-details-${evt.id}`} className="border-t bg-zinc-50">
+                        <td colSpan={5} className="px-6 py-3">
+                          <pre className="text-xs text-zinc-700 whitespace-pre-wrap font-mono">
+                            {JSON.stringify(evt.details, null, 2)}
+                          </pre>
                         </td>
-                        <td className="px-3 py-2 whitespace-nowrap text-zinc-500 font-mono text-xs">
-                          {formatDateTimeOrDash(evt.created_at, tz)}
-                        </td>
-                        <td className="px-3 py-2">
-                          <span className={cn("inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium", eventLevelStyle(evt.level))}>
-                            <Icon className="h-3 w-3" />
-                            {evt.level}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 font-mono text-xs text-zinc-600">{evt.kind}</td>
-                        <td className="px-3 py-2">{evt.message}</td>
                       </tr>
-                      {expanded && evt.details && (
-                        <tr id={`event-details-${evt.id}`} className="border-t bg-zinc-50">
-                          <td colSpan={5} className="px-6 py-3">
-                            <pre className="text-xs text-zinc-700 whitespace-pre-wrap font-mono">
-                              {JSON.stringify(evt.details, null, 2)}
-                            </pre>
-                          </td>
-                        </tr>
-                      )}
-                    </Fragment>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
+                    )}
+                  </Fragment>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
 
-          <Pagination
-            offset={offset}
-            limit={limit}
-            total={total}
-            page={page}
-            pageCount={pageCount}
-            onPrev={prev}
-            onNext={next}
-            onGoToPage={goToPage}
-          />
-        </>
-      )}
+        <PaginationBar resource={resource} />
+      </ResourceBoundary>
     </div>
   )
 }

@@ -33,5 +33,5 @@ class _ConnectStubMixin:
 
     @pytest.fixture(autouse=True)
     def _stub_connect(self):
-        with patch("app.edge.container_manager.connect", return_value=MagicMock()):
+        with patch("app.edge.container_session.connect", return_value=MagicMock()):
             yield

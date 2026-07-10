@@ -7,6 +7,7 @@ from pathlib import Path
 
 from app.events.event_emitter import EVENT_KINDS, emit_event
 from app.events.serialization import event_to_dict
+from app.events.types import EventKind
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -142,23 +143,52 @@ class TestEventKindsRegistry:
         assert len(drift) == 1
         assert "totally_made_up_kind" in drift[0].getMessage()
 
-    def test_every_emitted_literal_kind_is_registered(self):
-        """Static guard: every event ``kind`` emitted as a string literal across
-        ``backend/app`` must be in EVENT_KINDS, so the frontend kind filter (built
-        from the registry) can never silently miss an emitted kind. Covers
-        ``emit_event(db, sid, "<kind>", ...)`` call sites and the reconciler's
-        ``{"kind": "<kind>", "message": ...}`` event dicts threaded through
-        ``_persist_status``. Dynamic kinds (variables / ``event["kind"]``) are out
-        of static reach and rely on the runtime drift canary instead.
+    def test_registry_is_derived_from_eventkind_catalogue(self):
+        """AR14 single-source guard: EVENT_KINDS is exactly the set of EventKind
+        string constants (no hand-maintained mirror can drift from the catalogue).
         """
+        expected = {
+            value
+            for name, value in vars(EventKind).items()
+            if not name.startswith("_") and isinstance(value, str)
+        }
+        assert expected == EVENT_KINDS
+        assert len(EVENT_KINDS) == 27
 
-
+    def test_every_emitted_kind_is_registered(self):
+        """Static guard: every event ``kind`` emitted across ``backend/app`` — as
+        a string literal, an ``EventKind.<NAME>`` constant, or a reconciler
+        ``{"kind": ..., "message": ...}`` dict — must resolve to a value in
+        EVENT_KINDS, so the frontend kind filter (built from the registry) can
+        never silently miss an emitted kind. Also catches a typo'd
+        ``EventKind.<NAME>`` (unknown attribute). Dynamic kinds (arbitrary
+        variables / ``event["kind"]``) are out of static reach and rely on the
+        runtime drift canary instead.
+        """
         app_dir = Path(__file__).resolve().parents[1] / "app"
         emitted: set[str] = set()
 
         def _str_const(node) -> str | None:
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 return node.value
+            return None
+
+        def _kind_value(node) -> str | None:
+            # A bare string literal ...
+            literal = _str_const(node)
+            if literal is not None:
+                return literal
+            # ... or an EventKind.<NAME> constant reference (AR14).
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id == "EventKind"
+            ):
+                value = getattr(EventKind, node.attr, None)
+                assert isinstance(value, str), (
+                    f"emit site references unknown EventKind.{node.attr}"
+                )
+                return value
             return None
 
         for path in app_dir.rglob("*.py"):
@@ -173,16 +203,16 @@ class TestEventKindsRegistry:
                         else None
                     )
                     if name == "emit_event":
-                        if len(node.args) >= 3 and (kind := _str_const(node.args[2])):
+                        if len(node.args) >= 3 and (kind := _kind_value(node.args[2])):
                             emitted.add(kind)
                         for kw in node.keywords:
-                            if kw.arg == "kind" and (kind := _str_const(kw.value)):
+                            if kw.arg == "kind" and (kind := _kind_value(kw.value)):
                                 emitted.add(kind)
                 elif in_reconciler and isinstance(node, ast.Dict):
                     keys = {_str_const(k) for k in node.keys}
                     if {"kind", "message"} <= keys:
                         for k, v in zip(node.keys, node.values, strict=True):
-                            if _str_const(k) == "kind" and (kind := _str_const(v)):
+                            if _str_const(k) == "kind" and (kind := _kind_value(v)):
                                 emitted.add(kind)
 
         # Sanity floor: a broken scan that finds nothing must fail loudly rather

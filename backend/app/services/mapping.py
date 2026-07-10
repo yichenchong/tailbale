@@ -13,6 +13,7 @@ from app.models.certificate import Certificate
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.schemas.services import ServiceResponse, ServiceStatusResponse
+from app.services.service_fields import RESPONSE_PASSTHROUGH_FIELDS
 from app.timeutil import iso
 
 # Tailscale passes ts_hostname to `tailscale up --hostname=`, which is a single
@@ -92,23 +93,8 @@ def to_response(
             last_probe_at=iso(status.last_probe_at),
         )
     return ServiceResponse(
-        id=svc.id,
-        name=svc.name,
-        enabled=svc.enabled,
-        upstream_container_id=svc.upstream_container_id,
-        upstream_container_name=svc.upstream_container_name,
-        upstream_scheme=svc.upstream_scheme,
-        upstream_port=svc.upstream_port,
-        healthcheck_path=svc.healthcheck_path,
-        hostname=svc.hostname,
-        base_domain=svc.base_domain,
-        edge_container_name=svc.edge_container_name,
-        network_name=svc.network_name,
-        ts_hostname=svc.ts_hostname,
-        preserve_host_header=svc.preserve_host_header,
-        custom_caddy_snippet=svc.custom_caddy_snippet,
-        app_profile=svc.app_profile,
         status=status_resp,
         created_at=svc.created_at.isoformat(),
         updated_at=svc.updated_at.isoformat(),
+        **{field: getattr(svc, field) for field in RESPONSE_PASSTHROUGH_FIELDS},
     )

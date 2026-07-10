@@ -5,8 +5,9 @@ import { Loader2, AlertTriangle, RefreshCw, Trash2, CheckCircle2 } from "lucide-
 import { cn, errorMessage } from "@/lib/utils"
 import { jobStatusStyle } from "@/lib/statusStyles"
 import { usePaginatedResource } from "@/lib/usePaginatedResource"
-import { Pagination } from "@/components/Pagination"
+import { PaginationBar } from "@/components/PaginationBar"
 import { PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
 
 export default function OrphanDns() {
   const tz = useTimezone()
@@ -18,25 +19,12 @@ export default function OrphanDns() {
     [],
   )
   const getJobs = useCallback((response: JobsResponse) => response.jobs, [])
-  const {
-    items,
-    loading,
-    error,
-    refresh,
-    setError,
-    offset,
-    limit,
-    total,
-    page,
-    pageCount,
-    prev,
-    next,
-    goToPage,
-  } = usePaginatedResource<JobsResponse, OrphanJob>({
+  const resource = usePaginatedResource<JobsResponse, OrphanJob>({
     load: loadJobs,
     getItems: getJobs,
     mapError: (e) => (errorMessage(e, "Failed to load orphan records")),
   })
+  const { items, loading, error, refresh, setError, total } = resource
   const jobs = items
 
   async function handleRetry(job: OrphanJob) {
@@ -103,108 +91,102 @@ export default function OrphanDns() {
         </div>
       )}
 
-      {loading ? (
-        <PageLoading className="mt-8 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
-          Loading...
-        </PageLoading>
-      ) : jobs.length === 0 ? (
-        // Don't claim "All clean!" when the list is empty only because the load
-        // failed — the error banner above already explains what happened.
-        error ? null : (
-          <div className="mt-8 rounded-lg border border-dashed border-zinc-300 p-8 text-center text-zinc-500">
-            No orphaned DNS records. All clean!
-          </div>
-        )
-      ) : (
-        <>
-          <div className="mt-4 text-sm text-zinc-500">
-            {total} orphaned record{total !== 1 ? "s" : ""}
-          </div>
-          <div className="mt-2 space-y-3">
-            {jobs.map((job) => {
-              const d = job.details
-              const busy = actionLoading[job.id]
-              return (
-                <div
-                  key={job.id}
-                  className="rounded-lg border bg-white p-4 shadow-sm"
-                >
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium text-zinc-900">
-                          {d?.hostname ?? "Unknown hostname"}
-                        </span>
-                        <span
-                          className={cn(
-                            "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                            jobStatusStyle(job.status)
-                          )}
-                        >
-                          {job.status}
-                        </span>
-                      </div>
-                      <div className="mt-1 space-y-0.5 text-sm text-zinc-500">
-                        {d?.service_name && (
-                          <div>Service: <span className="text-zinc-700">{d.service_name}</span></div>
+      <ResourceBoundary
+        loading={loading}
+        empty={jobs.length === 0}
+        loadingSlot={
+          <PageLoading className="mt-8 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
+            Loading...
+          </PageLoading>
+        }
+        emptySlot={
+          // Don't claim "All clean!" when the list is empty only because the load
+          // failed — the error banner above already explains what happened.
+          error ? null : (
+            <div className="mt-8 rounded-lg border border-dashed border-zinc-300 p-8 text-center text-zinc-500">
+              No orphaned DNS records. All clean!
+            </div>
+          )
+        }
+      >
+        <div className="mt-4 text-sm text-zinc-500">
+          {total} orphaned record{total !== 1 ? "s" : ""}
+        </div>
+        <div className="mt-2 space-y-3">
+          {jobs.map((job) => {
+            const d = job.details
+            const busy = actionLoading[job.id]
+            return (
+              <div
+                key={job.id}
+                className="rounded-lg border bg-white p-4 shadow-sm"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-zinc-900">
+                        {d?.hostname ?? "Unknown hostname"}
+                      </span>
+                      <span
+                        className={cn(
+                          "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+                          jobStatusStyle(job.status)
                         )}
-                        {d?.record_id && (
-                          <div>Record ID: <code className="rounded bg-zinc-100 px-1 py-0.5 text-xs">{d.record_id}</code></div>
-                        )}
-                        {d?.value && (
-                          <div>IP: <code className="rounded bg-zinc-100 px-1 py-0.5 text-xs">{d.value}</code></div>
-                        )}
-                        <div>Created: {formatDateTimeOrDash(job.created_at, tz)}</div>
-                        {job.message && (
-                          <div className="mt-1 text-xs text-zinc-400">{job.message}</div>
-                        )}
-                      </div>
+                      >
+                        {job.status}
+                      </span>
                     </div>
-
-                    <div className="flex shrink-0 gap-2">
-                      <button
-                        onClick={() => handleRetry(job)}
-                        disabled={!!busy}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-                      >
-                        {busy === "retry" ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        )}
-                        Retry Deletion
-                      </button>
-                      <button
-                        onClick={() => handleDismiss(job)}
-                        disabled={!!busy}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-red-600 shadow-sm hover:bg-red-50 disabled:opacity-50"
-                      >
-                        {busy === "dismiss" ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Trash2 className="h-3.5 w-3.5" />
-                        )}
-                        Dismiss
-                      </button>
+                    <div className="mt-1 space-y-0.5 text-sm text-zinc-500">
+                      {d?.service_name && (
+                        <div>Service: <span className="text-zinc-700">{d.service_name}</span></div>
+                      )}
+                      {d?.record_id && (
+                        <div>Record ID: <code className="rounded bg-zinc-100 px-1 py-0.5 text-xs">{d.record_id}</code></div>
+                      )}
+                      {d?.value && (
+                        <div>IP: <code className="rounded bg-zinc-100 px-1 py-0.5 text-xs">{d.value}</code></div>
+                      )}
+                      <div>Created: {formatDateTimeOrDash(job.created_at, tz)}</div>
+                      {job.message && (
+                        <div className="mt-1 text-xs text-zinc-400">{job.message}</div>
+                      )}
                     </div>
                   </div>
-                </div>
-              )
-            })}
-          </div>
 
-          <Pagination
-            offset={offset}
-            limit={limit}
-            total={total}
-            page={page}
-            pageCount={pageCount}
-            onPrev={prev}
-            onNext={next}
-            onGoToPage={goToPage}
-          />
-        </>
-      )}
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      onClick={() => handleRetry(job)}
+                      disabled={!!busy}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
+                    >
+                      {busy === "retry" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="h-3.5 w-3.5" />
+                      )}
+                      Retry Deletion
+                    </button>
+                    <button
+                      onClick={() => handleDismiss(job)}
+                      disabled={!!busy}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 bg-white px-3 py-1.5 text-sm font-medium text-red-600 shadow-sm hover:bg-red-50 disabled:opacity-50"
+                    >
+                      {busy === "dismiss" ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Trash2 className="h-3.5 w-3.5" />
+                      )}
+                      Dismiss
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+
+        <PaginationBar resource={resource} />
+      </ResourceBoundary>
     </div>
   )
 }

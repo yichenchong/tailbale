@@ -9,7 +9,7 @@ from tests._cert_helpers import _real_pem_pair
 
 
 class TestIssueCert:
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_issues_and_copies_certs(self, mock_lego, tmp_path):
 
         cert_dir = tmp_path / "certs" / "test.example.com"
@@ -32,7 +32,7 @@ class TestIssueCert:
         assert (cert_dir / "current" / "privkey.pem").read_bytes() == key_pem
         mock_lego.assert_called_once()
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_raises_if_cert_files_missing(self, mock_lego, tmp_path):
 
         cert_dir = tmp_path / "certs" / "test.example.com"
@@ -43,7 +43,7 @@ class TestIssueCert:
             issue_cert("test.example.com", "a@b.com", "cf-token", cert_dir, lego_dir)
 
 class TestRenewCert:
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_renews_and_copies_certs(self, mock_lego, tmp_path):
 
         cert_dir = tmp_path / "certs" / "test.example.com"
@@ -69,7 +69,7 @@ class TestRenewCert:
         assert "renew" in call_args
         assert "--days" in call_args
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_renew_falls_back_to_issue_when_lego_state_missing(self, mock_lego, tmp_path):
         """If lego's own account+cert state is gone (e.g. .lego wiped) a renew
         can never succeed; renew_cert must issue a fresh cert via `lego run`
@@ -103,7 +103,7 @@ class TestRenewCert:
         assert "run" in call_args
         assert "renew" not in call_args
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_renew_falls_back_to_issue_when_renew_fails(self, mock_lego, tmp_path):
         """The cert files survive but `lego renew` itself fails (e.g. the ACME
         account under .lego was wiped). The file check can't catch this, so the
@@ -144,7 +144,7 @@ class TestRenewCert:
         assert any("renew" in a for a in invoked)
         assert any("run" in a for a in invoked)
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_force_renew_uses_large_days_to_bypass_lego_skip(self, mock_lego, tmp_path):
         """force=True must make `lego renew` actually renew regardless of expiry.
 
@@ -173,7 +173,7 @@ class TestRenewCert:
         # The forced value must exceed any plausible cert lifetime (LE = 90 days).
         assert int(args[days_idx]) > 365
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_forced_in_place_renew_reports_not_fresh_issued(self, mock_lego, tmp_path):
         """A FORCED renewal whose `lego renew` succeeds in place is still a
         renewal, not a fallback fresh issue: renew_cert must return
@@ -203,7 +203,7 @@ class TestRenewCert:
         assert any("renew" in a for a in invoked)
         assert not any("run" in a for a in invoked)
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_unforced_renew_uses_supplied_days(self, mock_lego, tmp_path):
         """Without force, renew honours the caller's renewal window verbatim."""
 
@@ -224,7 +224,7 @@ class TestRenewCert:
         days_idx = args.index("--days") + 1
         assert args[days_idx] == "30"
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_renew_raises_when_renew_produces_no_cert_files(self, mock_lego, tmp_path):
         """`lego renew` exiting 0 but leaving no cert files must raise, not
         silently publish a missing/partial pair. Prior lego state exists, so the
@@ -270,7 +270,7 @@ class TestRenewFallbackAfterSC2Cleanup:
     state (exactly the post-cleanup shape), renew_cert must re-issue and report
     ``fresh_issued=True`` rather than failing."""
 
-    @patch("app.certs.cert_manager._run_lego")
+    @patch("app.certs.lego_runner._run_lego")
     def test_renew_reissues_when_sc2_cleared_lego_state(self, mock_lego, tmp_path):
 
         cert_dir = tmp_path / "certs" / "test.example.com"

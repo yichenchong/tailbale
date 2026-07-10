@@ -24,113 +24,22 @@ state, not error suppression.
 
 from __future__ import annotations
 
-import contextlib as contextlib
 import logging
-import os as os
-import shutil as shutil
-import subprocess as subprocess
 from pathlib import Path
 
-from app.certs import lego_runner as _lego_runner
-from app.certs import publish as _publish
+from app.certs import lego_runner, publish
 from app.certs.inspect import cert_key_pair_matches, get_cert_expiry
-from app.certs.lego_runner import (
-    _LEGO_MUTEX,
-    LEGO_BINARY,
-    LEGO_FORCE_RENEW_DAYS,
-    LEGO_OVERALL_REQUEST_LIMIT,
-    LEGO_TIMEOUT_SECONDS,
-    _format_lego_output,
-    _kill_process_tree,
-)
-from app.fsutil import fsync_directory_strict, fsync_file
+from app.certs.lego_runner import LEGO_FORCE_RENEW_DAYS
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "LEGO_BINARY",
     "LEGO_FORCE_RENEW_DAYS",
-    "LEGO_OVERALL_REQUEST_LIMIT",
-    "LEGO_TIMEOUT_SECONDS",
-    "_LEGO_MUTEX",
-    "_atomic_copy_certs",
-    "_exec_lego",
-    "_format_lego_output",
-    "_kill_process_tree",
-    "_prune_old_generations",
-    "_run_lego",
     "cert_key_pair_matches",
     "get_cert_expiry",
     "issue_cert",
     "renew_cert",
 ]
-
-
-# Keep legacy cert_manager patch targets live while the implementation lives in
-# focused modules. Tests and callers historically patch symbols such as
-# app.certs.cert_manager._exec_lego, app.certs.cert_manager.subprocess.Popen,
-# app.certs.cert_manager.os.replace, and app.certs.cert_manager.fsync_file.
-
-
-def _exec_lego(
-    args: list[str],
-    cloudflare_token: str,
-    lego_dir: Path,
-) -> subprocess.CompletedProcess:
-    _lego_runner.logger = logger
-    _lego_runner.os = os
-    _lego_runner.subprocess = subprocess
-    _lego_runner.LEGO_BINARY = LEGO_BINARY
-    _lego_runner.LEGO_TIMEOUT_SECONDS = LEGO_TIMEOUT_SECONDS
-    _lego_runner.LEGO_OVERALL_REQUEST_LIMIT = LEGO_OVERALL_REQUEST_LIMIT
-    _lego_runner._format_lego_output = _format_lego_output
-    _lego_runner._kill_process_tree = _kill_process_tree
-    return _lego_runner._exec_lego(args, cloudflare_token, lego_dir)
-
-
-def _run_lego(
-    args: list[str],
-    cloudflare_token: str,
-    lego_dir: Path,
-) -> subprocess.CompletedProcess:
-    """Serialize every lego invocation across the whole process.
-
-    All services share one ACME account + cert store under ``lego_dir`` (the
-    ``.lego/`` tree). Since reconcile locking went per-service, two services can
-    issue/renew at once; concurrent first-issuance would have each lego register
-    its own account key and clobber the shared account file. The mutex is held
-    ONLY around the subprocess, so a fast steady-state reconcile (no lego call)
-    never waits on it - only simultaneous issuances serialize, which is required
-    for ``.lego`` safety regardless. Innermost lock: nothing acquires a
-    per-service/lifecycle lock while holding it, so the order graph stays acyclic.
-    """
-    with _LEGO_MUTEX:
-        return _exec_lego(args, cloudflare_token, lego_dir)
-
-
-def _sync_publish_patch_targets() -> None:
-    _publish.logger = logger
-    _publish.contextlib = contextlib
-    _publish.os = os
-    _publish.shutil = shutil
-    _publish.fsync_file = fsync_file
-    _publish.fsync_directory_strict = fsync_directory_strict
-    _publish.get_cert_expiry = get_cert_expiry
-    _publish.cert_key_pair_matches = cert_key_pair_matches
-
-
-def _atomic_copy_certs(
-    src_cert: Path,
-    src_key: Path,
-    dest_dir: Path,
-) -> None:
-    _sync_publish_patch_targets()
-    _publish._atomic_copy_certs(src_cert, src_key, dest_dir)
-
-
-def _prune_old_generations(dest_dir: Path, keep: str) -> None:
-    _sync_publish_patch_targets()
-    _publish._prune_old_generations(dest_dir, keep=keep)
 
 
 def issue_cert(
@@ -151,13 +60,13 @@ def issue_cert(
 
     Returns:
         cert_dir, whose ``current`` symlink resolves to the published
-        fullchain.pem and privkey.pem (see ``_atomic_copy_certs``).
+        fullchain.pem and privkey.pem (see ``publish._atomic_copy_certs``).
     """
     if lego_dir is None:
         lego_dir = cert_dir.parent / ".lego"
     lego_dir.mkdir(parents=True, exist_ok=True)
 
-    _run_lego(
+    lego_runner._run_lego(
         [
             "--domains", hostname,
             "--email", email,
@@ -180,7 +89,7 @@ def issue_cert(
         )
 
     # Atomic write to service cert dir
-    _atomic_copy_certs(lego_cert, lego_key, cert_dir)
+    publish._atomic_copy_certs(lego_cert, lego_key, cert_dir)
 
     return cert_dir
 
@@ -240,7 +149,7 @@ def renew_cert(
     renew_days = LEGO_FORCE_RENEW_DAYS if force else days
 
     try:
-        _run_lego(
+        lego_runner._run_lego(
             [
                 "--domains", hostname,
                 "--email", email,
@@ -267,6 +176,6 @@ def renew_cert(
     if not lego_cert.exists() or not lego_key.exists():
         raise RuntimeError("lego renew did not produce expected cert files")
 
-    _atomic_copy_certs(lego_cert, lego_key, cert_dir)
+    publish._atomic_copy_certs(lego_cert, lego_key, cert_dir)
 
     return cert_dir, False

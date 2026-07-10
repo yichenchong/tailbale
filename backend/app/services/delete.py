@@ -11,6 +11,7 @@ from app.database import commit_with_lock, db_write_section
 from app.edge import container_manager, network_manager
 from app.edge.docker_client import resolve_socket
 from app.events.event_emitter import emit_event
+from app.events.types import EventKind
 from app.locks import forget_reconcile_lock, lifecycle_then_reconcile
 from app.models.certificate import Certificate
 from app.models.dns_record import DnsRecord
@@ -19,7 +20,7 @@ from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.schemas.services import ServiceResponse
 from app.services.errors import ServiceNotFound
-from app.services.lifecycle import _mark_status_disabled, _teardown_hostname_resources
+from app.services.lifecycle import mark_status_disabled, teardown_hostname_resources
 from app.services.mapping import to_response
 
 
@@ -45,8 +46,8 @@ def disable_service(db: Session, service_id: str, *, cleanup_dns: bool = False) 
             # or an already-scheduled probe retry for an offline service.
             status = db.get(ServiceStatus, svc.id)
             if status:
-                _mark_status_disabled(status, "Service disabled by user")
-            emit_event(db, svc.id, "service_disabled", f"Service '{svc.name}' disabled")
+                mark_status_disabled(status, "Service disabled by user")
+            emit_event(db, svc.id, EventKind.SERVICE_DISABLED, f"Service '{svc.name}' disabled")
             commit_with_lock(db)
 
         # Best-effort: stop the edge container so it stops serving traffic
@@ -55,7 +56,7 @@ def disable_service(db: Session, service_id: str, *, cleanup_dns: bool = False) 
 
         # Optionally clean up the DNS record (spec §7.4). A disabled service
         # keeps its cert dir for a later re-enable, so only the DNS step runs.
-        _teardown_hostname_resources(
+        teardown_hostname_resources(
             db, svc, svc.hostname, cleanup_dns=cleanup_dns, remove_cert_state=False
         )
     db.refresh(svc)
@@ -109,7 +110,7 @@ def _delete_service_record_locked(db: Session, svc: Service, *, cleanup_dns: boo
     # DNS record + this hostname's on-disk cert state (served dir + SC2 lego
     # artifacts), best-effort like the rest of delete. cleanup_dns gates only
     # the DNS step; the cert-state removal always runs.
-    _teardown_hostname_resources(db, svc, svc.hostname, cleanup_dns=cleanup_dns)
+    teardown_hostname_resources(db, svc, svc.hostname, cleanup_dns=cleanup_dns)
 
     runtime = settings_store.get_runtime_paths(db)
     for subdir in [
@@ -137,7 +138,7 @@ def _delete_service_record_locked(db: Session, svc: Service, *, cleanup_dns: boo
             )
             db.add(orphan_job)
             emit_event(
-                db, svc.id, "dns_orphan_created",
+                db, svc.id, EventKind.DNS_ORPHAN_CREATED,
                 f"DNS cleanup job created for orphaned record '{surviving_dns.hostname}'",
                 level="warning",
             )
@@ -145,5 +146,5 @@ def _delete_service_record_locked(db: Session, svc: Service, *, cleanup_dns: boo
         name = svc.name
         service_id = svc.id
         db.delete(svc)
-        emit_event(db, None, "service_deleted", f"Service '{name}' ({service_id}) deleted")
+        emit_event(db, None, EventKind.SERVICE_DELETED, f"Service '{name}' ({service_id}) deleted")
         commit_with_lock(db)

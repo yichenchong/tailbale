@@ -206,8 +206,8 @@ class TestFindEdgeContainerPublic:
 class TestFindEdgeContainerForUse:
     """Connection failures must propagate, not be masked by a fallback re-search."""
 
-    @patch("app.edge.container_manager._find_edge_container")
-    @patch("app.edge.container_manager.connect")
+    @patch("app.edge.container_session._find_edge_container")
+    @patch("app.edge.container_session.connect")
     def test_socket_failure_propagates(self, mock_connect, mock_find):
 
         mock_connect.side_effect = docker.errors.DockerException("cannot connect to socket")
@@ -219,8 +219,8 @@ class TestFindEdgeContainerForUse:
         # directly instead of being swallowed and retried against the same socket.
         mock_find.assert_not_called()
 
-    @patch("app.edge.container_manager._find_edge_container")
-    @patch("app.edge.container_manager.connect")
+    @patch("app.edge.container_session._find_edge_container")
+    @patch("app.edge.container_session.connect")
     def test_caller_surfaces_socket_failure(self, mock_connect, mock_find):
 
         mock_connect.side_effect = docker.errors.DockerException("socket unreachable")
@@ -301,7 +301,7 @@ class TestCreateEdgeContainer:
         assert str(tmp_path / "tailscale" / "edge_nextcloud") in sources
 
 class TestStartEdge(_ConnectStubMixin):
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_starts_container(self, mock_find):
 
         mock_container = MagicMock()
@@ -310,7 +310,7 @@ class TestStartEdge(_ConnectStubMixin):
         start_edge("svc_123", "edge_test")
         mock_container.start.assert_called_once()
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raises_if_not_found(self, mock_find):
 
         mock_find.return_value = None
@@ -318,7 +318,7 @@ class TestStartEdge(_ConnectStubMixin):
             start_edge("svc_123", "edge_test")
 
 class TestStopEdge(_ConnectStubMixin):
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_stops_container(self, mock_find):
 
         mock_container = MagicMock()
@@ -327,7 +327,7 @@ class TestStopEdge(_ConnectStubMixin):
         stop_edge("svc_123", "edge_test")
         mock_container.stop.assert_called_once_with(timeout=10)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_noop_if_not_found(self, mock_find):
 
         mock_find.return_value = None
@@ -335,7 +335,7 @@ class TestStopEdge(_ConnectStubMixin):
         stop_edge("svc_123", "edge_test")
 
 class TestRestartEdge(_ConnectStubMixin):
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_restarts_container(self, mock_find):
 
         mock_container = MagicMock()
@@ -344,7 +344,7 @@ class TestRestartEdge(_ConnectStubMixin):
         restart_edge("svc_123", "edge_test")
         mock_container.restart.assert_called_once_with(timeout=10)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raises_if_not_found(self, mock_find):
 
         mock_find.return_value = None
@@ -352,7 +352,7 @@ class TestRestartEdge(_ConnectStubMixin):
             restart_edge("svc_123", "edge_test")
 
 class TestRemoveEdge(_ConnectStubMixin):
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_removes_container(self, mock_find):
 
         mock_container = MagicMock()
@@ -362,7 +362,7 @@ class TestRemoveEdge(_ConnectStubMixin):
         remove_edge("svc_123", "edge_test")
         mock_container.remove.assert_called_once_with(force=True)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_noop_if_not_found(self, mock_find):
 
         mock_find.return_value = None
@@ -371,7 +371,7 @@ class TestRemoveEdge(_ConnectStubMixin):
 
     @patch("app.edge.container_manager._delete_tailscale_device")
     @patch("app.secrets.read_secret")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_calls_tailscale_api_on_removal(self, mock_find, mock_read_secret, mock_delete):
 
         mock_container = MagicMock()
@@ -388,7 +388,7 @@ class TestRemoveEdge(_ConnectStubMixin):
         mock_container.remove.assert_called_once_with(force=True)
 
     @patch("app.secrets.read_secret")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_skips_api_when_no_api_key(self, mock_find, mock_read_secret):
 
         mock_container = MagicMock()
@@ -402,7 +402,7 @@ class TestRemoveEdge(_ConnectStubMixin):
         # Should still remove the container even without API key
         mock_container.remove.assert_called_once_with(force=True)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_remove_edge_ignores_missing_container_on_remove(self, mock_find):
 
         mock_container = MagicMock()
@@ -414,7 +414,7 @@ class TestRemoveEdge(_ConnectStubMixin):
 
     @patch("app.edge.container_manager._delete_tailscale_device")
     @patch("app.secrets.read_secret")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_delete_device_false_skips_device_deletion(
         self, mock_find, mock_read_secret, mock_delete
     ):
@@ -432,7 +432,7 @@ class TestRemoveEdge(_ConnectStubMixin):
         mock_delete.assert_not_called()
         mock_container.remove.assert_called_once_with(force=True)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raise_on_error_reraises_api_error(self, mock_find):
 
         mock_container = MagicMock()
@@ -443,7 +443,7 @@ class TestRemoveEdge(_ConnectStubMixin):
         with pytest.raises(docker.errors.APIError):
             remove_edge("svc_123", "edge_test", raise_on_error=True)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_default_swallows_api_error(self, mock_find):
 
         mock_container = MagicMock()
@@ -456,7 +456,7 @@ class TestRemoveEdge(_ConnectStubMixin):
         mock_container.remove.assert_called_once_with(force=True)
 
     @patch("app.edge.container_manager._delete_tailscale_device")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_skips_device_deletion_when_not_running(self, mock_find, mock_delete):
         """A non-running container can't be exec'd for its node id, so device
         deletion is skipped entirely (no exec, no API call) — but the container
@@ -499,7 +499,7 @@ class TestRecreateEdge(_ConnectStubMixin):
     @patch("app.edge.container_manager.start_edge")
     @patch("app.edge.container_manager.create_edge_container")
     @patch("app.edge.container_manager._delete_tailscale_device")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_recreate_preserves_tailscale_device(
         self, mock_find, mock_delete, mock_create, mock_start, tmp_path
     ):
@@ -524,7 +524,7 @@ class TestRecreateEdge(_ConnectStubMixin):
 
     @patch("app.edge.container_manager.start_edge")
     @patch("app.edge.container_manager.create_edge_container")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_recreate_propagates_removal_failure(
         self, mock_find, mock_create, mock_start, tmp_path
     ):
@@ -549,7 +549,7 @@ class TestRecreateEdge(_ConnectStubMixin):
         mock_start.assert_not_called()
 
 class TestGetEdgeLogs(_ConnectStubMixin):
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_returns_logs(self, mock_find):
 
         mock_container = MagicMock()
@@ -561,7 +561,7 @@ class TestGetEdgeLogs(_ConnectStubMixin):
         assert "Starting" in result
         mock_container.logs.assert_called_once_with(tail=50, timestamps=True)
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_returns_empty_if_not_found(self, mock_find):
 
         mock_find.return_value = None
@@ -684,8 +684,8 @@ class TestEdgeContainerLifecycle:
 
         fake_client = MagicMock()
         with (
-            patch("app.edge.container_manager.connect", return_value=fake_client),
-            patch("app.edge.container_manager._find_edge_container", return_value=MagicMock()),
+            patch("app.edge.container_session.connect", return_value=fake_client),
+            patch("app.edge.container_session._find_edge_container", return_value=MagicMock()),
             edge_container("svc_123", "edge_test") as (client, container),
         ):
             assert client is fake_client
@@ -696,8 +696,8 @@ class TestEdgeContainerLifecycle:
 
         fake_client = MagicMock()
         with (
-            patch("app.edge.container_manager.connect", return_value=fake_client),
-            patch("app.edge.container_manager._find_edge_container", return_value=MagicMock()),
+            patch("app.edge.container_session.connect", return_value=fake_client),
+            patch("app.edge.container_session._find_edge_container", return_value=MagicMock()),
             pytest.raises(ValueError, match="boom"),
             edge_container("svc_123", "edge_test"),
         ):
@@ -708,9 +708,9 @@ class TestEdgeContainerLifecycle:
 
         fake_client = MagicMock()
         with (
-            patch("app.edge.container_manager.connect", return_value=fake_client),
+            patch("app.edge.container_session.connect", return_value=fake_client),
             patch(
-                "app.edge.container_manager._find_edge_container",
+                "app.edge.container_session._find_edge_container",
                 side_effect=docker.errors.APIError("daemon boom"),
             ),
             pytest.raises(docker.errors.APIError, match="daemon boom"),
@@ -732,7 +732,7 @@ class TestWaitForRunning:
         assert _wait_for_running(container) is True
         container.reload.assert_called_once()
 
-    @patch("app.edge.container_manager.time.sleep")
+    @patch("app.edge.container_session.time.sleep")
     def test_returns_false_immediately_on_terminal_state(self, mock_sleep):
         """A dead/exited/removing container will never reach running, so the
         wait returns at once — no polling sleep, no blocking for the timeout."""
@@ -743,8 +743,8 @@ class TestWaitForRunning:
             assert _wait_for_running(container) is False
         mock_sleep.assert_not_called()
 
-    @patch("app.edge.container_manager.time.sleep")
-    @patch("app.edge.container_manager.time.monotonic", side_effect=[0.0, 0.0, 40.0])
+    @patch("app.edge.container_session.time.sleep")
+    @patch("app.edge.container_session.time.monotonic", side_effect=[0.0, 0.0, 40.0])
     def test_returns_false_on_timeout_when_never_running(self, mock_mono, mock_sleep):
         """A container stuck in a non-terminal, non-running state ('created'/
         'restarting' that never settles) polls until the deadline, then False."""

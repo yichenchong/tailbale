@@ -2,11 +2,11 @@
 
 Split out of ``container_manager`` (AR-R3-15): the ``caddy reload`` exec and its
 retry/backoff logic are a distinct concern from container lifecycle. The shared
-client-lifecycle primitive :func:`~app.edge.container_manager.edge_container` and
+client-lifecycle primitive :func:`~app.edge.container_session.edge_container` and
 the container-state helper
-:func:`~app.edge.container_manager._wait_for_running` are imported from
-``container_manager`` (which owns the container primitives and does not import
-this module — the dependency stays one-way and acyclic).
+:func:`~app.edge.container_session._wait_for_running` are imported from the
+``container_session`` leaf (which owns the container primitives and does not
+import this module — the dependency stays one-way and acyclic).
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import logging
 import docker
 
 from app.backoff import retry_sync
-from app.edge.container_manager import _wait_for_running, edge_container
+from app.edge.container_session import _wait_for_running, edge_container
 
 logger = logging.getLogger(__name__)
 

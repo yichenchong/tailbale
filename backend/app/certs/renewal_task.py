@@ -29,6 +29,7 @@ from app.database import (
     session_scope,
 )
 from app.events.event_emitter import emit_event
+from app.events.types import EventKind
 from app.models.certificate import Certificate
 from app.models.service import Service
 from app.secrets import CLOUDFLARE_TOKEN, read_secret
@@ -150,7 +151,7 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
         if needs_issue:
             logger.info("Issuing cert for %s", svc.hostname)
             issue_cert(svc.hostname, acme_email, cf_token, cert_dir, lego_dir)
-            event_kind = "cert_issued"
+            event_kind = EventKind.CERT_ISSUED
             event_message = f"Certificate issued for {svc.hostname}"
         else:
             logger.info("Renewing cert for %s", svc.hostname)
@@ -159,10 +160,10 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
                 days=renewal_window, force=force,
             )
             if fresh_issued:
-                event_kind = "cert_issued"
+                event_kind = EventKind.CERT_ISSUED
                 event_message = f"Certificate issued for {svc.hostname}"
             else:
-                event_kind = "cert_renewed"
+                event_kind = EventKind.CERT_RENEWED
                 event_message = f"Certificate renewed for {svc.hostname}"
 
         new_expiry = get_cert_expiry(fullchain_path)
@@ -189,7 +190,7 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
             emit_event(
                 db,
                 svc.id,
-                "cert_failed",
+                EventKind.CERT_FAILED,
                 f"Certificate operation failed for {svc.hostname}: {error_msg}",
                 level="error",
             )

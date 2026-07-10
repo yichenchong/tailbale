@@ -6,8 +6,9 @@ import stat
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.certs import cert_manager
-from app.certs.cert_manager import _atomic_copy_certs, _prune_old_generations, cert_key_pair_matches
+from app.certs import publish
+from app.certs.inspect import cert_key_pair_matches
+from app.certs.publish import _atomic_copy_certs, _prune_old_generations
 from tests._cert_helpers import _real_pem_pair, _write_cert_key_pair
 
 
@@ -60,10 +61,10 @@ class TestAtomicCopyCerts:
 
         fsynced_files = []
         fsynced_dirs = []
-        monkeypatch.setattr(cert_manager, "fsync_file", lambda path: fsynced_files.append(path.name))
-        monkeypatch.setattr(cert_manager, "fsync_directory_strict", lambda path: fsynced_dirs.append(path))
+        monkeypatch.setattr(publish, "fsync_file", lambda path: fsynced_files.append(path.name))
+        monkeypatch.setattr(publish, "fsync_directory_strict", lambda path: fsynced_dirs.append(path))
 
-        cert_manager._atomic_copy_certs(src_cert, src_key, dest_dir)
+        publish._atomic_copy_certs(src_cert, src_key, dest_dir)
 
         # Both files in the new generation are fsynced before publishing.
         assert "fullchain.pem" in fsynced_files
@@ -220,7 +221,7 @@ class TestAtomicCopyCerts:
         def boom(src, dst):
             raise OSError("crash before swap")
 
-        monkeypatch.setattr(cert_manager.os, "replace", boom)
+        monkeypatch.setattr(publish.os, "replace", boom)
 
         new_cert = tmp_path / "new_cert.pem"
         new_key = tmp_path / "new_key.pem"
@@ -246,7 +247,7 @@ class TestAtomicCopyCerts:
         def boom(src, dst):
             raise OSError("crash before swap")
 
-        monkeypatch.setattr(cert_manager.os, "replace", boom)
+        monkeypatch.setattr(publish.os, "replace", boom)
 
         with pytest.raises(OSError, match="crash before swap"):
             _atomic_copy_certs(cert, key, dest_dir)
@@ -326,14 +327,14 @@ class TestAtomicCopyCerts:
 
         # fsync_directory_strict runs twice: gen_dir (pre-swap) then dest_dir
         # (post-swap). Fail ONLY the post-swap dest-dir fsync.
-        real_fsync_dir = cert_manager.fsync_directory_strict
+        real_fsync_dir = publish.fsync_directory_strict
 
         def flaky_fsync_dir(path):
             if path == dest_dir:
                 raise OSError("EIO syncing dest dir after swap")
             return real_fsync_dir(path)
 
-        monkeypatch.setattr(cert_manager, "fsync_directory_strict", flaky_fsync_dir)
+        monkeypatch.setattr(publish, "fsync_directory_strict", flaky_fsync_dir)
 
         # The publish has committed, so the call returns normally (no raise).
         _atomic_copy_certs(src_cert, src_key, dest_dir)
@@ -369,14 +370,14 @@ class TestAtomicCopyCerts:
 
         # Fail ONLY the post-swap dest-dir fsync of the SECOND publish; the
         # gen-dir fsync (pre-swap) still succeeds so the new pair is published.
-        real_fsync_dir = cert_manager.fsync_directory_strict
+        real_fsync_dir = publish.fsync_directory_strict
 
         def flaky_fsync_dir(path):
             if path == dest_dir:
                 raise OSError("EIO syncing dest dir after swap")
             return real_fsync_dir(path)
 
-        monkeypatch.setattr(cert_manager, "fsync_directory_strict", flaky_fsync_dir)
+        monkeypatch.setattr(publish, "fsync_directory_strict", flaky_fsync_dir)
 
         new_cert = tmp_path / "new_cert.pem"
         new_key = tmp_path / "new_key.pem"
@@ -419,14 +420,14 @@ class TestAtomicCopyCerts:
         _atomic_copy_certs(cert, key, dest_dir)
         assert len([p for p in dest_dir.iterdir() if p.name.startswith("gen-")]) == 1
 
-        real_fsync_dir = cert_manager.fsync_directory_strict
+        real_fsync_dir = publish.fsync_directory_strict
 
         def fail_dest_fsync(path):
             if path == dest_dir:
                 raise OSError("EIO syncing dest dir after swap")
             return real_fsync_dir(path)
 
-        monkeypatch.setattr(cert_manager, "fsync_directory_strict", fail_dest_fsync)
+        monkeypatch.setattr(publish, "fsync_directory_strict", fail_dest_fsync)
 
         # Three consecutive post-swap durability failures. Each commits a new
         # live gen via the atomic swap but skips the prune, so the backlog of
@@ -444,7 +445,7 @@ class TestAtomicCopyCerts:
 
         # Restore durable fsync and publish once more: the WHOLE stale backlog
         # is reaped in one pass, leaving only the freshly-published live gen.
-        monkeypatch.setattr(cert_manager, "fsync_directory_strict", real_fsync_dir)
+        monkeypatch.setattr(publish, "fsync_directory_strict", real_fsync_dir)
         _atomic_copy_certs(cert, key, dest_dir)
 
         final_gens = [p.name for p in dest_dir.iterdir() if p.name.startswith("gen-")]
@@ -474,7 +475,7 @@ class TestAtomicCopyCerts:
         def boom(src, dst):
             raise OSError("crash during swap")
 
-        monkeypatch.setattr(cert_manager.os, "replace", boom)
+        monkeypatch.setattr(publish.os, "replace", boom)
 
         with pytest.raises(OSError, match="crash during swap"):
             _atomic_copy_certs(src_cert, src_key, dest_dir)

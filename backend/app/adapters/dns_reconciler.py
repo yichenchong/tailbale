@@ -35,8 +35,10 @@ from app.adapters.cloudflare_adapter import (
     ownership_comment,
     update_a_record,
 )
+from app.adapters.cloudflare_dns_records import owned_duplicates, select_owned_or_lowest
 from app.database import commit_with_lock, db_write_section, flush_with_lock
 from app.events.event_emitter import emit_event
+from app.events.types import EventKind
 from app.models.dns_record import DnsRecord
 
 if TYPE_CHECKING:
@@ -50,22 +52,6 @@ def _require_record_id(record: dict, action: str, hostname: str) -> str:
     if not record_id:
         raise RuntimeError(f"Cloudflare {action} for {hostname} did not return a DNS record id")
     return str(record_id)
-
-
-def _select_owned_record(records: list[dict], own_comment: str) -> dict | None:
-    """Pick OUR record from the A records matching a hostname.
-
-    Prefers a record provably ours (``comment == own_comment``) over the lowest-id
-    fallback. ``records`` is already id-sorted by ``list_a_records``, so the first
-    owned record (or the first record overall) is the deterministic lowest-id pick.
-    Returns ``None`` when there are no matches.
-    """
-    if not records:
-        return None
-    for record in records:
-        if record.get("comment") == own_comment:
-            return record
-    return records[0]
 
 
 def _remove_owned_duplicates(
@@ -87,12 +73,8 @@ def _remove_owned_duplicates(
     record counts as removed. Returns the ids that are no longer present.
     """
     removed: list[str] = []
-    for record in records:
+    for record in owned_duplicates(records, canonical_id=canonical_id, own_comment=own_comment):
         record_id = record.get("id")
-        if not record_id or str(record_id) == str(canonical_id):
-            continue
-        if record.get("comment") != own_comment:
-            continue  # not provably ours -> never delete
         try:
             delete_a_record(cf_token, zone_id, str(record_id), timeout=CF_CLEANUP_TIMEOUT)
             removed.append(str(record_id))
@@ -138,7 +120,7 @@ def reconcile_dns(
     # the worst case (list + create/update + best-effort duplicate deletes) toward
     # the 30s default. This mirrors cleanup_dns_record / the orphan-cleanup job.
     records = list_a_records(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
-    existing = _select_owned_record(records, own_comment)
+    existing = select_owned_or_lowest(records, own_comment)
     action = "noop"
     record_id = None
     old_ip = None
@@ -214,7 +196,7 @@ def reconcile_dns(
 
         if action == "created":
             emit_event(
-                db, service.id, "dns_created",
+                db, service.id, EventKind.DNS_CREATED,
                 f"Created DNS A record {hostname} -> {tailscale_ip}",
                 level="info",
                 details={"hostname": hostname, "ip": tailscale_ip, "record_id": record_id},
@@ -222,7 +204,7 @@ def reconcile_dns(
             logger.info("Created DNS record for %s -> %s", hostname, tailscale_ip)
         elif action == "updated":
             emit_event(
-                db, service.id, "dns_updated",
+                db, service.id, EventKind.DNS_UPDATED,
                 f"Updated DNS A record {hostname}: {old_ip} -> {tailscale_ip}",
                 level="info",
                 details={"hostname": hostname, "old_ip": old_ip, "new_ip": tailscale_ip, "record_id": record_id},
@@ -230,7 +212,7 @@ def reconcile_dns(
             logger.info("Updated DNS record for %s: %s -> %s", hostname, old_ip, tailscale_ip)
         elif action == "adopted":
             emit_event(
-                db, service.id, "dns_updated",
+                db, service.id, EventKind.DNS_UPDATED,
                 f"Adopted DNS A record {hostname} and stamped ownership marker",
                 level="info",
                 details={"hostname": hostname, "ip": tailscale_ip, "record_id": record_id},
@@ -241,7 +223,7 @@ def reconcile_dns(
 
         if removed_dups:
             emit_event(
-                db, service.id, "dns_duplicate_removed",
+                db, service.id, EventKind.DNS_DUPLICATE_REMOVED,
                 f"Removed {len(removed_dups)} duplicate DNS A record(s) for {hostname}",
                 level="warning",
                 details={
@@ -303,7 +285,7 @@ def cleanup_dns_record(
             )
             with db_write_section(db):
                 emit_event(
-                    db, service.id, "dns_cleanup_failed",
+                    db, service.id, EventKind.DNS_CLEANUP_FAILED,
                     f"Failed to remove DNS record for {service.hostname} from Cloudflare: {error_msg}",
                     level="warning",
                     details={"hostname": service.hostname, "record_id": record_id, "error": error_msg},
@@ -330,7 +312,7 @@ def cleanup_dns_record(
                     else f"Removed stale local DNS record for {service.hostname}; Cloudflare record was already absent"
                 )
                 emit_event(
-                    db, service.id, "dns_removed", message,
+                    db, service.id, EventKind.DNS_REMOVED, message,
                     level="info",
                     details={"hostname": service.hostname, "record_id": record_id},
                 )

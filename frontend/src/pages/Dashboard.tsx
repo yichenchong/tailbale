@@ -1,14 +1,14 @@
 import { useCallback } from "react"
 import { Link } from "react-router-dom"
-import { api } from "@/lib/api"
+import { api, type DashboardSummary } from "@/lib/api"
 import { useTimezone, formatDateTime } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
 import { certStatus } from "@/lib/certStatus"
 import { eventLevelStyle } from "@/lib/statusStyles"
-import { useResource } from "@/lib/useResource"
+import { usePolledResource } from "@/lib/usePolledResource"
 import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
-import { usePolledFreshness } from "@/lib/usePolledFreshness"
 import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
 import {
   Activity,
   CheckCircle2,
@@ -22,25 +22,50 @@ const POLL_INTERVAL = 30_000
 
 export default function Dashboard() {
   const tz = useTimezone()
-  const { lastRefresh, markFresh } = usePolledFreshness()
 
   const fetcher = useCallback(() => api.dashboard.summary(), [])
-  const { data, loading, error, refresh } = useResource(fetcher, {
-    pollMs: POLL_INTERVAL,
+  const { data, loading, error, refresh, lastSuccessAt } = usePolledResource(fetcher, {
+    intervalMs: POLL_INTERVAL,
     mapError: (e) => (errorMessage(e, "Failed to load")),
-    onData: markFresh,
   })
 
-  if (loading && !data) {
-    return <PageLoading>Loading dashboard...</PageLoading>
-  }
+  return (
+    <ResourceBoundary
+      loading={loading && !data}
+      errored={!!error && !data}
+      empty={!data}
+      loadingSlot={<PageLoading>Loading dashboard...</PageLoading>}
+      errorSlot={<PageError className="rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>}
+    >
+      {data && (
+        <DashboardOverview
+          data={data}
+          tz={tz}
+          loading={loading}
+          error={error}
+          lastSuccessAt={lastSuccessAt}
+          onRefresh={() => { void refresh() }}
+        />
+      )}
+    </ResourceBoundary>
+  )
+}
 
-  if (error && !data) {
-    return <PageError className="rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>
-  }
-
-  if (!data) return null
-
+function DashboardOverview({
+  data,
+  tz,
+  loading,
+  error,
+  lastSuccessAt,
+  onRefresh,
+}: {
+  data: DashboardSummary
+  tz: string
+  loading: boolean
+  error: string | null
+  lastSuccessAt: Date | null
+  onRefresh: () => void
+}) {
   const s = data.services
 
   return (
@@ -51,14 +76,14 @@ export default function Dashboard() {
           <p className="mt-1 text-zinc-500">Overview of your exposed services.</p>
         </div>
         <PolledRefreshControl
-          lastRefresh={lastRefresh}
+          lastRefresh={lastSuccessAt}
           timezone={tz}
           loading={loading}
-          onRefresh={() => { void refresh() }}
+          onRefresh={onRefresh}
         />
       </div>
 
-      <StaleDataBanner error={error} lastRefresh={lastRefresh} timezone={tz} />
+      <StaleDataBanner error={error} lastRefresh={lastSuccessAt} timezone={tz} />
 
       {/* Summary cards */}
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">

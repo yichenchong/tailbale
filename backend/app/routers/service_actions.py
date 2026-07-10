@@ -22,8 +22,7 @@ from app.database import get_db
 from app.events.querying import query_events
 from app.events.serialization import event_to_dict
 from app.models.service import Service
-from app.reconciler import reconcile_loop
-from app.services import resolve_socket
+from app.services import diagnostics, resolve_socket
 from app.services.errors import DockerUnavailable, ServiceError, ServiceNotFound
 
 logger = logging.getLogger(__name__)
@@ -156,10 +155,9 @@ async def reconcile_service_endpoint(service_id: str, db: Session = Depends(get_
     """Trigger manual reconciliation for a single service."""
 
     _get_service_or_404(service_id, db)
-    socket = resolve_socket(db)
 
     result = await _run_edge_job(
-        functools.partial(reconcile_loop.spawn_reconcile, service_id, socket),
+        functools.partial(diagnostics.trigger_manual_reconcile, db, service_id),
         failure_detail="Failed to reconcile service",
     )
     return {"success": True, "phase": result["phase"], "error": result.get("error")}

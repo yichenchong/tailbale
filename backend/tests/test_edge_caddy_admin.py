@@ -10,7 +10,7 @@ from tests._edge_helpers import _ConnectStubMixin
 
 
 class TestReloadCaddy(_ConnectStubMixin):
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_reloads_caddy(self, mock_find):
 
         mock_container = MagicMock()
@@ -25,7 +25,7 @@ class TestReloadCaddy(_ConnectStubMixin):
             "caddy reload --config /etc/caddy/Caddyfile --force"
         )
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raises_on_failure(self, mock_find):
 
         mock_container = MagicMock()
@@ -36,14 +36,14 @@ class TestReloadCaddy(_ConnectStubMixin):
         with pytest.raises(RuntimeError, match="Caddy reload failed"):
             reload_caddy("svc_123", "edge_test")
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raises_if_not_found(self, mock_find):
 
         mock_find.return_value = None
         with pytest.raises(RuntimeError, match="Edge container not found"):
             reload_caddy("svc_123", "edge_test")
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raises_when_container_not_running(self, mock_find):
         """A non-running edge container can't be exec'd, so reload refuses early
         with a clear error instead of attempting (and failing) the exec."""
@@ -59,7 +59,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         mock_container.exec_run.assert_not_called()
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_retries_when_container_is_restarting(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -80,7 +80,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         mock_container.reload.assert_called()
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_raises_when_container_never_stabilizes(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -95,7 +95,7 @@ class TestReloadCaddy(_ConnectStubMixin):
             reload_caddy("svc_123", "edge_test", max_retries=2, retry_delay=0)
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_real_reload_failure_after_transient_conflict_is_not_masked(
         self, mock_find, mock_sleep
     ):
@@ -122,7 +122,7 @@ class TestReloadCaddy(_ConnectStubMixin):
         assert "never reached a stable running container" not in message
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_retries_when_admin_api_connection_refused(self, mock_find, mock_sleep):
         """Caddy's admin API (:2019) may not be up immediately after the
         container starts: the reload exec returns non-zero with "connection

@@ -9,7 +9,7 @@ from tests._edge_helpers import _ConnectStubMixin
 
 class TestDetectTailscaleIp(_ConnectStubMixin):
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_detects_ip_via_tailscale_ip(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -21,7 +21,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         assert result == "100.64.0.1"
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_detects_ip_via_status_json(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -42,7 +42,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         assert result == "100.64.0.2"
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_retries_on_failure(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -58,7 +58,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         assert result == "100.64.0.3"
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_returns_none_after_max_retries(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -69,7 +69,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         result = detect_tailscale_ip("svc_123", "edge_test", max_retries=2, retry_delay=0)
         assert result is None
 
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_returns_none_if_container_not_found(self, mock_find):
 
         mock_find.return_value = None
@@ -77,7 +77,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         assert result is None
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_ignores_non_tailscale_ips(self, mock_find, mock_sleep):
 
         mock_container = MagicMock()
@@ -93,7 +93,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
         assert result == "100.64.0.5"
 
     @patch("app.backoff.time.sleep")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_returns_none_when_container_never_running(self, mock_find, mock_sleep):
         """The container exists but never reaches 'running' (e.g. stuck exited):
         the pre-loop guard bails with None and never exec's tailscale inside a
@@ -110,7 +110,7 @@ class TestDetectTailscaleIp(_ConnectStubMixin):
 
     @patch("app.backoff.time.sleep")
     @patch("app.edge.tailscale_ops._wait_for_running")
-    @patch("app.edge.container_manager._find_edge_container")
+    @patch("app.edge.container_session._find_edge_container")
     def test_skips_exec_when_container_leaves_running_state(
         self, mock_find, mock_wait, mock_sleep
     ):
