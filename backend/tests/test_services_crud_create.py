@@ -5,6 +5,7 @@ Covers create/read behavior after the app.services facade split from test_servic
 import contextlib
 import hashlib
 import logging
+import threading
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -13,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import event as sa_event
 
+from app.locks import _SERVICE_LIFECYCLE_MUTEX
 from app.models.certificate import Certificate
 from app.models.event import Event
 from app.models.service import Service
@@ -678,3 +680,43 @@ class TestUpstreamPortValidation:
         with pytest.raises(HTTPException) as exc_info:
             _validate_upstream_port(container, 3000)
         assert exc_info.value.status_code == 422
+
+
+class TestCreateValidationHoistedOutOfLock:
+    """The upstream container/port validation does a Docker round-trip. It must
+    run BEFORE create_service takes ``_SERVICE_LIFECYCLE_MUTEX``, so a
+    slow/unreachable Docker can't stall every other lifecycle op. The router
+    validates ahead of the service-layer call that acquires the mutex; this is
+    the create-side mirror of TestUpdatePortValidationHoistedOutOfLock (a
+    regression that folded validation into the locked service layer would
+    reintroduce the stall)."""
+
+    def test_validation_runs_before_lifecycle_lock(self, client):
+        observed: dict = {}
+
+        def fake_validate(db, container_id, port):
+            # Probe the lifecycle mutex from a DIFFERENT thread: an RLock is
+            # reentrant for the holder, so only a separate thread reveals whether
+            # the request handler is currently holding it. If validation ran under
+            # the mutex this non-blocking acquire would fail.
+            result: dict = {}
+
+            def probe():
+                acquired = _SERVICE_LIFECYCLE_MUTEX.acquire(blocking=False)
+                result["acquired"] = acquired
+                if acquired:
+                    _SERVICE_LIFECYCLE_MUTEX.release()
+
+            t = threading.Thread(target=probe)
+            t.start()
+            t.join()
+            observed.update(result)
+
+        with patch("app.routers.services._validate_upstream", side_effect=fake_validate):
+            resp = _create_service(client, name="App", hostname="app.example.com")
+
+        assert resp.status_code == 201
+        assert observed.get("acquired") is True, (
+            "lifecycle mutex was held during upstream validation on create; "
+            "validation must be hoisted out of the lock"
+        )

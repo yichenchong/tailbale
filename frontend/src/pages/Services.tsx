@@ -24,7 +24,10 @@ export default function Services() {
   const services = data?.services ?? []
 
   const runAction = async (action: () => Promise<unknown>) => {
-    menu.close()
+    // Return focus to the row's trigger (WAI-ARIA menu-button pattern / WCAG
+    // 2.4.3), matching the Escape path — activating an item must not strand
+    // keyboard focus on <body> once the menuitem unmounts.
+    menu.close(true)
     try {
       await action()
       void refresh()
@@ -34,7 +37,7 @@ export default function Services() {
   }
 
   const handleDelete = async (svc: ServiceItem) => {
-    menu.close()
+    menu.close(true)
     if (!window.confirm(`Delete service "${svc.name}"? This also removes its DNS record and cannot be undone.`)) return
     try {
       // Match the detail page's default: clean up the Cloudflare DNS record so a

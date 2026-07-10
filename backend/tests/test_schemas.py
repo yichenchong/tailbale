@@ -283,6 +283,44 @@ class TestGeneralSettingsIntValidation:
         assert GeneralSettingsUpdate(event_retention_days=10**7).event_retention_days == 10**7
 
 
+class TestAcmeEmailValidation:
+    @pytest.mark.parametrize(
+        "email",
+        ["admin@example.com", "a.b+c@sub.example.co.uk", "User@Example.COM"],
+    )
+    def test_valid_emails_accepted_unchanged(self, email):
+        # Lenient shape check accepts real addresses and, unlike base_domain,
+        # does NOT lowercase — the value is returned verbatim.
+        assert GeneralSettingsUpdate(acme_email=email).acme_email == email
+
+    def test_surrounding_whitespace_stripped_then_accepted(self):
+        # The shared before-validator strips, so a padded-but-valid address
+        # normalizes cleanly rather than being rejected for the leading/trailing
+        # space (interior whitespace still fails — see below).
+        assert (
+            GeneralSettingsUpdate(acme_email="  admin@example.com  ").acme_email
+            == "admin@example.com"
+        )
+
+    @pytest.mark.parametrize(
+        "email",
+        [
+            "notanemail",          # no '@'
+            "user@nodomaindot",    # domain has no dot
+            "a@b@c.com",           # two '@'
+            "user @example.com",   # interior whitespace (strip only trims edges)
+            "@example.com",        # empty local part
+            "user@example.",       # empty final label
+        ],
+    )
+    def test_malformed_emails_rejected(self, email):
+        with pytest.raises(ValidationError):
+            GeneralSettingsUpdate(acme_email=email)
+
+    def test_none_omitted_stays_none(self):
+        assert GeneralSettingsUpdate().acme_email is None
+
+
 # ---------------------------------------------------------------------------
 # Response models must never leak secrets
 # ---------------------------------------------------------------------------

@@ -166,11 +166,12 @@ export function useSetupWizard(onSetupComplete?: () => void) {
     if (completedSteps.has(step)) {
       // A resumed setup loads only progress flags (not the secret/value fields),
       // so a completed step normally has empty inputs -> "keep existing" -> allow.
-      // Step 3 (ACME email) is the one completed step with a client-side FORMAT
-      // validator, so if the user actively re-edits it to a non-empty malformed
-      // value we still block Next rather than fire an obviously-doomed PUT (keeps
-      // the no-doomed-submit invariant on re-edit). Other steps have no client
-      // format check, so their backend-only rules surface gracefully via save().
+      // Steps 1 (base domain) and 3 (ACME email) are the completed steps with a
+      // client-side FORMAT validator, so if the user actively re-edits either to
+      // a non-empty malformed value we still block Next rather than fire an
+      // obviously-doomed PUT (keeps the no-doomed-submit invariant on re-edit).
+      // Other steps are presence-only, so their backend rules surface via save().
+      if (step === 1) return baseDomain.trim().length === 0 || isBaseDomain(baseDomain)
       if (step === 3) return acmeEmail.trim().length === 0 || isEmailLike(acmeEmail)
       return true
     }

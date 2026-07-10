@@ -126,7 +126,7 @@ export function isPresentPassword(value: string): boolean {
 /**
  * Upstream port: a whole number in the inclusive TCP range 1..65535. Mirrors the
  * backend `Field(..., ge=1, le=65535)` constraint on `upstream_port`
- * (backend/app/schemas/services.py:63 `ServiceCreate`, :98 `ServiceUpdate`),
+ * (`ServiceCreate`/`ServiceUpdate` in backend/app/schemas/services.py),
  * typed `int` server-side. Accepts a `string` (from an `<input>`/`<select>`) or a
  * number; `Number("")`/`Number("abc")` collapse to 0/NaN and fail the range, and
  * the `isInteger` check rejects a fractional `<input type=number>` value that the
@@ -141,8 +141,8 @@ export function isUpstreamPort(value: string | number): boolean {
  * Service name: non-blank and at most 128 chars after trimming. Mirrors the
  * backend `Field(..., min_length=1, max_length=128)` on `name` paired with the
  * `strip_name` (`mode="before"`) validator that trims before the length checks
- * (backend/app/schemas/services.py:59/71-75 `ServiceCreate`, :96/106-110
- * `ServiceUpdate`). The leading `.trim()` matches that server-side strip so a
+ * (`ServiceCreate`/`ServiceUpdate` in backend/app/schemas/services.py). The
+ * leading `.trim()` matches that server-side strip so a
  * whitespace-only name fails `min_length` on both sides, and a value over 128
  * chars gives instant feedback rather than a server 422 after submit.
  *

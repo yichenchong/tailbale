@@ -8,6 +8,7 @@ from sqlalchemy import event as sa_event
 from sqlalchemy.exc import IntegrityError
 
 from app.database import _set_sqlite_pragma, engine, run_migrations
+from app.migrations import _INDEX_MIGRATIONS
 from app.models import (
     Certificate,
     DnsRecord,
@@ -694,6 +695,41 @@ class TestDashboardHotPathIndexBackfill:
         run_migrations(eng)
         assert "expires_at" in self._indexed_columns(eng, "certificates")
         assert "phase" in self._indexed_columns(eng, "service_status")
+
+
+# ---------------------------------------------------------------------------
+# MS: model<->migration index parity. Every NON-unique model-declared index
+# must have a matching _INDEX_MIGRATIONS backfill entry, or upgraded installs
+# silently miss it (create_all only indexes fresh DBs). Every other index test
+# pins a hardcoded column, so a newly added index=True with a forgotten
+# migration entry would pass all of them.
+# ---------------------------------------------------------------------------
+
+
+class TestIndexMigrationParity:
+    """Guard the general model<->migration index invariant, not a fixed column.
+
+    Unique indexes are excluded: unique=True creates the constraint (and its
+    backing index) at table-creation time, so legacy DBs already have it and it
+    is intentionally absent from _INDEX_MIGRATIONS.
+    """
+
+    _MODELS = (Certificate, DnsRecord, Event, Job, Service, ServiceStatus, Setting, User)
+
+    def test_every_nonunique_model_index_has_a_migration_backfill(self):
+        migration_pairs = {(table, column) for table, _name, column in _INDEX_MIGRATIONS}
+        missing = []
+        for model in self._MODELS:
+            table = model.__tablename__
+            for index in model.__table__.indexes:
+                if index.unique:
+                    continue
+                for col in index.columns:
+                    if (table, col.name) not in migration_pairs:
+                        missing.append(f"{table}.{col.name}")
+        assert not missing, (
+            f"model-declared indexes with no _INDEX_MIGRATIONS backfill entry: {missing}"
+        )
 
 
 # ---------------------------------------------------------------------------

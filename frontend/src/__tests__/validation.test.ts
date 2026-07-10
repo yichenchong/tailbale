@@ -69,7 +69,7 @@ describe("hostnamePrefix (DNS-label prefill, mirrors slugify charset handling)",
   })
 })
 
-describe("isPositiveInt (mirrors Field(ge=1), backend/app/schemas/settings.py:18-19)", () => {
+describe("isPositiveInt (mirrors Field(ge=1), backend/app/schemas/settings.py)", () => {
   // reconcile_interval_seconds / cert_renewal_window_days: int, ge=1. A
   // blank/zero/negative/fractional value 422s server-side.
   it("accepts whole numbers >= 1", () => {
@@ -111,7 +111,7 @@ describe("isNonBlank (mirrors Field(min_length=1)+.strip(), backend/app/schemas/
   })
 })
 
-describe("isEmailLike (mirrors validate_acme_email, backend/app/schemas/settings.py:40-48)", () => {
+describe("isEmailLike (mirrors validate_acme_email, backend/app/schemas/settings.py)", () => {
   // re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", value) after strip_strings trims.
   it("accepts a plausible address shape", () => {
     expect(isEmailLike("admin@example.com")).toBe(true)
@@ -140,7 +140,7 @@ describe("isEmailLike (mirrors validate_acme_email, backend/app/schemas/settings
   })
 })
 
-describe("isUpstreamPort (mirrors Field(ge=1, le=65535), backend/app/schemas/services.py:63/98)", () => {
+describe("isUpstreamPort (mirrors Field(ge=1, le=65535), backend/app/schemas/services.py)", () => {
   // upstream_port: int, 1..65535 inclusive. A blank/zero/out-of-range/fractional
   // value 422s server-side; the wizard's <input>/<select> feeds a string.
   it("accepts whole ports across the inclusive 1..65535 range", () => {
@@ -166,7 +166,7 @@ describe("isUpstreamPort (mirrors Field(ge=1, le=65535), backend/app/schemas/ser
   })
 })
 
-describe("isServiceName (mirrors Field(min_length=1, max_length=128)+strip, backend/app/schemas/services.py:59/71-75)", () => {
+describe("isServiceName (mirrors Field(min_length=1, max_length=128)+strip, backend/app/schemas/services.py)", () => {
   // name: trimmed server-side (strip_name), then 1..128 chars. Whitespace-only
   // fails min_length; >128 fails max_length.
   it("accepts a non-blank name within 128 chars (after trimming)", () => {
@@ -199,7 +199,7 @@ describe("isServiceName (mirrors Field(min_length=1, max_length=128)+strip, back
   })
 })
 
-describe("isBaseDomain (mirrors normalize_base_domain, backend/app/schemas/settings.py:35-53)", () => {
+describe("isBaseDomain (mirrors normalize_base_domain, backend/app/schemas/settings.py)", () => {
   // Backend lowercases first, then re.fullmatch the same label regex, then
   // rejects total length > 253 and any label length > 63. The client lowercases
   // (accepting uppercase input the server normalizes) and enforces <= 253 / <= 63.

@@ -307,6 +307,12 @@ class TestReconcileDns:
         assert row.record_id == "ext"
         events = db_session.query(Event).filter(Event.kind == "dns_updated").all()
         assert len(events) == 1
+        # Parity with the dns_created / dns_duplicate_removed guards: the adopt
+        # branch's audit event must land the severity in `level` and the human
+        # string in `message` (regression guard for an arg-order swap).
+        assert events[0].level == "info"
+        assert events[0].message == "Adopted DNS A record testapp.example.com and stamped ownership marker"
+        assert events[0].details["record_id"] == "ext"
 
     @patch("app.adapters.dns_reconciler.delete_a_record")
     @patch("app.adapters.dns_reconciler.update_a_record")

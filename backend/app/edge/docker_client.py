@@ -4,9 +4,10 @@ Every Docker client in the app is built here and the Docker-socket resolution
 policy lives here too, so the whole app talks to exactly one daemon-selection
 rule:
 
-* ``resolve_socket`` -> the configured ``docker_socket_path``, or ``None`` when
-  it is unset/blank so the caller falls back to ``docker.from_env()`` (which
-  honors ``DOCKER_HOST``).
+* ``resolve_socket`` -> the configured ``docker_socket_path``. An unconfigured
+  key resolves to its default (``unix:///var/run/docker.sock``); only an
+  explicitly blank/whitespace value yields ``None``, so the caller falls back
+  to ``docker.from_env()`` (which honors ``DOCKER_HOST``).
 * ``connect`` / ``docker_client`` build a client from that resolved value.
 """
 
@@ -30,9 +31,11 @@ logger = logging.getLogger(__name__)
 def resolve_socket(db: Session) -> str | None:
     """Resolve the Docker socket path from DB settings.
 
-    Returns the configured path, or ``None`` when it is unset/blank so callers
-    fall back to ``docker.from_env()`` (honoring ``DOCKER_HOST``). This is the
-    single socket-resolution policy for the whole app.
+    Returns the configured path. An unconfigured key resolves to its default
+    (``unix:///var/run/docker.sock``); only an explicitly blank/whitespace value
+    yields ``None``, so callers fall back to ``docker.from_env()`` (honoring
+    ``DOCKER_HOST``). This is the single socket-resolution policy for the whole
+    app.
     """
     return get_setting(db, "docker_socket_path").strip() or None
 

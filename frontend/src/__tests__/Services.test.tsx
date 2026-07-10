@@ -666,4 +666,33 @@ describe("Services page a11y contract (FPA)", () => {
     expect(screen.queryByRole("menu")).not.toBeInTheDocument()
     expect(btn).toHaveAttribute("aria-expanded", "false")
   })
+
+  it("restores focus to the row trigger after activating a menu action", async () => {
+    // WAI-ARIA menu-button pattern / WCAG 2.4.3: activating a menu item closes
+    // the menu AND returns focus to the trigger. Without it, the activated
+    // menuitem unmounts and focus falls to <body>, stranding keyboard users at
+    // the top of the document instead of back on the row's actions button.
+    const fetchMock = vi.fn((_url: string, init?: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(init?.method === "POST" ? { success: true } : mockServiceData),
+      }))
+    vi.stubGlobal("fetch", fetchMock)
+    // Test loading-boundary: stub fetch before importing the page/API client.
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+    const trigger = screen.getByLabelText("Actions")
+    fireEvent.click(trigger)
+    const reload = screen.getByRole("menuitem", { name: "Reload Caddy" })
+
+    await act(async () => {
+      fireEvent.click(reload)
+    })
+
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+    expect(document.activeElement).toBe(trigger)
+  })
 })

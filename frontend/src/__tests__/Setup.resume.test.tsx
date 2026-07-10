@@ -134,6 +134,37 @@ describe("Setup wizard - resume", () => {
     expect(nextButton()).not.toBeDisabled()
   })
 
+  it("blocks Next on a completed Domain step when the base domain is re-edited to a malformed value (FB1)", async () => {
+    vi.stubGlobal("fetch", mockFetchWithProgress({
+      ...FRESH_PROGRESS,
+      user_exists: true,
+      base_domain_set: true,
+    }))
+    await renderSetup()
+    // Resumes at the first incomplete step (Cloudflare, step 3).
+    await waitFor(() => {
+      expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
+    })
+
+    // Back to the already-completed Domain step (step 2).
+    fireEvent.click(screen.getByText("Back").closest("button")!)
+    expect(screen.getByText("Step 2 of 6: Domain")).toBeInTheDocument()
+
+    const nextButton = () => screen.getByText("Next").closest("button")
+    const domainInput = screen.getByPlaceholderText("mydomain.com")
+
+    // Empty input on a completed step keeps the existing value -> Next enabled.
+    expect(nextButton()).not.toBeDisabled()
+
+    // Actively re-editing to a malformed value must block Next (no doomed PUT).
+    fireEvent.change(domainInput, { target: { value: "not a domain!!" } })
+    expect(nextButton()).toBeDisabled()
+
+    // A valid value re-enables Next.
+    fireEvent.change(domainInput, { target: { value: "new-domain.io" } })
+    expect(nextButton()).not.toBeDisabled()
+  })
+
   it("does not overwrite completed blank steps when clicking Next", async () => {
     const fetchMock = mockFetchWithProgress({
       ...FRESH_PROGRESS,

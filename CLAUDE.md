@@ -55,7 +55,7 @@ HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build 
 | `auth.py` | JWT (HS256 cookie) + two-layer password hashing (SHA-256 + bcrypt) |
 | `models/` | 8 ORM models: Service, ServiceStatus, Certificate, DnsRecord, Event, Job, Setting, User |
 | `routers/` | 11 REST routers: auth, settings, developer, connection_tests, discovery, services, service_actions, events, dashboard, profiles, jobs |
-| `services/` | Transport-agnostic service lifecycle layer (AR1 split of the former `service_ops` god-module) — `crud` (create/update/disable/delete + response mapping), `edge_ops`, `cert_ops`, and domain `errors`; routers delegate here and the central handler in `main.py` maps the raised domain exceptions to HTTP |
+| `services/` | Transport-agnostic service lifecycle layer (AR1 split of the former `service_ops` god-module) — `create`/`update`/`delete` (with shared `lifecycle` helpers and response `mapping`), `edge_ops`, `cert_ops`, and domain `errors`; routers delegate here and the central handler in `main.py` maps the raised domain exceptions to HTTP |
 | `reconciler/` | **Core engine** — 14-step idempotent per-service reconciliation (per-phase step helpers in `reconciler/steps.py`, wired together by `reconciler.py`); full reconcile hourly + a lightweight 60s health sweep that escalates to a full reconcile on drift |
 | `edge/` | Edge container management (Caddy + Tailscale lifecycle) |
 | `certs/` | Certificate issuance and renewal (lego ACME) |
@@ -76,7 +76,7 @@ HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build 
 
 ### Core Data Flow
 
-1. **Reconcile loop** (hourly by default, `reconcile_interval_seconds`): For each enabled service, runs the 14 idempotent steps — ensures Docker network, creates/starts the edge container, writes Caddyfile, issues/renews cert, reconciles DNS record, detects Tailscale IP, reloads Caddy, runs health checks, updates `ServiceStatus`. A separate lightweight **health sweep** (every 60s, `health_check_interval_seconds`) re-runs the health checks and escalates a drifting service to a full reconcile.
+1. **Reconcile loop** (hourly by default, `reconcile_interval_seconds`): For each enabled service, runs the 14 idempotent steps — ensures Docker network, issues/renews cert, writes Caddyfile, creates/starts the edge container, detects Tailscale IP, reconciles DNS record, reloads Caddy, runs health checks, updates `ServiceStatus`. A separate lightweight **health sweep** (every 60s, `health_check_interval_seconds`) re-runs the health checks and escalates a drifting service to a full reconcile.
 
 2. **Health checks** (12 subchecks): Upstream container present & running, edge container state, Tailscale ready/IP present, cert present & not expiring, DNS record matches IP, Caddy config exists, HTTPS probe success. `aggregate_status` returns one of `healthy` / `warning` / `error`. (The reconciler separately sets `pending` / `disabled` / `failed` on the service status outside the health aggregation.)
 

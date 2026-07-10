@@ -814,6 +814,19 @@ class TestVerifyZone:
         assert verify_zone("cf-token", "z1") == "unknown"
 
     @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_null_result_falls_back_to_unknown(self, mock_get):
+        # A Cloudflare success carrying a present-but-null ``result`` must not crash
+        # (``data.get("result") or {}`` coerces None to {}), so verify_zone returns
+        # the stable "unknown" fallback instead of an AttributeError -- parity with
+        # the create/update null-result guards for the third ``result or {}`` site.
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"success": True, "result": None, "errors": []}
+        mock_get.return_value = resp
+
+        assert verify_zone("cf-token", "z1") == "unknown"
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
     def test_issues_get_to_zone_path(self, mock_get):
         mock_get.return_value = _cf_response(result={"name": "example.com"})
 

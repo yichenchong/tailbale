@@ -271,6 +271,24 @@ class TestLogin:
         assert "samesite=lax" in set_cookie
         assert "path=/api" in set_cookie
 
+    def test_login_cookie_max_age_matches_jwt_expiry(self, auth_client):
+        """The cookie's Max-Age must equal the JWT lifetime in SECONDS
+        (``jwt_expiry_hours * 3600``). A regression dropping the ``* 3600``
+        conversion would expire the cookie in ``jwt_expiry_hours`` *seconds*
+        (24s by default), silently forcing a re-login on the minute while the
+        JWT itself stays valid for hours. None of the other cookie tests catch
+        this: the auth-flow tests set the cookie manually via set_auth_cookie,
+        bypassing the server-issued Max-Age entirely."""
+        _setup_user(auth_client)
+        auth_client.cookies.clear()
+        resp = auth_client.post(
+            "/api/auth/login",
+            json={"username": "admin", "password": "securepassword123"},
+        )
+        assert resp.status_code == 200
+        set_cookie = "; ".join(resp.headers.get_list("set-cookie")).lower()
+        assert f"max-age={settings.jwt_expiry_hours * 3600}" in set_cookie
+
 
 class TestLogout:
     def test_logout_clears_cookie(self, auth_client):

@@ -537,4 +537,52 @@ describe("OrphanDns page", () => {
     expect(jumpCall).toBeDefined()
     expect(String(jumpCall![0])).toContain("kind=dns_orphan_cleanup")
   })
+
+  it("disables only the acting job's buttons while its retry is in flight", async () => {
+    // Double-submit guard on a destructive DNS cleanup: the busy state is
+    // per-job, so the acting row's Retry+Dismiss disable (no duplicate POST)
+    // while a sibling job stays fully actionable.
+    const post = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+      }
+      if (opts?.method === "POST") return post.promise
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockJobs) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { default: OrphanDns } = await import("@/pages/OrphanDns")
+    renderRoute(<OrphanDns />)
+    await waitFor(() => {
+      expect(screen.getByText("nextcloud.example.com")).toBeInTheDocument()
+    })
+
+    const retryButtons = screen.getAllByText("Retry Deletion").map((el) => el.closest("button")!)
+    const dismissButtons = screen.getAllByText("Dismiss").map((el) => el.closest("button")!)
+
+    await act(async () => {
+      fireEvent.click(retryButtons[0])
+      await Promise.resolve()
+    })
+
+    // The acting job's buttons are disabled; the sibling job is untouched.
+    expect(retryButtons[0]).toBeDisabled()
+    expect(dismissButtons[0]).toBeDisabled()
+    expect(retryButtons[1]).not.toBeDisabled()
+    expect(dismissButtons[1]).not.toBeDisabled()
+    // A second click while in flight must not fire another POST.
+    fireEvent.click(retryButtons[0])
+    expect(
+      fetchMock.mock.calls.filter((c) => (c[1] as RequestInit | undefined)?.method === "POST"),
+    ).toHaveLength(1)
+
+    await act(async () => {
+      post.resolve({ ok: true, json: () => Promise.resolve({ success: true, message: "queued" }) })
+      await post.promise
+      await Promise.resolve()
+    })
+    // Once settled, the guard releases and the row is actionable again.
+    await waitFor(() => expect(retryButtons[0]).not.toBeDisabled())
+  })
 })

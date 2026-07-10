@@ -53,8 +53,8 @@ Open the UI in a browser. You should be redirected to `/setup`.
 - [ ] Enter your Tailscale API key
 - [ ] Click Next — runs auth-key format validation
 - [ ] **Pass**: green banner ("Auth key format looks valid")
-- [ ] **Fail**: red banner if the auth key doesn't start with `tskey-auth-` or
-      `tskey-reusable-`, or if the API key doesn't start with `tskey-api-`
+- [ ] **Fail**: red banner if the auth key doesn't start with `tskey-auth-`,
+      or if the API key doesn't start with `tskey-api-`
 
 ### 1f. Docker (Step 5)
 
