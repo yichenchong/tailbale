@@ -11,6 +11,7 @@ from app.events.types import EventKind
 from app.health import health_checker
 from app.health.status_policy import phase_level
 from app.models.service import Service
+from app.reconciler import probe_retry
 from app.reconciler.status import _persist_status, _update_phase
 
 
@@ -58,4 +59,9 @@ def run_and_persist_health(
         },
         **clear_retry,
     )
+    if phase == "healthy":
+        # Retire any lingering post-create probe-retry thread promptly: it would
+        # otherwise sleep out its current backoff before noticing the service
+        # already recovered via this full reconcile.
+        probe_retry.cancel_probe_retry(service_id)
     return phase, checks

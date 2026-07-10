@@ -271,13 +271,19 @@ class TestDetectAndPersistIpStep:
         kinds = {e.kind for e in db_session.query(Event).filter(Event.service_id == svc.id)}
         assert "tailscale_ip_acquired" in kinds
 
-    def test_unchanged_ip_persists_without_event(self, db_session, tmp_data_dir):
+    def test_unchanged_ip_skips_persist_and_emits_no_event(self, db_session, tmp_data_dir):
+        # An unchanged IP must NOT re-persist (redundant lock + commit) and must
+        # emit no acquired event. Patch the persist call to prove it is skipped.
         svc = create_service_db(db_session)
         status = db_session.get(ServiceStatus, svc.id)
         status.tailscale_ip = "100.64.0.9"
         db_session.commit()
-        with patch(_P_TS_IP, return_value="100.64.0.9"):
+        with (
+            patch(_P_TS_IP, return_value="100.64.0.9"),
+            patch("app.reconciler.steps.ip_step._persist_status") as mock_persist,
+        ):
             steps.detect_and_persist_ip(db_session, svc, None)
+        mock_persist.assert_not_called()
         kinds = [e.kind for e in db_session.query(Event).filter(Event.service_id == svc.id)]
         assert "tailscale_ip_acquired" not in kinds
 
@@ -447,7 +453,11 @@ class TestRunAndPersistHealthStep:
         status.probe_retry_attempt = 10
         db_session.commit()
         checks = {"edge_container_running": True}
-        with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value="healthy"):
+        with (
+            patch(_P_HEALTH, return_value=checks),
+            patch(_P_AGGREGATE, return_value="healthy"),
+            patch("app.reconciler.probe_retry.cancel_probe_retry") as mock_cancel,
+        ):
             steps.run_and_persist_health(
                 db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
             )
@@ -455,6 +465,7 @@ class TestRunAndPersistHealthStep:
         assert status.phase == "healthy"
         assert status.probe_retry_at is None
         assert status.probe_retry_attempt is None
+        mock_cancel.assert_called_once_with(svc.id)
 
     def test_non_healthy_persist_preserves_probe_retry_schedule(self, db_session, tmp_data_dir):
         # The converse: a still-degraded (warning/error) health result MUST NOT
@@ -467,7 +478,11 @@ class TestRunAndPersistHealthStep:
         status.probe_retry_attempt = 3
         db_session.commit()
         checks = {"https_probe_ok": False}
-        with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value="warning"):
+        with (
+            patch(_P_HEALTH, return_value=checks),
+            patch(_P_AGGREGATE, return_value="warning"),
+            patch("app.reconciler.probe_retry.cancel_probe_retry") as mock_cancel,
+        ):
             steps.run_and_persist_health(
                 db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
             )
@@ -475,6 +490,7 @@ class TestRunAndPersistHealthStep:
         assert status.phase == "warning"
         assert status.probe_retry_at is not None
         assert status.probe_retry_attempt == 3
+        mock_cancel.assert_not_called()
 
 
 class TestMaybeScheduleProbeRetryStep:
@@ -525,6 +541,16 @@ class TestMaybeScheduleProbeRetryStep:
                 self._checks(https_ok=False, critical_ok=False), "error", "svc_probe", None
             )
         mock_schedule.assert_not_called()
+
+    def test_missing_critical_key_treated_as_ok_matches_aggregate(self):
+        # A missing CRITICAL key must be treated as not-failing (mirroring
+        # aggregate_status), so a probe-only failure with an absent critical key
+        # still schedules a retry rather than silently disagreeing with the phase.
+        checks = self._checks(https_ok=False)
+        del checks[next(iter(steps.CRITICAL_CHECKS))]
+        with patch(self._P_SCHEDULE) as mock_schedule:
+            steps.maybe_schedule_probe_retry(checks, "warning", "svc_probe", None)
+        mock_schedule.assert_called_once_with("svc_probe", None)
 
     def test_schedule_failure_is_swallowed(self):
         # Best-effort: a raising schedule_probe_retry (e.g. thread exhaustion) must

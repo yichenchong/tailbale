@@ -28,6 +28,21 @@ from tests._reconciler_helpers import (
 from tests._services_helpers import _create_service_in_db as _create_service
 
 
+@pytest.fixture(autouse=True)
+def _reset_probe_registries():
+    """Keep the module-level probe-retry registries isolated per test.
+
+    Mocked-Thread tests never run the guarded wrapper that normally cleans these,
+    so clear both the active-retry set and the cancel-event registry around every
+    test to prevent cross-test pollution.
+    """
+    probe_retry._ACTIVE_RETRIES.clear()
+    probe_retry._CANCEL_EVENTS.clear()
+    yield
+    probe_retry._ACTIVE_RETRIES.clear()
+    probe_retry._CANCEL_EVENTS.clear()
+
+
 class TestReconcileProbeRetry:
     def test_probe_retry_not_scheduled_when_critical_health_check_fails(
         self, db_session, tmp_data_dir
@@ -240,6 +255,7 @@ class TestProbeRetryScheduling:
                 probe_retry.schedule_probe_retry("svc_fail")
             # The optimistic registration was rolled back, not left dangling.
             assert key not in probe_retry._ACTIVE_RETRIES
+            assert key not in probe_retry._CANCEL_EVENTS
 
             # Proof of consequence: a later reschedule is no longer blocked by the
             # dedup guard and successfully spawns a fresh thread.
@@ -249,6 +265,7 @@ class TestProbeRetryScheduling:
             mock_thread.assert_called_once()
             ok.start.assert_called_once()
             assert key in probe_retry._ACTIVE_RETRIES
+            assert key in probe_retry._CANCEL_EVENTS
         finally:
             probe_retry._ACTIVE_RETRIES.clear()
 
@@ -271,7 +288,6 @@ class TestProbeRetryScheduling:
             patch.object(database_module, "SessionLocal", TestSession),
             patch.object(probe_retry, "MAX_RETRIES", 1),
             patch.object(probe_retry, "_compute_delay", return_value=0),
-            patch.object(probe_retry.time, "sleep"),
             patch.object(probe_retry, "get_runtime_paths", return_value={
                 "generated_dir": "/tmp/generated",
                 "certs_dir": "/tmp/certs",
@@ -286,9 +302,10 @@ class TestProbeRetryScheduling:
         assert status.phase == "pending"
         assert status.message == "reconcile in progress"
 
-    def test_probe_retry_stops_before_sleep_for_disabled_service(self, db_session):
-
-
+    def test_probe_retry_stops_before_waiting_for_disabled_service(self, db_session):
+        # A disabled service must stop at _update_retry_state (which clears the
+        # stale schedule and returns False) BEFORE the backoff wait / health
+        # check — proven by run_health_checks never being called.
         svc = _create_service(db_session, enabled=False)
         status = db_session.get(ServiceStatus, svc.id)
         status.probe_retry_at = datetime.now(UTC) + timedelta(minutes=5)
@@ -298,19 +315,18 @@ class TestProbeRetryScheduling:
 
         with (
             patch.object(database_module, "SessionLocal", TestSession),
-            patch.object(probe_retry.time, "sleep") as mock_sleep,
+            patch.object(probe_retry, "_compute_delay", return_value=0),
+            patch.object(probe_retry, "run_health_checks") as mock_health,
         ):
             probe_retry._probe_retry_loop(svc.id, None)
 
-        mock_sleep.assert_not_called()
+        mock_health.assert_not_called()
         db_session.expire_all()
         status = db_session.get(ServiceStatus, svc.id)
         assert status.probe_retry_at is None
         assert status.probe_retry_attempt is None
 
-    def test_probe_retry_stops_before_sleep_when_already_healthy(self, db_session):
-
-
+    def test_probe_retry_stops_before_waiting_when_already_healthy(self, db_session):
         svc = _create_service(db_session)
         status = db_session.get(ServiceStatus, svc.id)
         status.phase = "healthy"
@@ -321,11 +337,12 @@ class TestProbeRetryScheduling:
 
         with (
             patch.object(database_module, "SessionLocal", TestSession),
-            patch.object(probe_retry.time, "sleep") as mock_sleep,
+            patch.object(probe_retry, "_compute_delay", return_value=0),
+            patch.object(probe_retry, "run_health_checks") as mock_health,
         ):
             probe_retry._probe_retry_loop(svc.id, None)
 
-        mock_sleep.assert_not_called()
+        mock_health.assert_not_called()
         db_session.expire_all()
         status = db_session.get(ServiceStatus, svc.id)
         assert status.probe_retry_at is None
@@ -343,3 +360,28 @@ class TestProbeRetryScheduling:
             assert mock_thread.return_value.start.call_count == 2
         finally:
             probe_retry._ACTIVE_RETRIES.clear()
+
+class TestCancelProbeRetry:
+    """Direct coverage for the cancel signal that stops in-flight retries."""
+
+    def test_fans_out_to_every_socket_key_for_the_service(self):
+        # Two retries for the same service on different socket paths, plus one for
+        # an unrelated service. Cancelling by service id must set BOTH events for
+        # the target service and leave the other untouched.
+        ev_a = probe_retry.threading.Event()
+        ev_b = probe_retry.threading.Event()
+        ev_other = probe_retry.threading.Event()
+        with probe_retry._CANCEL_EVENTS_LOCK:
+            probe_retry._CANCEL_EVENTS[("svc_x", None)] = ev_a
+            probe_retry._CANCEL_EVENTS[("svc_x", "unix:///a.sock")] = ev_b
+            probe_retry._CANCEL_EVENTS[("svc_y", None)] = ev_other
+
+        probe_retry.cancel_probe_retry("svc_x")
+
+        assert ev_a.is_set()
+        assert ev_b.is_set()
+        assert not ev_other.is_set()
+
+    def test_unknown_service_is_a_noop(self):
+        # No registered retry -> no error, nothing signalled.
+        probe_retry.cancel_probe_retry("svc_absent")

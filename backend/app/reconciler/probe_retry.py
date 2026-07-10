@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from datetime import UTC, datetime, timedelta
 
 from app.backoff import capped_exponential
@@ -41,6 +40,14 @@ MAX_RETRIES = 20           # ~13 hours of retries with exponential backoff
 RETRY_JITTER = 0.0         # fraction; >0 de-synchronises concurrent retries
 _ACTIVE_RETRIES: set[tuple[str, str | None]] = set()
 _ACTIVE_RETRIES_LOCK = threading.Lock()
+
+# Cancellation channel for in-flight retries, keyed by the same
+# ``(service_id, socket_path)`` retry key as ``_ACTIVE_RETRIES``. Signalling an
+# entry's event wakes the sleeping loop immediately so it stops within
+# milliseconds when the service is declared healthy elsewhere, instead of
+# lingering out its current backoff (up to an hour on later attempts).
+_CANCEL_EVENTS: dict[tuple[str, str | None], threading.Event] = {}
+_CANCEL_EVENTS_LOCK = threading.Lock()
 
 
 def _compute_delay(attempt: int, *, jitter: float = RETRY_JITTER, rng=None) -> int:
@@ -76,9 +83,16 @@ def schedule_probe_retry(service_id: str, socket_path: str | None = None) -> Non
             return
         _ACTIVE_RETRIES.add(retry_key)
 
+    # Fresh cancel event keyed by the full retry key, passed by reference to the
+    # thread so a later reschedule that replaces the registry entry never
+    # orphans this thread's own signal.
+    cancel = threading.Event()
+    with _CANCEL_EVENTS_LOCK:
+        _CANCEL_EVENTS[retry_key] = cancel
+
     t = threading.Thread(
         target=_probe_retry_loop_guarded,
-        args=(service_id, socket_path),
+        args=(service_id, socket_path, cancel),
         daemon=True,
         name=f"probe-retry-{service_id[:12]}",
     )
@@ -87,23 +101,71 @@ def schedule_probe_retry(service_id: str, socket_path: str | None = None) -> Non
     except Exception:
         with _ACTIVE_RETRIES_LOCK:
             _ACTIVE_RETRIES.discard(retry_key)
+        _forget_cancel_event(retry_key, cancel)
         raise
     logger.info("Scheduled HTTPS probe retry for service %s", service_id)
 
 
-def _probe_retry_loop_guarded(service_id: str, socket_path: str | None) -> None:
+def cancel_probe_retry(service_id: str) -> None:
+    """Signal every in-flight probe retry for *service_id* to stop promptly.
+
+    Called when the service is declared healthy by another path (the health
+    sweep or a full reconcile) so the background thread wakes and exits within
+    milliseconds instead of lingering out its current backoff. Fans out across
+    every active retry key for the id (retries are keyed by
+    ``(service_id, socket_path)`` and a healthy service should stop all of
+    them). A no-op when no retry is running.
+    """
+    with _CANCEL_EVENTS_LOCK:
+        events = [e for key, e in _CANCEL_EVENTS.items() if key[0] == service_id]
+    for event in events:
+        event.set()
+
+
+def _forget_cancel_event(
+    retry_key: tuple[str, str | None], cancel: threading.Event
+) -> None:
+    """Drop the cancel-registry entry, but only if it is still *cancel*.
+
+    A newer schedule for the same key may have replaced it; never delete
+    another thread's event.
+    """
+    with _CANCEL_EVENTS_LOCK:
+        if _CANCEL_EVENTS.get(retry_key) is cancel:
+            del _CANCEL_EVENTS[retry_key]
+
+
+def _probe_retry_loop_guarded(
+    service_id: str, socket_path: str | None, cancel: threading.Event
+) -> None:
     retry_key = (service_id, socket_path)
     try:
-        _probe_retry_loop(service_id, socket_path)
+        _probe_retry_loop(service_id, socket_path, cancel)
     finally:
         with _ACTIVE_RETRIES_LOCK:
             _ACTIVE_RETRIES.discard(retry_key)
+        _forget_cancel_event(retry_key, cancel)
 
 
-def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
-    """Worker that runs in a background thread."""
+def _probe_retry_loop(
+    service_id: str, socket_path: str | None, cancel: threading.Event | None = None
+) -> None:
+    """Worker that runs in a background thread.
+
+    *cancel* is signalled when the service is declared healthy (or gone) by
+    another path (the health sweep or a full reconcile); the loop then wakes
+    from its backoff wait immediately and clears its retry bookkeeping instead
+    of lingering out the full delay. Defaults to a private unset event so the
+    loop can be driven directly (e.g. in tests) without one.
+    """
+    if cancel is None:
+        cancel = threading.Event()
 
     for attempt in range(MAX_RETRIES):
+        if cancel.is_set():
+            _clear_retry_state(service_id)
+            return
+
         delay = _compute_delay(attempt)
 
         # Record the next retry time in the DB so the frontend can show it.
@@ -113,7 +175,11 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
         if not _update_retry_state(service_id, attempt + 1, delay):
             return
 
-        time.sleep(delay)
+        # Interruptible backoff: wakes the moment cancel is signalled (the
+        # service became healthy elsewhere) instead of waiting the full delay.
+        if cancel.wait(delay):
+            _clear_retry_state(service_id)
+            return
 
         with session_scope() as db:
             try:

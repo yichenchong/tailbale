@@ -173,7 +173,10 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
             )
         with db_write_section(db):
             cert_record.expires_at = new_expiry
-            cert_record.last_renewed_at = now
+            # Timestamp AFTER the ACME operation (which can take minutes), not the
+            # pre-call `now` used for the retry-skip gate, so it reflects when the
+            # cert was actually (re)issued.
+            cert_record.last_renewed_at = datetime.now(UTC)
             cert_record.last_failure = None
             cert_record.next_retry_at = None
             emit_event(db, svc.id, event_kind, event_message, level="info")
@@ -185,7 +188,10 @@ def _process_service_cert_locked(db: Session, svc: Service, *, force: bool = Fal
 
         with db_write_section(db):
             cert_record.last_failure = error_msg
-            cert_record.next_retry_at = now + timedelta(hours=RETRY_INTERVAL_HOURS)
+            # Schedule the retry from the failure time (fresh now), not the pre-call
+            # `now`, so the backoff window isn't shortened by however long the
+            # failed ACME attempt ran.
+            cert_record.next_retry_at = datetime.now(UTC) + timedelta(hours=RETRY_INTERVAL_HOURS)
 
             emit_event(
                 db,

@@ -18,6 +18,15 @@ export interface UsePaginatedResourceResult<TData, TItem> extends UseResourceRes
   items: readonly TItem[]
 }
 
+/**
+ * `useResource` + `usePagination` wired together for offset/limit list endpoints.
+ *
+ * Refetches whenever `offset`/`limit` change, forwards the response `total` to
+ * the pagination state, and — via `clampToContent` in `onData` — steps back to
+ * the last non-empty page when the current offset falls off the end of a shrunk
+ * result set (e.g. after deletions), refetching once at the corrected offset.
+ * Exposes the flattened `items` alongside the resource and pagination state.
+ */
 export function usePaginatedResource<TData extends { total: number }, TItem>({
   load,
   getItems,

@@ -24,13 +24,18 @@ def detect_and_persist_ip(db: Session, service: Service, socket_path: str | None
         retry_delay=1.0,
     )
     if ts_ip:
-        event = None
         current_status = db.get(ServiceStatus, service_id)
-        if current_status and current_status.tailscale_ip != ts_ip:
-            event = {
-                "kind": EventKind.TAILSCALE_IP_ACQUIRED,
-                "message": f"Tailscale IP {ts_ip} assigned to '{service_name}'",
-                "details": {"ip": ts_ip},
-            }
-        _persist_status(db, service_id, tailscale_ip=ts_ip, event=event)
+        # Skip the write entirely when the IP is unchanged: the phase update above
+        # already committed this step's status, so re-persisting an identical IP
+        # would be a redundant lock + commit on every reconcile. Persist (and emit
+        # the acquired event) only on first acquisition or an actual change.
+        if current_status is None or current_status.tailscale_ip != ts_ip:
+            event = None
+            if current_status is not None:
+                event = {
+                    "kind": EventKind.TAILSCALE_IP_ACQUIRED,
+                    "message": f"Tailscale IP {ts_ip} assigned to '{service_name}'",
+                    "details": {"ip": ts_ip},
+                }
+            _persist_status(db, service_id, tailscale_ip=ts_ip, event=event)
     return ts_ip

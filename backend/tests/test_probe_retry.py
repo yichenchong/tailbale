@@ -1,7 +1,7 @@
 """Tests for the background HTTPS probe-retry loop (app.reconciler.probe_retry).
 
 The loop runs in a daemon thread in production.  Here we drive
-``_probe_retry_loop`` synchronously with ``time.sleep`` stubbed and
+``_probe_retry_loop`` synchronously with ``_compute_delay`` stubbed and
 ``SessionLocal`` pointed at the in-memory test database.
 """
 
@@ -63,7 +63,6 @@ def _run_loop(db_session, svc, *, checks, max_retries=1):
         patch.object(database_module, "SessionLocal", TestSession),
         patch.object(probe_retry, "MAX_RETRIES", max_retries),
         patch.object(probe_retry, "_compute_delay", return_value=0),
-        patch.object(probe_retry.time, "sleep") as mock_sleep,
         patch.object(probe_retry, "get_runtime_paths", return_value={
             "generated_dir": "/tmp/generated", "certs_dir": "/tmp/certs",
         }),
@@ -75,7 +74,7 @@ def _run_loop(db_session, svc, *, checks, max_retries=1):
             mock_health.return_value = checks
         probe_retry._probe_retry_loop(svc.id, None)
     db_session.expire_all()
-    return mock_health, mock_sleep
+    return mock_health
 
 
 # ---------------------------------------------------------------------------
@@ -250,7 +249,7 @@ class TestProbeRetryLoop:
         status.probe_retry_attempt = 1
         db_session.commit()
 
-        mock_health, _ = _run_loop(
+        mock_health = _run_loop(
             db_session, svc, checks=_checks(https=True), max_retries=5,
         )
 
@@ -264,7 +263,7 @@ class TestProbeRetryLoop:
     def test_exhaustion_clears_state_and_runs_every_attempt(self, db_session):
         svc = _create_service(db_session)
         # Probe keeps failing -> phase stays "warning" -> never healthy.
-        mock_health, _ = _run_loop(
+        mock_health = _run_loop(
             db_session, svc, checks=_checks(https=False), max_retries=4,
         )
 
@@ -297,7 +296,6 @@ class TestProbeRetryLoop:
             patch.object(database_module, "SessionLocal", TestSession),
             patch.object(probe_retry, "MAX_RETRIES", 1),
             patch.object(probe_retry, "_compute_delay", return_value=0),
-            patch.object(probe_retry.time, "sleep"),
             patch.object(probe_retry, "get_runtime_paths", return_value={
                 "generated_dir": "/tmp/generated", "certs_dir": "/tmp/certs",
             }),
@@ -321,7 +319,7 @@ class TestProbeRetryLoop:
             raise RuntimeError("health probe blew up")
 
         with caplog.at_level(_logging.WARNING, logger="app.reconciler.probe_retry"):
-            mock_health, _ = _run_loop(db_session, svc, checks=boom, max_retries=2)
+            mock_health = _run_loop(db_session, svc, checks=boom, max_retries=2)
 
         # The loop survived the unexpected error and ran every bounded attempt.
         assert mock_health.call_count == 2
@@ -353,7 +351,7 @@ class TestProbeRetryLoop:
             db.flush()
             return _checks(https=True)
 
-        mock_health, _ = _run_loop(
+        mock_health = _run_loop(
             db_session, svc, checks=change_status_mid_probe, max_retries=1,
         )
 
@@ -393,7 +391,7 @@ class TestProbeRetryLoop:
             return _checks(https=True)
 
         try:
-            mock_health, _ = _run_loop(
+            mock_health = _run_loop(
                 db_session, svc, checks=delete_status_mid_probe, max_retries=1,
             )
             # The health check ran once, then the vanished status stopped the loop.
@@ -559,3 +557,72 @@ class TestStatusWriteUnderReconcileLock:
         assert tracker.commit_depths
         assert all(d > 0 for d in tracker.commit_depths)
         assert tracker.entered_ids == [svc.id]
+
+class TestProbeRetryCancellation:
+    """The loop's interruptible backoff (cancel_probe_retry / cancel event)."""
+
+    def test_loop_exits_immediately_when_cancel_preset(self, db_session):
+        # A cancel signalled before the loop starts is caught at the top-of-
+        # iteration gate: no health check runs and the stale schedule is cleared.
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.phase = "warning"
+        status.probe_retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        status.probe_retry_attempt = 2
+        db_session.commit()
+        TestSession = sessionmaker(bind=db_session.get_bind())
+        cancel = probe_retry.threading.Event()
+        cancel.set()
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry, "run_health_checks") as mock_health,
+        ):
+            probe_retry._probe_retry_loop(svc.id, None, cancel)
+
+        mock_health.assert_not_called()
+        db_session.expire_all()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.probe_retry_at is None
+        assert status.probe_retry_attempt is None
+
+    def test_loop_takes_cancel_path_out_of_backoff_wait(self, db_session):
+        # Drive the loop with a fake cancel whose wait() returns True (as if
+        # signalled mid-backoff). This proves the backoff routes through the
+        # interruptible cancel.wait(delay) — a time.sleep regression would never
+        # call wait() — without ever blocking on a real timeout.
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.phase = "warning"
+        db_session.commit()
+        TestSession = sessionmaker(bind=db_session.get_bind())
+
+        class _FakeCancel:
+            def __init__(self):
+                self.wait_calls = []
+
+            def is_set(self):
+                return False
+
+            def wait(self, timeout):
+                self.wait_calls.append(timeout)
+                return True  # signalled during the backoff wait
+
+        cancel = _FakeCancel()
+
+        with (
+            patch.object(database_module, "SessionLocal", TestSession),
+            patch.object(probe_retry, "MAX_RETRIES", 3),
+            patch.object(probe_retry, "_compute_delay", return_value=15),
+            patch.object(probe_retry, "run_health_checks") as mock_health,
+        ):
+            probe_retry._probe_retry_loop(svc.id, None, cancel)
+
+        # The backoff called the interruptible wait with the computed delay, and a
+        # signalled wait took the cancel path: no health check, schedule cleared.
+        assert cancel.wait_calls == [15]
+        mock_health.assert_not_called()
+        db_session.expire_all()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.probe_retry_at is None
+        assert status.probe_retry_attempt is None

@@ -25,6 +25,7 @@ from app.edge import docker_client
 from app.health import health_checker
 from app.locks import forget_reconcile_lock, try_service_reconcile_lock
 from app.models.service import Service
+from app.reconciler import probe_retry
 from app.reconciler.reconciler import reconcile_service
 from app.reconciler.status import _persist_status
 from app.services.sweeps import run_id_sweep, snapshot_enabled_service_ids
@@ -158,6 +159,11 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
                     event=None,
                     **clear_retry,
                 )
+                if phase == "healthy":
+                    # Retire any lingering post-create probe-retry thread promptly:
+                    # it would otherwise sleep out its current backoff (up to an
+                    # hour) before noticing the service already recovered here.
+                    probe_retry.cancel_probe_retry(service_id)
                 if phase != "healthy":
                     # Drift detected — escalate to a full reconcile, which emits the
                     # reconcile_completed event and repairs.
@@ -179,10 +185,11 @@ async def _sweep_loop(
     log_message: str,
 ) -> None:
     """Run a dynamic-interval background sweep with shared error backoff."""
-    # Holds the interval read inside the most recent successful sweep so the
-    # loop keeps honoring dynamic settings without opening a second session just
-    # to re-read them.
-    interval = {"value": ERROR_BACKOFF_SECONDS}
+    # Holds the interval read inside the most recent successful sweep so the loop
+    # keeps honoring dynamic settings without opening a second session just to
+    # re-read them. Seeded with the setting's own default (not the error backoff)
+    # so the value is correct if ever read before the first sweep overwrites it.
+    interval = {"value": int(settings_store.DEFAULTS[interval_setting])}
 
     async def _work() -> None:
         def _run_sweep() -> tuple[int, int]:

@@ -518,11 +518,15 @@ class TestHealthCheckAll:
             patch("app.health.health_checker.run_health_checks", return_value={"ok": True}),
             patch("app.health.health_checker.aggregate_status", return_value="healthy"),
             patch.object(loop_mod, "reconcile_one") as mock_reconcile,
+            patch("app.reconciler.probe_retry.cancel_probe_retry") as mock_cancel,
         ):
             count = loop_mod.health_check_all(db_session, socket_path=None)
         assert count == 1
         # Recovered via the silent healthy path — no escalation clears it for us.
         mock_reconcile.assert_not_called()
+        # The lingering probe-retry thread is actively cancelled, not just left to
+        # notice on its next wake.
+        mock_cancel.assert_called_once_with(svc.id)
         db_session.expire_all()
         status = db_session.get(ServiceStatus, svc.id)
         assert status.phase == "healthy"

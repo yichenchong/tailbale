@@ -190,6 +190,34 @@ class TestProcessServiceCert:
             db_session.query(Event).filter(Event.kind == "cert_issued").count() == 0
         )
 
+    @patch("app.certs.renewal_task.datetime")
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_last_renewed_at_is_timestamped_after_the_acme_operation(
+        self, mock_secret, mock_renew, mock_expiry, mock_datetime, db_session
+    ):
+        # last_renewed_at must reflect when the cert was actually (re)issued — a
+        # fresh clock read AFTER the ACME call — not the pre-call `now` used for the
+        # retry-skip gate. Two distinct reads: the skip-gate read (t0) and the
+        # post-renew read (t1). last_renewed_at must be t1; pre-fix it was t0.
+        t0 = datetime(2026, 1, 1, 0, 0, 0, tzinfo=UTC)
+        t1 = datetime(2026, 1, 1, 0, 5, 0, tzinfo=UTC)
+        mock_datetime.now.side_effect = [t0, t1, t1]
+        mock_secret.return_value = "cf-token"
+        mock_expiry.side_effect = [
+            datetime(2026, 1, 5, tzinfo=UTC),  # within the renewal window -> renew
+            datetime(2026, 4, 1, tzinfo=UTC),  # post-renew expiry
+        ]
+        mock_renew.return_value = (MagicMock(), False)
+
+        svc = create_service_db(db_session)
+        process_service_cert(db_session, svc)
+
+        cert = db_session.get(Certificate, svc.id)
+        # Stored naive-UTC; equals the post-renew read t1, never the pre-call t0.
+        assert cert.last_renewed_at == t1.replace(tzinfo=None)
+
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.renew_cert")
     @patch("app.certs.renewal_task.read_secret")

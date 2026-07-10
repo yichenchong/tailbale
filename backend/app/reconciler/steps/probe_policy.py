@@ -22,7 +22,11 @@ def maybe_schedule_probe_retry(
     surfaces loudly at startup instead of being silently swallowed here.
     """
     if not checks.get("https_probe_ok") and phase in ("warning", "error"):
-        critical_ok = all(checks.get(check, False) for check in CRITICAL_CHECKS)
+        # Mirror aggregate_status's "missing key = not-failing" rule (a check is
+        # failing only when present and falsy): default a missing critical key to
+        # True so this gate can't disagree with the phase aggregation. In practice
+        # every checks dict is built from ALL_CHECK_NAMES, so all keys are present.
+        critical_ok = all(checks.get(check, True) for check in CRITICAL_CHECKS)
         if critical_ok:
             # Only the thread START is best-effort: schedule_probe_retry re-raises
             # if Thread.start() fails, and that must NOT corrupt the already-
