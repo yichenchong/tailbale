@@ -29,7 +29,7 @@ class TestGetCertExpiry:
         """Generate a self-signed cert and verify expiry parsing."""
 
         # Generate a test certificate
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")])
         expiry = datetime(2027, 6, 15, 12, 0, 0, tzinfo=UTC)
 
@@ -69,7 +69,7 @@ class TestCertKeyPairMatches:
 
         cert_path = tmp_path / "fullchain.pem"
         key_path = tmp_path / "privkey.pem"
-        other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        other_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
         # Cert's public key comes from cert_key; privkey.pem holds an unrelated key.
         _write_cert_key_pair(cert_path, key_path, cert_key=other_key)
 

@@ -277,7 +277,7 @@ def write_valid_cert(certs_dir: Path, hostname: str) -> str:
     (unavailable) ACME/lego path.
     """
 
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, hostname)])
     now = datetime.now(UTC)
     cert = (

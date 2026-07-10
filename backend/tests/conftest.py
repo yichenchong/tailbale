@@ -1,3 +1,17 @@
+import os
+
+# Bcrypt's cost is deliberately exponential in `rounds` (production default:
+# 12, see app.config.Settings.bcrypt_rounds). The suite exercises real bcrypt
+# hashing/verification on every setup-user/login/password-change call and
+# gains no security benefit from paying the production cost per test. Force
+# (not setdefault) so a BCRYPT_ROUNDS already set in the ambient shell/CI env
+# can never silently defeat the speedup. This MUST run before any `app.*`
+# import: app.config.settings is built at import time, and
+# app.auth._DUMMY_BCRYPT_HASH is computed at import time by design (see
+# auth.py) — both need the fast value from the start. No test asserts on
+# real-bcrypt wall-clock timing, so forcing this is behavior-preserving.
+os.environ["BCRYPT_ROUNDS"] = "4"
+
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 

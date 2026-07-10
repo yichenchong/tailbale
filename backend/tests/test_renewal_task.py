@@ -40,10 +40,8 @@ def _write_real_pair(cert_dir, *, matching=True, not_after=None):
     cert_dir.mkdir(parents=True, exist_ok=True)
     gen_dir = cert_dir / "gen-test"
     gen_dir.mkdir(parents=True, exist_ok=True)
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    cert_key = key if matching else rsa.generate_private_key(
-        public_exponent=65537, key_size=2048
-    )
+    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    cert_key = key if matching else rsa.generate_private_key(public_exponent=65537, key_size=1024)
     if not_after is None:
         not_after = datetime.now(UTC) + timedelta(days=300)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "testapp.example.com")])

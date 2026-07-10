@@ -50,14 +50,14 @@ def _prehash(salt: str, plain: str) -> bytes:
 def hash_password(plain: str, db: Session) -> str:
     """Hash a password with bcrypt, using a salted SHA-256 pre-hash."""
     salt = _get_or_create_salt(db)
-    return bcrypt.hashpw(_prehash(salt, plain), bcrypt.gensalt()).decode()
+    return bcrypt.hashpw(_prehash(salt, plain), bcrypt.gensalt(rounds=settings.bcrypt_rounds)).decode()
 
 
 # Computed once at import: a real bcrypt hash to verify against on the
 # user-missing login path. Doing this at module load (rather than lazily on the
 # first call) avoids both a first-call timing skew and an unguarded cross-thread
 # write to a module global.
-_DUMMY_BCRYPT_HASH = bcrypt.hashpw(b"timing-equalizer", bcrypt.gensalt())
+_DUMMY_BCRYPT_HASH = bcrypt.hashpw(b"timing-equalizer", bcrypt.gensalt(rounds=settings.bcrypt_rounds))
 
 
 def dummy_verify_password(plain: str, db: Session) -> None:

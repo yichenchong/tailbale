@@ -60,6 +60,14 @@ class Settings(BaseSettings):
     jwt_expiry_hours: int = Field(default=24, ge=1)
     cookie_secure: bool = False  # Force Secure flag even over HTTP. Auto-enabled when the request arrives over HTTPS (incl. X-Forwarded-Proto).
 
+    # Bcrypt cost factor (rounds): cost is 2**rounds key-setup iterations, so
+    # this is deliberately exponential — 12 is the accepted default for an
+    # interactively-typed admin password. The test suite overrides this via
+    # BCRYPT_ROUNDS to the library minimum (4): it exercises real bcrypt
+    # hashing/verification on every setup-user/login/password-change call and
+    # gains no security benefit from paying the production cost per test.
+    bcrypt_rounds: int = Field(default=12, ge=4, le=31)
+
     # Login brute-force protection. After `login_max_failures` consecutive
     # failed logins from a client, further attempts are rejected with HTTP 429
     # for `login_lockout_seconds`. A successful login resets the client's count.
