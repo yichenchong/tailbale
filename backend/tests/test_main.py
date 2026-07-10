@@ -210,6 +210,63 @@ class TestLifespanBackgroundTasks:
         # ...and every still-running loop must have been cancelled (no leak).
         assert sorted(cancelled) == ["health", "reconcile", "retention"]
 
+    def test_shutdown_cancels_tasks_when_lifespan_body_raises(self, monkeypatch):
+        """The cleanup path must live in a finally block.
+
+        If the ASGI lifespan context exits with an exception while background
+        tasks are running, those tasks still need the same cancel+await cleanup
+        as an ordinary shutdown. Otherwise the event loop owns leaked tasks until
+        it forcibly cancels them at teardown, which skips the app's deterministic
+        shutdown path.
+        """
+        cancelled: list[str] = []
+        tasks: list[asyncio.Task[object]] = []
+
+        def _prepare_database():
+            return None
+
+        def _recover_stale_running_jobs():
+            return None
+
+        async def _idle():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append("idle")
+                raise
+
+        def _create_background_tasks():
+            task = asyncio.create_task(_idle(), name="idle")
+            tasks.append(task)
+            return (task,)
+
+        monkeypatch.setattr(main_module.startup_module, "prepare_database", _prepare_database)
+        monkeypatch.setattr(
+            main_module.startup_module,
+            "recover_stale_running_jobs",
+            _recover_stale_running_jobs,
+        )
+        monkeypatch.setattr(
+            main_module.startup_module,
+            "create_background_tasks",
+            _create_background_tasks,
+        )
+
+        async def _drive():
+            with pytest.raises(RuntimeError, match="lifespan body failed"):
+                async with main_module.lifespan(main_module.app):
+                    await asyncio.sleep(0)
+                    raise RuntimeError("lifespan body failed")
+            await asyncio.sleep(0)
+            observed_cancelled = list(cancelled)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return observed_cancelled
+
+        assert asyncio.run(_drive()) == ["idle"]
+
 
 class TestServiceErrorHandler:
     """The single central @app.exception_handler(ServiceError) (AR7) must map

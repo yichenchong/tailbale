@@ -74,7 +74,11 @@ class TailscaleSettingsUpdate(_SettingsUpdateModel):
 
 
 class DockerSettingsUpdate(_SettingsUpdateModel):
-    socket_path: str | None = Field(default=None, min_length=1)
+    # Blank is meaningful: an explicitly empty stored socket tells the Docker
+    # client helper to use docker.from_env() / DOCKER_HOST instead of a fixed
+    # base_url. The shared strip validator normalizes whitespace-only input to
+    # the same sentinel.
+    socket_path: str | None = None
 
 
 class PathSettingsUpdate(_SettingsUpdateModel):

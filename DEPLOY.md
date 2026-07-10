@@ -4,7 +4,7 @@
 
 - **A Linux host** with Docker installed
 - **Domain** managed in Cloudflare (e.g. `mydomain.com`)
-- **Cloudflare API token** with DNS:Edit permission for your zone
+- **Cloudflare API token** scoped to your zone with Zone:Read and DNS:Edit permissions
 - **Tailscale account** with both:
   - a reusable auth key from the admin console
   - an API key for tailnet device management
@@ -62,7 +62,7 @@ The first-time setup wizard will walk you through:
 
 1. **Account** — create your admin username and password
 2. **Domain** — enter your base domain (e.g. `mydomain.com`)
-3. **Cloudflare** — zone ID and API token
+3. **Cloudflare** — zone ID and API token (Zone:Read + DNS:Edit)
 4. **ACME Email** — for Let's Encrypt certificate registration
 5. **Tailscale** — your reusable auth key and API key
 6. **Docker** — socket path (default is correct for most Linux hosts)
@@ -112,7 +112,6 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATA_DIR=/data \
   -e HOST_DATA_DIR=/opt/tailbale/data \
-  -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
 ```
@@ -139,7 +138,6 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -e DATA_DIR=/data \
   -e HOST_DATA_DIR=/opt/tailbale/data \
-  -e DOCKER_SOCKET=unix:///var/run/docker.sock \
   -e PORT=8080 \
   tailbale:latest
 ```
@@ -209,7 +207,8 @@ It is not re-created per deploy, so it never accumulates. Remove it with
 | `HOST_PORT` | No | `6780` | Host port the admin UI is published on: the full mapping is `BIND_ADDR:HOST_PORT` → container `PORT`. Reach the UI at `http://<host-or-tailnet-ip>:HOST_PORT`. |
 | `HOST` | No | `0.0.0.0` | Listen address **inside the container** (leave as `0.0.0.0`; Docker forwards the published port to it) |
 | `BIND_ADDR` | No | `127.0.0.1` | Host interface the published port binds to. Loopback by default; set to your tailnet IP for `http://<tailnet-ip>:HOST_PORT`, or `0.0.0.0` to expose on all host interfaces. |
-| `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path used **only** by Compose/`deploy.sh`/`redeploy.sh` to bind-mount the socket into the container. The orchestrator itself does **not** read this env var — its effective socket is configured in the in-app setup wizard (stored in the DB as `docker_socket_path`). If you override this to a non-default path, also update the socket in Settings. |
+| `DOCKER_SOCKET_PATH` | No (Compose only) | `/var/run/docker.sock` | Host-side Unix socket path that Compose bind-mounts into the container at `/var/run/docker.sock`. Use this when Docker's socket is not at `/var/run/docker.sock`; the in-app Docker socket setting can stay at the default because the container path is unchanged. |
+| `DOCKER_SOCKET` | No (`deploy.sh`/`redeploy.sh` only) | `unix:///var/run/docker.sock` | Docker socket URL used by `redeploy.sh` to decide which Unix socket to bind-mount into the container. The orchestrator itself does **not** read this env var — its effective socket is configured in the in-app setup wizard (stored in the DB as `docker_socket_path`). If you override this to a non-default path, also update the socket in Settings. Compose ignores this; use `DOCKER_SOCKET_PATH` there. |
 
 ## Updating
 
@@ -246,8 +245,8 @@ needed to share/back up the built artifacts, not for the default self-hosted flo
 ## Troubleshooting
 
 - **"bind source path does not exist"**: `HOST_DATA_DIR` is missing or wrong. Set it to the host path of your data directory (e.g. `/opt/tailbale/data`). `deploy.sh` resolves relative paths to absolute paths; Docker Compose now requires `HOST_DATA_DIR` explicitly so it cannot accidentally use the caller's working directory.
-- **Can't connect to Docker**: Ensure `/var/run/docker.sock` is mounted and the container user has access
+- **Can't connect to Docker**: Ensure the Docker socket is mounted. With Compose, set `DOCKER_SOCKET_PATH` if the host socket is not `/var/run/docker.sock`; with `deploy.sh`, set `DOCKER_SOCKET` and then update the in-app Docker socket setting to match. With manual `docker run`, adjust the `-v` socket bind mount and the in-app setting together.
 - **Edge container won't start**: Check the Tailscale auth key is valid and reusable; the API key is also required during setup but is not used for login
-- **Certs not issuing**: Verify Cloudflare API token has DNS:Edit permission for your zone
+- **Certs not issuing / Cloudflare test fails**: Verify the Cloudflare API token is scoped to the zone and has Zone:Read plus DNS:Edit permissions
 - **DNS records not updating**: Check Cloudflare zone ID matches your domain
 - **Invalidate all sessions**: Delete `/data/secrets/.jwt_secret` and restart the container

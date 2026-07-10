@@ -268,6 +268,27 @@ class TestCreateEdgeContainer:
         assert call_kwargs.kwargs["labels"]["tailbale.service_id"] == "svc_abc123"
         assert call_kwargs.kwargs["environment"]["TS_AUTHKEY"] == "tskey-auth-test"
         assert call_kwargs.kwargs["environment"]["TS_HOSTNAME"] == "edge-nextcloud"
+        assert "TS_LOGIN_SERVER" not in call_kwargs.kwargs["environment"]
+
+    @patch("app.edge.container_manager.ensure_edge_image")
+    @patch("app.edge.container_manager.docker.DockerClient")
+    def test_passes_tailscale_control_url_to_edge_container(self, mock_cls, mock_ensure, tmp_path):
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_client.containers.create.return_value = MagicMock(id="c1")
+
+        create_edge_container(
+            _make_service(),
+            ts_authkey="tskey-auth-test",
+            generated_dir=tmp_path / "generated",
+            certs_dir=tmp_path / "certs",
+            tailscale_state_dir=tmp_path / "tailscale",
+            ts_control_url="https://headscale.example.com",
+        )
+
+        env = mock_client.containers.create.call_args.kwargs["environment"]
+        assert env["TS_LOGIN_SERVER"] == "https://headscale.example.com"
+
 
     @patch("app.edge.container_manager.ensure_edge_image")
     @patch("app.edge.container_manager.docker.DockerClient")

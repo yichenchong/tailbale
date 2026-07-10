@@ -38,14 +38,16 @@ INITIAL_DELAY = 15        # seconds (base)
 MAX_DELAY = 3600           # 1 hour cap
 MAX_RETRIES = 20           # ~13 hours of retries with exponential backoff
 RETRY_JITTER = 0.0         # fraction; >0 de-synchronises concurrent retries
-_ACTIVE_RETRIES: set[tuple[str, str | None]] = set()
+_ACTIVE_RETRIES: dict[tuple[str, str | None], threading.Event] = {}
 _ACTIVE_RETRIES_LOCK = threading.Lock()
 
 # Cancellation channel for in-flight retries, keyed by the same
 # ``(service_id, socket_path)`` retry key as ``_ACTIVE_RETRIES``. Signalling an
 # entry's event wakes the sleeping loop immediately so it stops within
 # milliseconds when the service is declared healthy elsewhere, instead of
-# lingering out its current backoff (up to an hour on later attempts).
+# lingering out its current backoff (up to an hour on later attempts). The same
+# event object is also the active-registry generation token: a cancelled retry
+# may be replaced immediately, and its old thread cannot delete the replacement.
 _CANCEL_EVENTS: dict[tuple[str, str | None], threading.Event] = {}
 _CANCEL_EVENTS_LOCK = threading.Lock()
 
@@ -73,20 +75,21 @@ def schedule_probe_retry(service_id: str, socket_path: str | None = None) -> Non
     loop will pick it up later).
     """
     retry_key = (service_id, socket_path)
+    # Fresh cancel event keyed by the full retry key, passed by reference to the
+    # thread so a later reschedule that replaces the registry entry never
+    # orphans this thread's own signal.
+    cancel = threading.Event()
     with _ACTIVE_RETRIES_LOCK:
-        if retry_key in _ACTIVE_RETRIES:
+        existing = _ACTIVE_RETRIES.get(retry_key)
+        if existing is not None and not existing.is_set():
             logger.info(
                 "HTTPS probe retry already scheduled for service %s using socket %s",
                 service_id,
                 socket_path or "<default>",
             )
             return
-        _ACTIVE_RETRIES.add(retry_key)
+        _ACTIVE_RETRIES[retry_key] = cancel
 
-    # Fresh cancel event keyed by the full retry key, passed by reference to the
-    # thread so a later reschedule that replaces the registry entry never
-    # orphans this thread's own signal.
-    cancel = threading.Event()
     with _CANCEL_EVENTS_LOCK:
         _CANCEL_EVENTS[retry_key] = cancel
 
@@ -100,7 +103,8 @@ def schedule_probe_retry(service_id: str, socket_path: str | None = None) -> Non
         t.start()
     except Exception:
         with _ACTIVE_RETRIES_LOCK:
-            _ACTIVE_RETRIES.discard(retry_key)
+            if _ACTIVE_RETRIES.get(retry_key) is cancel:
+                del _ACTIVE_RETRIES[retry_key]
         _forget_cancel_event(retry_key, cancel)
         raise
     logger.info("Scheduled HTTPS probe retry for service %s", service_id)
@@ -143,7 +147,8 @@ def _probe_retry_loop_guarded(
         _probe_retry_loop(service_id, socket_path, cancel)
     finally:
         with _ACTIVE_RETRIES_LOCK:
-            _ACTIVE_RETRIES.discard(retry_key)
+            if _ACTIVE_RETRIES.get(retry_key) is cancel:
+                del _ACTIVE_RETRIES[retry_key]
         _forget_cancel_event(retry_key, cancel)
 
 

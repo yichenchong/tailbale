@@ -58,10 +58,10 @@ export function isPositiveInt(value: string): boolean {
 
 /**
  * Non-blank after trimming. Mirrors the backend `Field(min_length=1)` constraint
- * (paired with the server-side `.strip()`) on required text settings — Cloudflare
- * `zone_id`, Tailscale `control_url`/`default_ts_hostname_prefix`, Docker
- * `socket_path` (backend/app/schemas/settings.py). A blank/whitespace-only value
- * 422s, so the UI blocks the save before a doomed request fires.
+ * (paired with the server-side `.strip()`) on required text settings —
+ * Cloudflare `zone_id` and Tailscale `control_url`/`default_ts_hostname_prefix`
+ * (backend/app/schemas/settings.py). Docker `socket_path` is intentionally
+ * exempt because blank means "use DOCKER_HOST / docker.from_env()".
  */
 export function isNonBlank(value: string): boolean {
   return value.trim() !== ""

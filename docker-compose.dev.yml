@@ -11,7 +11,7 @@ services:
     volumes:
       - ./backend/app:/app/app
       - ${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       - DATA_DIR=/data
       - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
@@ -32,7 +32,7 @@ services:
       # Vite dev-server /api proxy target. Inside this compose network the
       # backend is the "backend" service, not localhost. Requires vite.config.ts
       # to read VITE_PROXY_TARGET (it falls back to http://localhost:8080 for a
-      # plain host-side `npm run dev`). lib/api.ts uses a relative /api base, so
-      # no VITE_API_URL is needed.
+      # plain host-side `npm run dev`). The frontend API client uses a relative
+      # /api base, so no VITE_API_URL is needed.
       - VITE_PROXY_TARGET=http://backend:8080
     restart: unless-stopped

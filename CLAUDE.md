@@ -26,9 +26,9 @@ pip install -r requirements.txt -r requirements-dev.txt
 # Run
 uvicorn app.main:app --reload --port 8080
 
-# Test (run from repo root or backend/)
-python -m pytest
-python -m pytest tests/test_foo.py  # single file
+# Test (from repo root)
+backend/.venv/bin/python -m pytest
+backend/.venv/bin/python -m pytest backend/tests/test_foo.py  # single file
 ```
 
 ### Docker
@@ -53,9 +53,9 @@ HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build 
 | `config.py` | Pydantic settings — reads `.env`, derives all data paths |
 | `database.py` | SQLite setup, WAL mode, FK constraints, lightweight post-launch migrations |
 | `auth.py` | JWT (HS256 cookie) + two-layer password hashing (SHA-256 + bcrypt) |
-| `models/` | 8 ORM models: Service, ServiceStatus, Certificate, DnsRecord, Event, Job, Setting, User |
-| `routers/` | 11 REST routers: auth, settings, developer, connection_tests, discovery, services, service_actions, events, dashboard, profiles, jobs |
-| `services/` | Transport-agnostic service lifecycle layer (AR1 split of the former `service_ops` god-module) — `create`/`update`/`delete` (with shared `lifecycle` helpers and response `mapping`), `edge_ops`, `cert_ops`, and domain `errors`; routers delegate here and the central handler in `main.py` maps the raised domain exceptions to HTTP |
+| `models/` | ORM models for services, status, certificates, DNS records, events, jobs, settings, and users |
+| `routers/` | REST routers: auth, settings, developer, connection_tests, discovery, services, service_actions, events, dashboard, profiles, jobs |
+| `services/` | Transport-agnostic service lifecycle layer — `create`/`update`/`delete` (with shared `lifecycle` helpers and response `mapping`), `edge_ops`, `cert_ops`, and domain `errors`; routers delegate here and the central handler in `main.py` maps the raised domain exceptions to HTTP |
 | `reconciler/` | **Core engine** — 14-step idempotent per-service reconciliation (per-phase step helpers in the `reconciler/steps/` package, wired together by `reconciler.py`); full reconcile hourly + a lightweight 60s health sweep that escalates to a full reconcile on drift |
 | `edge/` | Edge container management (Caddy + Tailscale lifecycle) |
 | `certs/` | Certificate issuance and renewal (lego ACME) |
@@ -70,9 +70,10 @@ HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build 
 | Path | Purpose |
 |------|---------|
 | `App.tsx` | Router root — checks `/api/auth/status` to gate setup/login/app |
-| `pages/` | 10 pages: Dashboard, Services, ServiceDetail, Discover, Expose, Events, OrphanDns, Settings, Setup, Login |
-| `components/` | Layout (sidebar + outlet), shared UI |
-| `lib/api.ts` | Fetch-based API client (`api.get/post/put/delete`), auto-redirects on 401 |
+| `pages/` | Route-level pages (Dashboard, Services, ServiceDetail, Discover, Expose, Events, OrphanDns, Settings, Setup, Login) plus Settings tab modules under `pages/settings/` |
+| `components/` | Shared layout/state/pagination UI plus focused `service/` and `settings/` component folders |
+| `lib/api.ts` + `lib/api/` | API barrel and endpoint modules built on `lib/api/core.ts` (`api.get/post/put/delete`, 401 redirect handling) |
+| `lib/use*.ts(x)` | Shared hooks for polling/resources, dirty forms, pagination, timezone formatting, transient messages, secret fields, and favicon state |
 
 ### Core Data Flow
 

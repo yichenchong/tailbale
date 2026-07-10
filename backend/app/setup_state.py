@@ -34,7 +34,7 @@ def compute_setup_progress(db: Session) -> dict[str, bool]:
         "cloudflare_token_set": cf_token_set,
         "acme_email_set": bool(acme_email and acme_email.value),
         "tailscale_configured": is_valid_ts_auth_key(ts_auth_key) and is_valid_ts_api_key(ts_api_key),
-        "docker_configured": bool(docker_socket and docker_socket.value),
+        "docker_configured": docker_socket is not None,
     }
 
 

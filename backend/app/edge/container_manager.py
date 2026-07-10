@@ -70,6 +70,7 @@ def create_edge_container(
     tailscale_state_dir: str | Path,
     socket_path: str | None = None,
     edge_image: str = EDGE_IMAGE,
+    ts_control_url: str | None = None,
 ) -> str:
     """Create an edge container for a service. Returns the container ID.
 
@@ -102,6 +103,8 @@ def create_edge_container(
             "TS_AUTHKEY": ts_authkey,
             "TS_HOSTNAME": service.ts_hostname,
         }
+        if ts_control_url:
+            environment["TS_LOGIN_SERVER"] = ts_control_url
 
         labels = {
             "tailbale.managed": "true",
@@ -231,6 +234,7 @@ def recreate_edge(
     tailscale_state_dir: str | Path,
     socket_path: str | None = None,
     edge_image: str = EDGE_IMAGE,
+    ts_control_url: str | None = None,
 ) -> str:
     """Remove existing edge and create + start a new one. Returns new container ID."""
     remove_edge(
@@ -239,7 +243,7 @@ def recreate_edge(
     )
     container_id = create_edge_container(
         service, ts_authkey, generated_dir, certs_dir, tailscale_state_dir,
-        socket_path, edge_image,
+        socket_path, edge_image, ts_control_url,
     )
     start_edge(service.id, service.edge_container_name, socket_path)
     return container_id

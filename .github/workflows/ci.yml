@@ -53,3 +53,12 @@ jobs:
       - name: Build frontend
         working-directory: frontend
         run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build orchestrator image
+        run: docker build -t tailbale:ci .
+      - name: Build edge image
+        run: docker build -t tailbale-edge:ci --label "tailbale.version=$(tr -d '\n' < VERSION)" ./edge

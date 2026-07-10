@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app import settings_store
 from app.edge import container_manager, container_session
 from app.events.types import EventKind
 from app.models.service import Service
@@ -31,6 +32,7 @@ def ensure_edge(
             paths.host_certs_dir,
             paths.host_ts_state_dir,
             socket_path,
+            ts_control_url=settings_store.get_setting(db, "ts_control_url"),
         )
         _persist_status(
             db,

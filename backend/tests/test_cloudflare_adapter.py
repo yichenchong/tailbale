@@ -5,6 +5,7 @@ import json as _json
 import logging
 from unittest.mock import MagicMock, patch
 
+import httpx2
 import pytest
 
 from app.adapters import cloudflare_adapter as cf
@@ -86,6 +87,36 @@ class TestRequestHelper:
         assert "json" not in call_kwargs
         assert "params" not in call_kwargs
 
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_wraps_timeout_exception_in_cloudflare_api_error(self, mock_get):
+        mock_get.side_effect = httpx2.TimeoutException("timed out")
+
+        with pytest.raises(CloudflareAPIError, match="request timed out after 3s") as exc_info:
+            cf._request(
+                "GET",
+                "/zones/z1",
+                token="cf-token",
+                timeout=3,
+                action="verify_zone",
+            )
+
+        assert exc_info.value.action == "verify_zone"
+
+    @patch("app.adapters.cloudflare_adapter.httpx2.get")
+    def test_wraps_transport_exception_in_cloudflare_api_error(self, mock_get):
+        mock_get.side_effect = httpx2.HTTPError("network unreachable")
+
+        with pytest.raises(CloudflareAPIError, match="request failed: network unreachable") as exc_info:
+            cf._request(
+                "GET",
+                "/zones/z1",
+                token="cf-token",
+                timeout=3,
+                action="verify_zone",
+            )
+
+        assert exc_info.value.action == "verify_zone"
 
 class TestSharedErrorHandling:
     @patch("app.adapters.cloudflare_adapter.httpx2.get")

@@ -159,22 +159,29 @@ describe("SettingsDockerTab dirty-state guards", () => {
   })
 })
 
-describe("SettingsDockerTab required text-field validation", () => {
-  it("disables Docker Save and shows an inline error when the socket path is cleared, firing no PUT", async () => {
+describe("SettingsDockerTab Docker environment fallback", () => {
+  it("allows saving a blank socket path so Docker can use DOCKER_HOST/from_env", async () => {
     const fetchMock = mockFetch()
     await renderSettings(fetchMock)
 
     fireEvent.click(screen.getByText("Docker"))
-    expect(screen.getByText("Save")).not.toBeDisabled()
+    fireEvent.change(screen.getByPlaceholderText("Leave blank to use DOCKER_HOST / docker.from_env()"), { target: { value: "" } })
 
-    fireEvent.change(screen.getByPlaceholderText("unix:///var/run/docker.sock"), { target: { value: "" } })
-
-    expect(screen.getByText("Required — cannot be blank")).toBeInTheDocument()
+    expect(screen.queryByText("Required — cannot be blank")).not.toBeInTheDocument()
     const saveBtn = screen.getByText("Save")
-    expect(saveBtn).toBeDisabled()
+    expect(saveBtn).not.toBeDisabled()
 
     fireEvent.click(saveBtn)
-    expect(firedPut(fetchMock)).toBe(false)
+    await waitFor(() => {
+      expect(firedPut(fetchMock)).toBe(true)
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/settings/docker",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ socket_path: "" }),
+      }),
+    )
   })
 })
 

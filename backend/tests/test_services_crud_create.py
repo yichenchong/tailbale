@@ -24,6 +24,7 @@ from app.routers.services import (
 )
 from app.services.diagnostics import _validate_upstream_port
 from app.services.errors import DockerUnavailable
+from app.settings_store import set_setting
 from tests._services_helpers import (
     _create_service,
     _make_container,
@@ -217,6 +218,37 @@ class TestMultiExposure:
         assert r1.status_code == 201
         assert r2.status_code == 201
         d1, d2 = r1.json(), r2.json()
+        assert d1["ts_hostname"] != d2["ts_hostname"]
+        assert len(d1["ts_hostname"]) <= 63
+        assert len(d2["ts_hostname"]) <= 63
+
+    def test_tailscale_hostname_uses_configured_prefix(self, client, db_session):
+        set_setting(db_session, "ts_default_hostname_prefix", "tb")
+        db_session.commit()
+
+        resp = _create_service(client, name="App", hostname="prefixed.example.com")
+
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["edge_container_name"] == "edge_app"
+        assert data["network_name"] == "edge_net_app"
+        assert data["ts_hostname"] == "tb-app"
+
+    def test_long_tailscale_prefix_and_collision_suffix_stay_within_label_limit(
+        self, client, db_session
+    ):
+        set_setting(db_session, "ts_default_hostname_prefix", "very-long-custom-tailscale-prefix")
+        db_session.commit()
+
+        shared = "z" * 80
+        r1 = _create_service(client, name=shared + " one", hostname="prefix-one.example.com")
+        r2 = _create_service(client, name=shared + " two", hostname="prefix-two.example.com")
+
+        assert r1.status_code == 201
+        assert r2.status_code == 201
+        d1, d2 = r1.json(), r2.json()
+        assert d1["ts_hostname"].startswith("very-long-custom-tai-")
+        assert d2["ts_hostname"].startswith("very-long-custom-tai-")
         assert d1["ts_hostname"] != d2["ts_hostname"]
         assert len(d1["ts_hostname"]) <= 63
         assert len(d2["ts_hostname"]) <= 63

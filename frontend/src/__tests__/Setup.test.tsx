@@ -183,6 +183,7 @@ describe("Setup wizard - fresh install", () => {
       expect(screen.getByText("Step 3 of 6: Cloudflare")).toBeInTheDocument()
     })
     expect(screen.getByText("Cloudflare Zone ID")).toBeInTheDocument()
+    expect(screen.getByText("Needs Zone:Read and DNS:Edit permissions for your zone.")).toBeInTheDocument()
   })
 
   it("shows Complete Setup on last step", async () => {

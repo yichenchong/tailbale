@@ -1,5 +1,4 @@
 import { type AllSettings, type ConnectionTestResult } from "@/lib/api"
-import { isNonBlank } from "@/lib/validation"
 import { useDirtyForm } from "@/lib/useDirtyForm"
 import { Field } from "@/components/settings/Field"
 import { ConnectionSection } from "@/components/settings/ConnectionSection"
@@ -24,7 +23,7 @@ export function DockerTab({
 
   const handleSave = () => save(() => onSave({ socket_path: values.socket_path }))
 
-  const socketPathValid = isNonBlank(values.socket_path)
+  const usingDockerEnv = values.socket_path.trim() === ""
 
   return (
     <div className="space-y-4">
@@ -32,13 +31,12 @@ export function DockerTab({
         label="Docker Socket Path"
         value={values.socket_path}
         onChange={bind("socket_path")}
-        placeholder="unix:///var/run/docker.sock"
-        error={socketPathValid ? undefined : "Required — cannot be blank"}
+        placeholder="Leave blank to use DOCKER_HOST / docker.from_env()"
+        hint={usingDockerEnv ? "Blank: tailBale will use Docker environment variables." : undefined}
       />
       <ConnectionSection
         saving={saving}
         onSave={handleSave}
-        saveDisabled={!socketPathValid}
         testing={testing}
         onTest={onTest}
         testLabel="Test Connection"

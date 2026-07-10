@@ -135,6 +135,24 @@ class TestDashboardSummary:
         assert len(data["expiring_certs"]) == 1
         assert data["expiring_certs"][0]["service_name"] == "Expiring"
 
+    def test_cert_expiring_exactly_at_renewal_threshold_is_flagged(
+        self, client, db_session, monkeypatch
+    ):
+        threshold = datetime(2026, 1, 31, 12, 0, tzinfo=UTC)
+        svc = _create_service(db_session, "Boundary")
+        db_session.add(Certificate(
+            service_id=svc.id,
+            hostname=svc.hostname,
+            expires_at=threshold,
+        ))
+        db_session.commit()
+        monkeypatch.setattr("app.routers.dashboard.days_from_now", lambda _days: threshold)
+
+        resp = client.get("/api/dashboard/summary")
+        data = resp.json()
+
+        assert [cert["service_name"] for cert in data["expiring_certs"]] == ["Boundary"]
+
     def test_non_expiring_cert_excluded(self, client, db_session):
         svc = _create_service(db_session, "Healthy")
         cert = Certificate(

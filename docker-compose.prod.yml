@@ -10,7 +10,7 @@ services:
       - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-6780}:${PORT:-8080}"
     volumes:
       - ${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       - DATA_DIR=/data
       - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
@@ -21,7 +21,6 @@ services:
       - CORS_ORIGINS=${CORS_ORIGINS-}
       - PORT=${PORT:-8080}
       - HOST=${HOST:-0.0.0.0}
-      - DOCKER_SOCKET=unix:///var/run/docker.sock
     labels:
       - tailbale.main=true
     restart: unless-stopped

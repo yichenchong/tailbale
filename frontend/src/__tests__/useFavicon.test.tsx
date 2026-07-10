@@ -167,6 +167,42 @@ describe("useDynamicFavicon", () => {
     expect(iconHref()).toBe("/favicon-healthy.svg")
   })
 
+  it("ignores stale in-flight responses from a prior effect generation", async () => {
+    const resolvers: Array<(value: Response) => void> = []
+    global.fetch = vi.fn().mockImplementation(
+      () =>
+        new Promise<Response>((resolve) => {
+          resolvers.push(resolve)
+        })
+    ) as unknown as typeof fetch
+
+    const { rerender, unmount } = render(<Probe interval={1000} />)
+    rerender(<Probe interval={2000} />)
+    expect(resolvers).toHaveLength(2)
+
+    await act(async () => {
+      resolvers[1]({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ services: { error: 0 } }),
+      } as Response)
+    })
+    await flushMicrotasks()
+    expect(iconHref()).toBe("/favicon-healthy.svg")
+
+    await act(async () => {
+      resolvers[0]({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ services: { error: 1 } }),
+      } as Response)
+    })
+    await flushMicrotasks()
+
+    expect(iconHref()).toBe("/favicon-healthy.svg")
+    unmount()
+  })
+
   it("stops polling permanently after a 401 response", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,

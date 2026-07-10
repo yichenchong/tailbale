@@ -155,7 +155,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
             </label>
             <label className="block">
               <span className="text-sm font-medium text-zinc-700">Cloudflare API Token</span>
-              <p className="text-xs text-zinc-400 mt-0.5">Needs DNS:Edit permissions for your zone.</p>
+              <p className="text-xs text-zinc-400 mt-0.5">Needs Zone:Read and DNS:Edit permissions for your zone.</p>
               <input
                 type="password"
                 value={cfToken}
@@ -214,7 +214,7 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
         {step === 5 && (
           <label className="block">
             <span className="text-sm font-medium text-zinc-700">Docker Socket Path</span>
-            <p className="text-xs text-zinc-400 mt-0.5">Usually unix:///var/run/docker.sock on Linux.</p>
+            <p className="text-xs text-zinc-400 mt-0.5">Usually unix:///var/run/docker.sock on Linux. Leave blank to use DOCKER_HOST / docker.from_env().</p>
             <input
               type="text"
               value={dockerSocket}

@@ -190,6 +190,16 @@ describe("Pagination component", () => {
     expect(input).toHaveValue("2")
   })
 
+  it("rejects partially numeric jumps instead of parseInt-ing a prefix", () => {
+    const onGoToPage = vi.fn()
+    render(<Pagination {...defaults} page={2} offset={50} onGoToPage={onGoToPage} />)
+    const input = screen.getByLabelText("Go to page")
+    fireEvent.change(input, { target: { value: "3abc" } })
+    fireEvent.keyDown(input, { key: "Enter" })
+    expect(onGoToPage).not.toHaveBeenCalled()
+    expect(input).toHaveValue("2")
+  })
+
   it("mirrors the live page when navigation changes it", () => {
     const { rerender } = render(<Pagination {...defaults} page={1} offset={0} />)
     expect(screen.getByLabelText("Go to page")).toHaveValue("1")

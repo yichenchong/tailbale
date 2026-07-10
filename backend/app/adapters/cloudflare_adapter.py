@@ -6,9 +6,9 @@ All functions are synchronous (httpx2 sync client).
 Error-signaling convention
 --------------------------
 HARD failures a caller must not silently continue past RAISE a typed
-exception. Every Cloudflare API error path funnels through ``_check_response``
-and raises ``CloudflareAPIError`` (a ``RuntimeError`` subclass) — uniformly for
-a structured CF error envelope, a non-JSON edge response (HTML 5xx pages, bare
+exception. Every Cloudflare API error path raises ``CloudflareAPIError`` (a
+``RuntimeError`` subclass) — uniformly for transport failures/timeouts, a
+structured CF error envelope, a non-JSON edge response (HTML 5xx pages, bare
 "522"/"524"), and an unexpected non-object body. Consequently ``create_a_record``
 / ``update_a_record`` never return ``None``/an error sentinel on failure; on
 success they always return a dict (a present-but-null CF ``result`` is coerced
@@ -170,17 +170,25 @@ def _request(
         kwargs["params"] = params
 
     url = f"{CF_API_BASE}{path}"
-    match method:
-        case "GET":
-            resp = httpx2.get(url, **kwargs)
-        case "POST":
-            resp = httpx2.post(url, **kwargs)
-        case "PATCH":
-            resp = httpx2.patch(url, **kwargs)
-        case "DELETE":
-            resp = httpx2.delete(url, **kwargs)
-        case _:
-            raise ValueError(f"Unsupported Cloudflare request method: {method}")
+    try:
+        match method:
+            case "GET":
+                resp = httpx2.get(url, **kwargs)
+            case "POST":
+                resp = httpx2.post(url, **kwargs)
+            case "PATCH":
+                resp = httpx2.patch(url, **kwargs)
+            case "DELETE":
+                resp = httpx2.delete(url, **kwargs)
+            case _:
+                raise ValueError(f"Unsupported Cloudflare request method: {method}")
+    except httpx2.TimeoutException as exc:
+        raise CloudflareAPIError(
+            action, f"request timed out after {timeout:g}s"
+        ) from exc
+    except httpx2.HTTPError as exc:
+        message = str(exc) or exc.__class__.__name__
+        raise CloudflareAPIError(action, f"request failed: {message}") from exc
     return _check_response(resp, action)
 
 

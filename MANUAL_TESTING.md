@@ -9,7 +9,7 @@ order — each section builds on the previous one.
 
 - [ ] tailBale container is running (`docker logs tailbale` shows startup)
 - [ ] `/api/health` returns `{"status":"ok"}` (curl from the host shell)
-- [ ] You have a Cloudflare zone ID + API token with DNS edit permissions
+- [ ] You have a Cloudflare zone ID + API token scoped to the zone with Zone:Read and DNS:Edit permissions
 - [ ] You have a Tailscale auth key (reusable, tagged for the tailnet)
 - [ ] You have a Tailscale API key for device management
 - [ ] At least one other Docker container is running on the host (e.g. Nextcloud,

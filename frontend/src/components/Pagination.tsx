@@ -47,9 +47,12 @@ export function Pagination({
   if (total <= limit) return null
 
   const commit = () => {
-    const n = Number.parseInt(draft, 10)
-    if (Number.isNaN(n)) {
-      // Non-numeric input is ignored: snap the box back to the current page.
+    const trimmed = draft.trim()
+    const n = Number(trimmed)
+    if (trimmed === "" || !Number.isInteger(n)) {
+      // Non-integer input is ignored: snap the box back to the current page.
+      // Number.parseInt would accept partial strings like "2abc" as page 2,
+      // which turns an invalid draft into an accidental navigation.
       setDraft(String(page))
       return
     }

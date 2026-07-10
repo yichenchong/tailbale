@@ -20,12 +20,13 @@ from app.timeutil import iso
 # DNS label limited to 63 chars (RFC 1035 §3.1). Longer values are silently
 # truncated/rejected, so the live MagicDNS hostname would diverge from the
 # persisted ts_hostname — risking collisions and cert-hostname confusion.
-# ts_hostname is f"edge-{slug}" (5-char prefix), so the slug must stay within
-# 63 - len("edge-") = 58 chars.
-_MAX_SLUG_LEN = 63 - len("edge-")  # 58
-# Cap the *base* slug at a round 50 chars — comfortably below _MAX_SLUG_LEN and
-# leaving 8 chars of headroom for the "-{n}" uniqueness suffix appended on
-# collisions, so even suffixed slugs stay within the 58-char budget.
+_TS_HOSTNAME_MAX_LEN = 63
+_TS_HOSTNAME_SEPARATOR = "-"
+_MAX_TS_PREFIX_LEN = 20
+# Cap the *base* slug at a round 50 chars for the default "edge-" prefix —
+# comfortably below the 58-char default budget and leaving 8 chars of headroom
+# for the "-{n}" uniqueness suffix appended on collisions. Custom prefixes use
+# the smaller of this cap and their remaining DNS-label budget.
 _MAX_BASE_SLUG_LEN = 50
 
 
@@ -42,18 +43,24 @@ def network_name(slug: str) -> str:
     return f"edge_net_{slug}"
 
 
-def ts_hostname(slug: str) -> str:
-    return f"edge-{slug}"
+def ts_hostname_prefix(prefix: str = "edge") -> str:
+    return slugify(prefix)[:_MAX_TS_PREFIX_LEN].rstrip("-") or "edge"
 
 
-def derive_edge_names(slug: str) -> tuple[str, str, str]:
+def ts_hostname(slug: str, prefix: str = "edge") -> str:
+    return f"{ts_hostname_prefix(prefix)}{_TS_HOSTNAME_SEPARATOR}{slug}"
+
+
+def derive_edge_names(slug: str, ts_prefix: str = "edge") -> tuple[str, str, str]:
     """Return ``(edge_container_name, network_name, ts_hostname)`` for *slug*."""
-    return edge_container_name(slug), network_name(slug), ts_hostname(slug)
+    return edge_container_name(slug), network_name(slug), ts_hostname(slug, ts_prefix)
 
 
-def unique_slug(db: Session, name: str) -> str:
+def unique_slug(db: Session, name: str, ts_prefix: str = "edge") -> str:
     """Return a slug derived from *name* that doesn't collide with edge names."""
-    base = slugify(name)[:_MAX_BASE_SLUG_LEN].rstrip("-") or "service"
+    prefix_budget = _TS_HOSTNAME_MAX_LEN - len(ts_hostname_prefix(ts_prefix)) - len(_TS_HOSTNAME_SEPARATOR)
+    max_slug_len = max(1, prefix_budget)
+    base = slugify(name)[: min(_MAX_BASE_SLUG_LEN, max_slug_len)].rstrip("-") or "service"
     slug = base
     suffix = 2
     while (
@@ -61,13 +68,13 @@ def unique_slug(db: Session, name: str) -> str:
         .filter(
             (Service.edge_container_name == edge_container_name(slug))
             | (Service.network_name == network_name(slug))
-            | (Service.ts_hostname == ts_hostname(slug))
+            | (Service.ts_hostname == ts_hostname(slug, ts_prefix))
         )
         .first()
     ):
         marker = f"-{suffix}"
         # Trim the base further so a multi-digit suffix can't overflow the budget.
-        slug = f"{base[: _MAX_SLUG_LEN - len(marker)].rstrip('-')}{marker}"
+        slug = f"{base[: max(1, max_slug_len - len(marker))].rstrip('-')}{marker}"
         suffix += 1
     return slug
 

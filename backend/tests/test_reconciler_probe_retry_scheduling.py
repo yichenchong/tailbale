@@ -237,6 +237,43 @@ class TestProbeRetryScheduling:
         finally:
             probe_retry._ACTIVE_RETRIES.clear()
 
+    def test_reschedules_when_existing_retry_is_already_cancelled(self):
+        # A healthy sweep/full reconcile cancels an in-flight retry, but the
+        # sleeping thread removes its active key only after it wakes. If a later
+        # reconcile degrades back to "HTTPS probe only" in that tiny window, the
+        # schedule request must replace the cancelled generation instead of being
+        # dropped by the dedup guard; otherwise the service can sit warning with
+        # no pending probe retry until the next sweep.
+        key = ("svc_cancelled", None)
+        old_cancel = probe_retry.threading.Event()
+        old_cancel.set()
+        probe_retry._ACTIVE_RETRIES[key] = old_cancel
+        probe_retry._CANCEL_EVENTS[key] = old_cancel
+        try:
+            thread = MagicMock()
+            with patch.object(probe_retry.threading, "Thread", return_value=thread) as mock_thread:
+                probe_retry.schedule_probe_retry("svc_cancelled")
+
+            mock_thread.assert_called_once()
+            thread.start.assert_called_once()
+            new_cancel = mock_thread.call_args.kwargs["args"][2]
+            assert new_cancel is not old_cancel
+            assert not new_cancel.is_set()
+            assert probe_retry._ACTIVE_RETRIES[key] is new_cancel
+            assert probe_retry._CANCEL_EVENTS[key] is new_cancel
+
+            # The old cancelled thread's cleanup must be generation-safe: it must
+            # not delete the freshly scheduled retry's active marker.
+            with probe_retry._ACTIVE_RETRIES_LOCK:
+                if probe_retry._ACTIVE_RETRIES.get(key) is old_cancel:
+                    del probe_retry._ACTIVE_RETRIES[key]
+            probe_retry._forget_cancel_event(key, old_cancel)
+            assert probe_retry._ACTIVE_RETRIES[key] is new_cancel
+            assert probe_retry._CANCEL_EVENTS[key] is new_cancel
+        finally:
+            probe_retry._ACTIVE_RETRIES.clear()
+            probe_retry._CANCEL_EVENTS.clear()
+
     def test_thread_start_failure_discards_active_retry_key(self):
         # When Thread.start() raises (e.g. thread exhaustion), schedule_probe_retry
         # MUST re-raise AND remove the key it optimistically registered in

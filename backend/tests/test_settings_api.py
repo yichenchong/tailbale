@@ -442,6 +442,40 @@ class TestUpdateDocker:
         assert resp.status_code == 200
         assert resp.json()["docker"]["socket_path"] == "tcp://localhost:2375"
 
+    def test_blank_socket_path_selects_docker_from_env(self, client, monkeypatch):
+        resp = client.put("/api/settings/docker", json={"socket_path": "   "})
+        assert resp.status_code == 200
+        assert resp.json()["docker"]["socket_path"] == ""
+
+        calls = {"base_url": False, "from_env": False}
+
+        class FakeDockerClient:
+            def __init__(self, base_url=None):
+                calls["base_url"] = True
+
+            @classmethod
+            def from_env(cls):
+                calls["from_env"] = True
+                return cls.__new__(cls)
+
+            def ping(self):
+                pass
+
+            def info(self):
+                return {"ServerVersion": "27.1.0"}
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.routers.settings.docker.DockerClient", FakeDockerClient)
+
+        resp = client.post("/api/settings/test/docker")
+
+        assert resp.status_code == 200
+        assert resp.json() == {"success": True, "message": "Connected to Docker 27.1.0"}
+        assert calls["from_env"] is True
+        assert calls["base_url"] is False
+
 
 class TestUpdatePaths:
     def test_update_paths(self, client):
@@ -507,6 +541,18 @@ class TestSetupComplete:
 
         # Verify it persists
         resp = client.get("/api/settings")
+        assert resp.json()["setup_complete"] is True
+
+    def test_mark_setup_complete_accepts_blank_docker_socket_for_from_env(
+        self, client, tmp_data_dir
+    ):
+        _configure_setup_prerequisites(client)
+        resp = client.put("/api/settings/docker", json={"socket_path": ""})
+        assert resp.status_code == 200
+
+        resp = client.put("/api/settings/setup-complete")
+
+        assert resp.status_code == 200
         assert resp.json()["setup_complete"] is True
 
 

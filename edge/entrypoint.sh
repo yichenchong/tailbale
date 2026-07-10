@@ -49,11 +49,17 @@ fi
 # (idempotent: a no-op refresh when the persisted state is already authed);
 # without it we rely on existing state in the statedir.
 TS_AUTH_FAILED=false
+LOGIN_SERVER_ARG=""
+if [ -n "${TS_LOGIN_SERVER:-}" ]; then
+    LOGIN_SERVER_ARG="--login-server=${TS_LOGIN_SERVER}"
+fi
+
 if [ -n "${TS_AUTHKEY:-}" ]; then
     echo "[edge] Authenticating with Tailscale (hostname: ${TS_HOSTNAME:-edge})..."
     if ! tailscale up \
         --authkey="$TS_AUTHKEY" \
         --hostname="${TS_HOSTNAME:-edge}" \
+        ${LOGIN_SERVER_ARG} \
         ${TS_EXTRA_ARGS:-}; then
         TS_AUTH_FAILED=true
         echo "[edge] ERROR: Tailscale authentication failed. Check that TS_AUTHKEY is a valid auth key, not an API key."
@@ -62,6 +68,7 @@ else
     echo "[edge] No TS_AUTHKEY set, assuming existing state..."
     tailscale up \
         --hostname="${TS_HOSTNAME:-edge}" \
+        ${LOGIN_SERVER_ARG} \
         ${TS_EXTRA_ARGS:-} || true
 fi
 

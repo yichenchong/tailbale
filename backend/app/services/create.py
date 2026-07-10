@@ -5,6 +5,7 @@ import hashlib
 from fastapi import BackgroundTasks
 from sqlalchemy.orm import Session
 
+from app import settings_store
 from app.database import commit_with_lock, db_write_section, flush_with_lock
 from app.edge.docker_client import resolve_socket
 from app.events.event_emitter import emit_event
@@ -35,8 +36,9 @@ def create_service(
         if existing:
             raise HostnameInUse(body.hostname)
 
-        slug = unique_slug(db, body.name)
-        edge_container_name, network_name, ts_hostname = derive_edge_names(slug)
+        ts_prefix = settings_store.get_setting(db, "ts_default_hostname_prefix")
+        slug = unique_slug(db, body.name, ts_prefix)
+        edge_container_name, network_name, ts_hostname = derive_edge_names(slug, ts_prefix)
         svc = Service(
             base_domain=configured_domain,
             edge_container_name=edge_container_name,

@@ -31,7 +31,7 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 
 - **A Linux host** with Docker installed
 - **Domain** managed in Cloudflare
-- **Cloudflare API token** with DNS:Edit permission
+- **Cloudflare API token** scoped to your zone with Zone:Read and DNS:Edit permissions
 - **Tailscale account** with both:
   - a reusable auth key for edge login
   - an API key for device cleanup and management
@@ -99,9 +99,8 @@ npm run dev
 ### Tests
 
 ```bash
-# Backend (from repo root or backend/)
-python3 -m pytest
-
+# Backend (from repo root)
+backend/.venv/bin/python -m pytest
 # Frontend (from frontend/)
 npx vitest run
 ```
@@ -114,9 +113,9 @@ npx vitest run
 │       ├── main.py              # FastAPI app + lifespan
 │       ├── config.py            # Environment-based settings
 │       ├── auth.py              # Password hashing, JWT, auth dependency
-│       ├── models/              # SQLAlchemy models (7 tables + users)
+│       ├── models/              # SQLAlchemy models (services, status, certs, DNS, events, jobs, settings, users)
 │       ├── routers/             # API endpoints
-│       ├── services/            # Service lifecycle layer (crud/edge_ops/cert_ops/errors)
+│       ├── services/            # Service lifecycle layer (create/update/delete/edge_ops/cert_ops/errors)
 │       ├── edge/                # Edge container + network management
 │       ├── certs/               # Certificate issuance + renewal
 │       ├── adapters/            # Cloudflare DNS adapter

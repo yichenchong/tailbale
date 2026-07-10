@@ -38,14 +38,16 @@ async def lifespan(app: FastAPI):
     startup_module.prepare_database()
     startup_module.recover_stale_running_jobs()
     background_tasks = startup_module.create_background_tasks()
-    yield
-    # Shutdown: cancel every background task, then await them all so none leak.
-    # Cancel ALL first, then gather with return_exceptions so a task that already
-    # exited with an error (or is mid-cancellation) can't short-circuit awaiting
-    # the rest — every task is cancelled and reaped regardless of its state.
-    for task in background_tasks:
-        task.cancel()
-    await asyncio.gather(*background_tasks, return_exceptions=True)
+    try:
+        yield
+    finally:
+        # Shutdown: cancel every background task, then await them all so none leak.
+        # Cancel ALL first, then gather with return_exceptions so a task that already
+        # exited with an error (or is mid-cancellation) can't short-circuit awaiting
+        # the rest — every task is cancelled and reaped regardless of its state.
+        for task in background_tasks:
+            task.cancel()
+        await asyncio.gather(*background_tasks, return_exceptions=True)
 
 
 app = FastAPI(

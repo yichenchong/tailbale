@@ -99,6 +99,7 @@ def recreate_edge(db: Session, service_id: str) -> dict:
             runtime["host_generated_dir"], runtime["host_certs_dir"],
             runtime["host_tailscale_state_dir"],
             resolve_socket(db),
+            ts_control_url=settings_store.get_setting(db, "ts_control_url"),
         )
 
         with db_write_section(db):
@@ -141,6 +142,7 @@ def update_edge_job(service_id: str, socket: str | None) -> dict:
             runtime["host_generated_dir"], runtime["host_certs_dir"],
             runtime["host_tailscale_state_dir"],
             socket,
+            ts_control_url=settings_store.get_setting(thread_db, "ts_control_url"),
         )
 
         with db_write_section(thread_db):

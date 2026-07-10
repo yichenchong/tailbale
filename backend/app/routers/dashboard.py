@@ -49,11 +49,10 @@ def dashboard_summary(db: Session = Depends(get_db)):
     # use, so the dashboard attention list tracks the actual renewal policy
     # instead of a hard-coded 30 days.
     window_days = settings_store.get_positive_int_setting(db, "cert_renewal_window_days")
-    # cert_renewal_window_days is only loosely bounded at write, so a
-    # legacy/directly-set huge value would push the horizon past the maximum
-    # representable date. days_from_now returns None on that OverflowError; an
-    # unbounded horizon means "every cert is within range", so clamp to
-    # datetime.max (matches the saturating policy in services/cert_ops.py).
+    # API writes cap cert_renewal_window_days, but direct DB edits or legacy
+    # rows can still hold a huge value. days_from_now returns None on the
+    # resulting OverflowError; an unbounded horizon means "every cert is within
+    # range", so clamp to datetime.max (matches the saturating renewal policy).
     threshold = days_from_now(window_days)
     if threshold is None:
         threshold = datetime.max.replace(tzinfo=UTC)
@@ -61,7 +60,7 @@ def dashboard_summary(db: Session = Depends(get_db)):
         db.query(Certificate)
         .filter(
             Certificate.expires_at.isnot(None),
-            Certificate.expires_at < threshold,
+            Certificate.expires_at <= threshold,
         )
         # Soonest-to-expire (and already-expired) first so the most urgent cert
         # heads the list; service_id breaks ties for deterministic ordering.

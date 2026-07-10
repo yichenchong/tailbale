@@ -97,8 +97,9 @@ describe("isPositiveInt (mirrors Field(ge=1), backend/app/schemas/settings.py)",
 })
 
 describe("isNonBlank (mirrors Field(min_length=1)+.strip(), backend/app/schemas/settings.py)", () => {
-  // zone_id, control_url, default_ts_hostname_prefix, socket_path: min_length=1
-  // paired with a server-side strip — a whitespace-only value 422s.
+  // zone_id, control_url, default_ts_hostname_prefix: min_length=1 paired with
+  // a server-side strip, so whitespace-only values 422. Docker socket_path is
+  // deliberately exempt: blank selects docker.from_env().
   it("accepts any value with non-whitespace content", () => {
     expect(isNonBlank("x")).toBe(true)
     expect(isNonBlank("  trimmed  ")).toBe(true)
