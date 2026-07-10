@@ -89,7 +89,7 @@ class TestReconcileDnsOrchestration:
         # holding _GLOBAL_OPS_MUTEX (tier 2b), so a concurrent orphaned-DNS cleanup
         # retry (jobs.py, which holds the same mutex) can never delete a record
         # this reconcile is mid-flight creating. This invariant was introduced by
-        # the AR16 step extraction (steps._ensure_dns wraps reconcile_dns in
+        # the AR16 step extraction (steps.ensure_dns wraps reconcile_dns in
         # global_ops_lock); nothing else pins it, so a future edit could silently
         # drop the lock and reintroduce the delete-mid-create race with the whole
         # suite still green. Fails if the global_ops_lock() wrapper is removed.

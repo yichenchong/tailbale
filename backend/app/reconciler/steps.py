@@ -27,10 +27,19 @@ from app import secrets, settings_store
 from app.adapters import dns_reconciler
 from app.certs import cert_manager, renewal_task
 from app.database import commit_with_lock, db_write_section
-from app.edge import caddy_admin, config_renderer, container_manager, network_manager, tailscale_ops
+from app.edge import (
+    caddy_admin,
+    config_renderer,
+    container_manager,
+    container_session,
+    network_manager,
+    tailscale_ops,
+)
+from app.events.types import EventKind
 from app.fsutil import atomic_write_text
 from app.health import health_checker
 from app.health.health_checker import CRITICAL_CHECKS
+from app.health.status_policy import phase_level
 from app.locks import global_ops_lock
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -76,7 +85,7 @@ class _ConfigStage(NamedTuple):
     current_cert_fp: str | None
 
 
-def _validate_and_prepare(db: Session, service: Service) -> tuple[str, _RuntimePaths]:
+def validate_and_prepare(db: Session, service: Service) -> tuple[str, _RuntimePaths]:
     """Validating step: check secrets, resolve runtime paths, create per-service dirs.
 
     Returns the Tailscale auth key and the resolved runtime paths. Raises
@@ -105,7 +114,7 @@ def _validate_and_prepare(db: Session, service: Service) -> tuple[str, _RuntimeP
     return ts_authkey, paths
 
 
-def _ensure_network(db: Session, service: Service, socket_path: str | None) -> None:
+def ensure_network(db: Session, service: Service, socket_path: str | None) -> None:
     """Creating-network step: ensure the Docker network and heal a stale upstream id."""
     service_id = service.id
     _update_phase(db, service_id, "creating_network", "Ensuring Docker network")
@@ -127,7 +136,7 @@ def _ensure_network(db: Session, service: Service, socket_path: str | None) -> N
     )
 
 
-def _ensure_cert(db: Session, service: Service, cert_path: Path) -> None:
+def ensure_cert(db: Session, service: Service, cert_path: Path) -> None:
     """Ensuring-cert step: (re)issue the cert when missing, expiring, or mismatched."""
     _update_phase(db, service.id, "ensuring_cert", "Checking certificate")
     if not cert_path.exists():
@@ -159,7 +168,7 @@ def _ensure_cert(db: Session, service: Service, cert_path: Path) -> None:
         renewal_task.process_service_cert(db, service)
 
 
-def _render_and_stage_config(
+def render_and_stage_config(
     db: Session, service: Service, generated_dir: Path, cert_path: Path
 ) -> _ConfigStage:
     """Rendering-config step: render the Caddyfile, diff it, and set reload markers.
@@ -213,7 +222,7 @@ def _render_and_stage_config(
     )
 
 
-def _ensure_edge(
+def ensure_edge(
     db: Session,
     service: Service,
     ts_authkey: str,
@@ -224,7 +233,7 @@ def _ensure_edge(
     service_id = service.id
     service_name = service.name
     _update_phase(db, service_id, "ensuring_edge", "Ensuring edge container")
-    container = container_manager._find_edge_container(service_id, service.edge_container_name, socket_path)
+    container = container_session._find_edge_container(service_id, service.edge_container_name, socket_path)
     if container is None:
         container_id = container_manager.create_edge_container(
             service,
@@ -239,27 +248,27 @@ def _ensure_edge(
             service_id,
             edge_container_id=container_id,
             event={
-                "kind": "edge_started",
+                "kind": EventKind.EDGE_STARTED,
                 "message": f"Edge container created for '{service_name}'",
             },
         )
     else:
         _persist_status(db, service_id, edge_container_id=container.id)
 
-    container = container_manager._find_edge_container(service_id, service.edge_container_name, socket_path)
+    container = container_session._find_edge_container(service_id, service.edge_container_name, socket_path)
     if container and container.status != "running":
         container_manager.start_edge(service_id, service.edge_container_name, socket_path)
         _persist_status(
             db,
             service_id,
             event={
-                "kind": "edge_started",
+                "kind": EventKind.EDGE_STARTED,
                 "message": f"Edge container started for '{service_name}'",
             },
         )
 
 
-def _detect_and_persist_ip(db: Session, service: Service, socket_path: str | None) -> str | None:
+def detect_and_persist_ip(db: Session, service: Service, socket_path: str | None) -> str | None:
     """Detecting-ip step: detect the Tailscale IP and persist it (event on change)."""
     service_id = service.id
     service_name = service.name
@@ -276,7 +285,7 @@ def _detect_and_persist_ip(db: Session, service: Service, socket_path: str | Non
         current_status = db.get(ServiceStatus, service_id)
         if current_status and current_status.tailscale_ip != ts_ip:
             event = {
-                "kind": "tailscale_ip_acquired",
+                "kind": EventKind.TAILSCALE_IP_ACQUIRED,
                 "message": f"Tailscale IP {ts_ip} assigned to '{service_name}'",
                 "details": {"ip": ts_ip},
             }
@@ -284,7 +293,7 @@ def _detect_and_persist_ip(db: Session, service: Service, socket_path: str | Non
     return ts_ip
 
 
-def _ensure_dns(db: Session, service: Service, ts_ip: str | None) -> None:
+def ensure_dns(db: Session, service: Service, ts_ip: str | None) -> None:
     """Ensuring-dns step: create/update the public DNS record (best-effort)."""
     service_id = service.id
     _update_phase(db, service_id, "ensuring_dns", "Updating DNS record")
@@ -304,14 +313,14 @@ def _ensure_dns(db: Session, service: Service, ts_ip: str | None) -> None:
                 db,
                 service_id,
                 event={
-                    "kind": "dns_update_failed",
+                    "kind": EventKind.DNS_UPDATE_FAILED,
                     "message": "DNS reconciliation failed",
                     "level": "warning",
                 },
             )
 
 
-def _reload_if_needed(
+def reload_if_needed(
     db: Session,
     service: Service,
     stage: _ConfigStage,
@@ -362,13 +371,13 @@ def _reload_if_needed(
         db,
         service_id,
         event={
-            "kind": "caddy_reloaded",
+            "kind": EventKind.CADDY_RELOADED,
             "message": f"Caddy reloaded for '{service_name}'",
         },
     )
 
 
-def _run_and_persist_health(
+def run_and_persist_health(
     db: Session,
     service: Service,
     generated_dir: Path,
@@ -388,7 +397,7 @@ def _run_and_persist_health(
 
     phase = health_checker.aggregate_status(checks)
     now = datetime.now(UTC)
-    level = "info" if phase == "healthy" else "warning" if phase == "warning" else "error"
+    level = phase_level(phase)
     _persist_status(
         db,
         service_id,
@@ -398,7 +407,7 @@ def _run_and_persist_health(
         last_probe_at=now,
         last_reconciled_at=now,
         event={
-            "kind": "reconcile_completed",
+            "kind": EventKind.RECONCILE_COMPLETED,
             "message": f"Reconciliation completed for '{service_name}' — {phase}",
             "level": level,
             "details": {"phase": phase, "checks": checks},
@@ -407,7 +416,7 @@ def _run_and_persist_health(
     return phase, checks
 
 
-def _maybe_schedule_probe_retry(
+def maybe_schedule_probe_retry(
     checks: dict, phase: str, service_id: str, socket_path: str | None
 ) -> None:
     """Best-effort: schedule a background HTTPS-probe retry when only the probe failed.

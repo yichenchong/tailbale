@@ -45,7 +45,7 @@ def _make_mock_container(
 
 
 class TestListContainers:
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_lists_containers(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -63,7 +63,7 @@ class TestListContainers:
         assert "nginx" in names
         assert "postgres" in names
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_closes_docker_client(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -74,7 +74,7 @@ class TestListContainers:
         assert resp.status_code == 200
         mock_client.close.assert_called_once()
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_closes_docker_client_when_list_fails(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -86,7 +86,7 @@ class TestListContainers:
         assert resp.json() == {"containers": [], "total": 0}
         mock_client.close.assert_called_once()
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_list_connection_error_degrades_to_empty(self, mock_docker_cls, client):
         # The client constructs fine (daemon reachable at version-probe time) but
         # the daemon dies before containers.list(); the SDK surfaces a raw
@@ -105,7 +105,7 @@ class TestListContainers:
         assert resp.json() == {"containers": [], "total": 0}
         mock_client.close.assert_called_once()
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_container_fields(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -136,7 +136,7 @@ class TestListContainers:
         assert "custom_net" in c["networks"]
         assert c["labels"]["com.docker.compose.project"] == "mystack"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_hides_managed_containers(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -150,7 +150,7 @@ class TestListContainers:
         assert data["total"] == 1
         assert data["containers"][0]["name"] == "myapp"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_hides_main_orchestrator_container(self, mock_docker_cls, client):
         """The tailBale orchestrator itself (labeled tailbale.main=true, per
         docker-compose) must never be offered as an exposure candidate. It carries
@@ -167,7 +167,7 @@ class TestListContainers:
         assert data["total"] == 1
         assert data["containers"][0]["name"] == "myapp"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_shows_managed_when_not_hidden(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -180,7 +180,7 @@ class TestListContainers:
         data = resp.json()
         assert data["total"] == 2
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_search_by_name(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -195,7 +195,7 @@ class TestListContainers:
         assert data["total"] == 1
         assert data["containers"][0]["name"] == "nextcloud"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_search_by_image(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -209,7 +209,7 @@ class TestListContainers:
         assert data["total"] == 1
         assert data["containers"][0]["name"] == "web"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_search_case_insensitive(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -221,7 +221,7 @@ class TestListContainers:
         data = resp.json()
         assert data["total"] == 1
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_search_trims_whitespace(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -235,7 +235,7 @@ class TestListContainers:
         assert data["total"] == 1
         assert data["containers"][0]["name"] == "nextcloud"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_running_only_default(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -244,7 +244,7 @@ class TestListContainers:
         client.get("/api/discovery/containers")
         mock_client.containers.list.assert_called_once_with(all=False)
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_running_only_false(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -253,7 +253,7 @@ class TestListContainers:
         client.get("/api/discovery/containers?running_only=false")
         mock_client.containers.list.assert_called_once_with(all=True)
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_docker_unavailable_returns_empty(self, mock_docker_cls, client):
         mock_docker_cls.side_effect = docker.errors.DockerException("Docker not available")
 
@@ -263,7 +263,7 @@ class TestListContainers:
         assert data["total"] == 0
         assert data["containers"] == []
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_container_without_image_tags(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -276,7 +276,7 @@ class TestListContainers:
         data = resp.json()
         assert data["containers"][0]["image"] == "myapp:latest"  # Falls back to Config.Image
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_uses_config_image_instead_of_lazy_image_tags(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -294,7 +294,7 @@ class TestListContainers:
 
         assert data["containers"][0]["image"] == "linuxserver/nextcloud:28"
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_container_no_ports(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -307,7 +307,7 @@ class TestListContainers:
         data = resp.json()
         assert data["containers"][0]["ports"] == []
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_container_ports_fall_back_to_exposed_ports(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -324,7 +324,7 @@ class TestListContainers:
             {"container_port": "8443", "host_port": None, "protocol": "tcp"},
         ]
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_container_ports_use_first_available_host_port(self, mock_docker_cls, client):
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
@@ -343,7 +343,7 @@ class TestListContainers:
             {"container_port": "80", "host_port": "8080", "protocol": "tcp"}
         ]
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_container_empty_host_port_normalized_to_none(self, mock_docker_cls, client):
         # A stopped/unassigned published port can surface a binding with an empty
         # HostPort ("") in `docker inspect` (discovery lists stopped containers
@@ -369,7 +369,7 @@ class TestListContainers:
             {"container_port": "80", "host_port": None, "protocol": "tcp"}
         ]
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_uses_base_url_when_socket_path_configured(self, mock_docker_cls, client):
         """A configured docker_socket_path is passed verbatim as base_url."""
         mock_client = MagicMock()
@@ -383,7 +383,7 @@ class TestListContainers:
         mock_docker_cls.assert_called_once_with(base_url="unix:///var/run/docker.sock")
         mock_docker_cls.from_env.assert_not_called()
 
-    @patch("app.routers.discovery.docker.DockerClient")
+    @patch("app.services.diagnostics.docker.DockerClient")
     def test_uses_from_env_when_socket_path_blank(self, mock_docker_cls, client, db_session):
         """When docker_socket_path is cleared (operator opts into DOCKER_HOST),
         discovery must resolve the daemon via from_env() so it honors DOCKER_HOST,

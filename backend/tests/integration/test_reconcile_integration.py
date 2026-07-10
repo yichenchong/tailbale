@@ -311,7 +311,7 @@ class _FakeCFResponse:
 class TestReconcileExercisesRealDnsPath:
     """RC-R2-2: close the seam's DNS gap.
 
-    The other integration tests never set CLOUDFLARE_TOKEN, so ``_ensure_dns``
+    The other integration tests never set CLOUDFLARE_TOKEN, so ``ensure_dns``
     short-circuits and the REAL ``reconcile_dns`` create/update path — plus the
     new ``global_ops_lock`` wrapping around it — is never exercised by the seam
     despite its docstring advertising a full ``router -> service -> reconciler ->

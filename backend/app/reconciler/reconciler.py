@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from sqlalchemy.orm import Session
 
 from app.database import rollback_with_lock
+from app.events.types import EventKind
 from app.locks import forget_reconcile_lock, service_reconcile_lock
 from app.models.service import Service
 from app.reconciler import steps
@@ -86,28 +87,28 @@ def _reconcile_service_locked(
     service_name = service.name
 
     try:
-        ts_authkey, paths = steps._validate_and_prepare(db, service)
+        ts_authkey, paths = steps.validate_and_prepare(db, service)
         cert_path = paths.certs_dir / service.hostname / "current" / "fullchain.pem"
 
-        steps._ensure_network(db, service, socket_path)
-        steps._ensure_cert(db, service, cert_path)
-        stage = steps._render_and_stage_config(db, service, paths.generated_dir, cert_path)
-        steps._ensure_edge(db, service, ts_authkey, paths, socket_path)
+        steps.ensure_network(db, service, socket_path)
+        steps.ensure_cert(db, service, cert_path)
+        stage = steps.render_and_stage_config(db, service, paths.generated_dir, cert_path)
+        steps.ensure_edge(db, service, ts_authkey, paths, socket_path)
 
-        ts_ip = steps._detect_and_persist_ip(db, service, socket_path)
+        ts_ip = steps.detect_and_persist_ip(db, service, socket_path)
         if ts_ip:
             result["tailscale_ip"] = ts_ip
 
-        steps._ensure_dns(db, service, ts_ip)
-        steps._reload_if_needed(db, service, stage, socket_path, result)
+        steps.ensure_dns(db, service, ts_ip)
+        steps.reload_if_needed(db, service, stage, socket_path, result)
 
-        phase, checks = steps._run_and_persist_health(
+        phase, checks = steps.run_and_persist_health(
             db, service, paths.generated_dir, paths.certs_dir, socket_path
         )
         result["health_checks"] = checks
         result["phase"] = phase
 
-        steps._maybe_schedule_probe_retry(checks, phase, service_id, socket_path)
+        steps.maybe_schedule_probe_retry(checks, phase, service_id, socket_path)
 
     except ReconcileError as e:
         rollback_with_lock(db)
@@ -121,7 +122,7 @@ def _reconcile_service_locked(
             message=str(e),
             last_reconciled_at=datetime.now(UTC),
             event={
-                "kind": "reconcile_failed",
+                "kind": EventKind.RECONCILE_FAILED,
                 "message": f"Reconciliation failed for '{service_name}': {e}",
                 "level": "error",
             },
@@ -139,7 +140,7 @@ def _reconcile_service_locked(
             message=f"Unexpected error: {e}",
             last_reconciled_at=datetime.now(UTC),
             event={
-                "kind": "reconcile_failed",
+                "kind": EventKind.RECONCILE_FAILED,
                 "message": f"Reconciliation failed for '{service_name}': {e}",
                 "level": "error",
             },

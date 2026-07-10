@@ -24,7 +24,9 @@ from app.database import (
     session_scope,
 )
 from app.events.event_emitter import emit_event
+from app.events.types import EventKind
 from app.health.health_checker import aggregate_status, run_health_checks
+from app.health.status_policy import phase_level, transition_verb
 from app.locks import forget_reconcile_lock, service_reconcile_lock
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -40,14 +42,6 @@ MAX_RETRIES = 20           # ~13 hours of retries with exponential backoff
 RETRY_JITTER = 0.0         # fraction; >0 de-synchronises concurrent retries
 _ACTIVE_RETRIES: set[tuple[str, str | None]] = set()
 _ACTIVE_RETRIES_LOCK = threading.Lock()
-
-# Phase severity ordering (lower = healthier) and the event level each phase
-# warrants. The probe retry runs a full health check, so the aggregate phase can
-# move in EITHER direction between attempts; these let the emitted event report
-# the real direction and a level matching the new phase.
-_PHASE_RANK = {"healthy": 0, "warning": 1, "error": 2}
-_PHASE_LEVEL = {"healthy": "info", "warning": "warning", "error": "error"}
-_UNKNOWN_PHASE_RANK = 3  # pending / failed / validating etc. — treat as worst
 
 
 def _compute_delay(attempt: int, *, jitter: float = RETRY_JITTER, rng=None) -> int:
@@ -198,20 +192,14 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                         status.probe_retry_at = None
                         status.probe_retry_attempt = None
 
-                    old_rank = _PHASE_RANK.get(old_phase, _UNKNOWN_PHASE_RANK)
-                    new_rank = _PHASE_RANK.get(new_phase, _UNKNOWN_PHASE_RANK)
-                    verb = (
-                        "improved" if new_rank < old_rank
-                        else "degraded" if new_rank > old_rank
-                        else "changed"
-                    )
+                    verb = transition_verb(old_phase, new_phase)
                     message = (
                         f"Service '{svc.name}' {verb} from {old_phase} "
                         f"to {new_phase} after probe retry"
                     )
                     emit_event(
-                        db, svc.id, "probe_retry_phase_change", message,
-                        level=_PHASE_LEVEL.get(new_phase, "warning"),
+                        db, svc.id, EventKind.PROBE_RETRY_PHASE_CHANGE, message,
+                        level=phase_level(new_phase, unknown="warning"),
                         details={"phase": new_phase, "checks": checks},
                     )
                     commit_with_lock(db)

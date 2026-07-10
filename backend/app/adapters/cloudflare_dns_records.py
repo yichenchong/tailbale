@@ -42,6 +42,14 @@ def select_owned_or_lowest(records: list[Record], own_comment: str) -> Record | 
     return records[0]
 
 
+def lowest_id(records: list[Record]) -> Record | None:
+    """Return the deterministic lowest-id record (the first, since
+    ``list_a_records`` returns them id-sorted), or ``None`` if the set is empty.
+    The owner-agnostic pick ``find_record`` uses when no ownership marker is in
+    play — keeps the record-selection policy out of the transport adapter."""
+    return records[0] if records else None
+
+
 def find_by_id(records: list[Record], record_id: str) -> Record | None:
     """Return the record whose ``id`` equals *record_id* (compared as strings),
     or ``None`` if no record in the set has that id."""

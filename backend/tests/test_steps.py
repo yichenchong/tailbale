@@ -24,7 +24,7 @@ _P_WRITE = "app.edge.config_renderer.write_caddyfile"
 _P_CERT = "app.certs.renewal_task.process_service_cert"
 _P_NETWORK = "app.edge.network_manager.ensure_network"
 _P_CREATE_EDGE = "app.edge.container_manager.create_edge_container"
-_P_FIND_EDGE = "app.edge.container_manager._find_edge_container"
+_P_FIND_EDGE = "app.edge.container_session._find_edge_container"
 _P_START = "app.edge.container_manager.start_edge"
 _P_TS_IP = "app.edge.tailscale_ops.detect_tailscale_ip"
 _P_RELOAD = "app.edge.caddy_admin.reload_caddy"
@@ -57,7 +57,7 @@ class TestValidateAndPrepareStep:
     def test_returns_key_and_creates_per_service_dirs(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session)
         with patch(_P_SECRET, return_value="ts-key"):
-            authkey, paths = steps._validate_and_prepare(db_session, svc)
+            authkey, paths = steps.validate_and_prepare(db_session, svc)
         assert authkey == "ts-key"
         assert (paths.generated_dir / svc.id).is_dir()
         assert (paths.certs_dir / svc.hostname).is_dir()
@@ -67,7 +67,7 @@ class TestValidateAndPrepareStep:
     def test_missing_authkey_raises_after_setting_phase(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session)
         with patch(_P_SECRET, return_value=None), pytest.raises(ReconcileError, match="auth key"):
-            steps._validate_and_prepare(db_session, svc)
+            steps.validate_and_prepare(db_session, svc)
         # The phase advanced to validating before the guard fired (observable).
         assert db_session.get(ServiceStatus, svc.id).phase == "validating"
 
@@ -76,14 +76,14 @@ class TestEnsureNetworkStep:
     def test_heals_stale_upstream_id(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session, upstream_container_id="old_id")
         with patch(_P_NETWORK, return_value=("edge_net", "new_id")):
-            steps._ensure_network(db_session, svc, None)
+            steps.ensure_network(db_session, svc, None)
         assert svc.upstream_container_id == "new_id"
         assert db_session.get(ServiceStatus, svc.id).phase == "creating_network"
 
     def test_unchanged_upstream_id_is_not_rewritten(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session, upstream_container_id="same")
         with patch(_P_NETWORK, return_value=("edge_net", "same")):
-            steps._ensure_network(db_session, svc, None)
+            steps.ensure_network(db_session, svc, None)
         assert svc.upstream_container_id == "same"
         assert db_session.get(ServiceStatus, svc.id).phase == "creating_network"
 
@@ -101,7 +101,7 @@ class TestEnsureCertStep:
     def test_missing_cert_triggers_issuance(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session)
         with patch(_P_CERT) as mock_issue:
-            steps._ensure_cert(db_session, svc, Path(tmp_data_dir) / "absent.pem")
+            steps.ensure_cert(db_session, svc, Path(tmp_data_dir) / "absent.pem")
         mock_issue.assert_called_once()
         assert db_session.get(ServiceStatus, svc.id).phase == "ensuring_cert"
 
@@ -112,7 +112,7 @@ class TestEnsureCertStep:
             patch(self._P_WINDOW, return_value=30),
             patch(_P_CERT) as mock_issue,
         ):
-            steps._ensure_cert(db_session, svc, self._cert(tmp_data_dir))
+            steps.ensure_cert(db_session, svc, self._cert(tmp_data_dir))
         mock_issue.assert_called_once()
 
     def test_cert_within_renewal_window_triggers_issuance(self, db_session, tmp_data_dir):
@@ -125,7 +125,7 @@ class TestEnsureCertStep:
             patch(self._P_MATCH, return_value=True),
             patch(_P_CERT) as mock_issue,
         ):
-            steps._ensure_cert(db_session, svc, self._cert(tmp_data_dir))
+            steps.ensure_cert(db_session, svc, self._cert(tmp_data_dir))
         mock_issue.assert_called_once()
 
     def test_healthy_matching_cert_is_not_reissued(self, db_session, tmp_data_dir):
@@ -138,7 +138,7 @@ class TestEnsureCertStep:
             patch(self._P_MATCH, return_value=True),
             patch(_P_CERT) as mock_issue,
         ):
-            steps._ensure_cert(db_session, svc, self._cert(tmp_data_dir))
+            steps.ensure_cert(db_session, svc, self._cert(tmp_data_dir))
         mock_issue.assert_not_called()
 
     def test_unexpired_but_mismatched_key_triggers_reissue(self, db_session, tmp_data_dir):
@@ -151,12 +151,12 @@ class TestEnsureCertStep:
             patch(self._P_MATCH, return_value=False),
             patch(_P_CERT) as mock_issue,
         ):
-            steps._ensure_cert(db_session, svc, self._cert(tmp_data_dir))
+            steps.ensure_cert(db_session, svc, self._cert(tmp_data_dir))
         mock_issue.assert_called_once()
 
     def test_overflow_window_renews_eagerly(self, db_session, tmp_data_dir):
         # AR-R3-8: days_from_now(window) returns None only when the loosely-bounded
-        # renewal window overflows the datetime range. steps._ensure_cert treats
+        # renewal window overflows the datetime range. steps.ensure_cert treats
         # None as "renew eagerly" (an absurd window means every cert is within it),
         # instead of the pre-migration bare ``datetime.now(UTC) + timedelta(...)``
         # that raised OverflowError up into the reconcile's unexpected-error path.
@@ -169,7 +169,7 @@ class TestEnsureCertStep:
             patch(self._P_MATCH, return_value=True),
             patch(_P_CERT) as mock_issue,
         ):
-            steps._ensure_cert(db_session, svc, self._cert(tmp_data_dir))
+            steps.ensure_cert(db_session, svc, self._cert(tmp_data_dir))
         mock_issue.assert_called_once()
 
 
@@ -180,7 +180,7 @@ class TestRenderAndStageConfigStep:
         (gen / svc.id).mkdir(parents=True)  # validate step normally creates this
         cert = Path(tmp_data_dir) / "cert.pem"  # absent -> current_cert_fp is None
         with patch(_P_RENDER, return_value="new config"), patch(_P_WRITE) as mock_write:
-            stage = steps._render_and_stage_config(db_session, svc, gen, cert)
+            stage = steps.render_and_stage_config(db_session, svc, gen, cert)
         assert stage.config_changed is True
         assert stage.reload_pending_path.exists()
         mock_write.assert_called_once()
@@ -193,7 +193,7 @@ class TestRenderAndStageConfigStep:
         (gen / svc.id / "Caddyfile").write_text("same config", encoding="utf-8")
         cert = Path(tmp_data_dir) / "cert.pem"  # absent -> no cert change
         with patch(_P_RENDER, return_value="same config"), patch(_P_WRITE) as mock_write:
-            stage = steps._render_and_stage_config(db_session, svc, gen, cert)
+            stage = steps.render_and_stage_config(db_session, svc, gen, cert)
         assert stage.config_changed is False
         assert not stage.reload_pending_path.exists()
         mock_write.assert_not_called()
@@ -206,7 +206,7 @@ class TestRenderAndStageConfigStep:
         cert = Path(tmp_data_dir) / "cert.pem"
         cert.write_text("RENEWED")  # fp present, no .cert_loaded marker -> cert changed
         with patch(_P_RENDER, return_value="same config"), patch(_P_WRITE) as mock_write:
-            stage = steps._render_and_stage_config(db_session, svc, gen, cert)
+            stage = steps.render_and_stage_config(db_session, svc, gen, cert)
         assert stage.config_changed is False
         assert stage.current_cert_fp is not None
         assert stage.reload_pending_path.exists()  # cert renewal forced a reload
@@ -222,7 +222,7 @@ class TestEnsureEdgeStep:
             patch(_P_CREATE_EDGE, return_value="cid") as mock_create,
             patch(_P_START) as mock_start,
         ):
-            steps._ensure_edge(db_session, svc, "ts-key", _runtime_paths(tmp_data_dir), None)
+            steps.ensure_edge(db_session, svc, "ts-key", _runtime_paths(tmp_data_dir), None)
         mock_create.assert_called_once()
         mock_start.assert_not_called()
         status = db_session.get(ServiceStatus, svc.id)
@@ -239,7 +239,7 @@ class TestEnsureEdgeStep:
             patch(_P_CREATE_EDGE) as mock_create,
             patch(_P_START) as mock_start,
         ):
-            steps._ensure_edge(db_session, svc, "ts-key", _runtime_paths(tmp_data_dir), None)
+            steps.ensure_edge(db_session, svc, "ts-key", _runtime_paths(tmp_data_dir), None)
         mock_create.assert_not_called()
         mock_start.assert_not_called()
         assert db_session.get(ServiceStatus, svc.id).edge_container_id == "rid"
@@ -252,7 +252,7 @@ class TestEnsureEdgeStep:
             patch(_P_CREATE_EDGE) as mock_create,
             patch(_P_START) as mock_start,
         ):
-            steps._ensure_edge(db_session, svc, "ts-key", _runtime_paths(tmp_data_dir), None)
+            steps.ensure_edge(db_session, svc, "ts-key", _runtime_paths(tmp_data_dir), None)
         mock_create.assert_not_called()
         mock_start.assert_called_once()
         assert db_session.get(ServiceStatus, svc.id).edge_container_id == "eid"
@@ -262,7 +262,7 @@ class TestDetectAndPersistIpStep:
     def test_first_acquire_persists_ip_and_emits_event(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session)
         with patch(_P_TS_IP, return_value="100.64.0.9"):
-            ip = steps._detect_and_persist_ip(db_session, svc, None)
+            ip = steps.detect_and_persist_ip(db_session, svc, None)
         assert ip == "100.64.0.9"
         status = db_session.get(ServiceStatus, svc.id)
         assert status.tailscale_ip == "100.64.0.9"
@@ -276,14 +276,14 @@ class TestDetectAndPersistIpStep:
         status.tailscale_ip = "100.64.0.9"
         db_session.commit()
         with patch(_P_TS_IP, return_value="100.64.0.9"):
-            steps._detect_and_persist_ip(db_session, svc, None)
+            steps.detect_and_persist_ip(db_session, svc, None)
         kinds = [e.kind for e in db_session.query(Event).filter(Event.service_id == svc.id)]
         assert "tailscale_ip_acquired" not in kinds
 
     def test_no_ip_returns_none_and_does_not_persist(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session)
         with patch(_P_TS_IP, return_value=None):
-            ip = steps._detect_and_persist_ip(db_session, svc, None)
+            ip = steps.detect_and_persist_ip(db_session, svc, None)
         assert ip is None
         assert db_session.get(ServiceStatus, svc.id).tailscale_ip is None
 
@@ -292,7 +292,7 @@ class TestEnsureDnsStep:
     def test_short_circuits_without_token(self, db_session, tmp_data_dir):
         svc = create_service_db(db_session)
         with patch(_P_SECRET, return_value=None), patch(_P_DNS) as mock_dns:
-            steps._ensure_dns(db_session, svc, "100.64.0.1")
+            steps.ensure_dns(db_session, svc, "100.64.0.1")
         mock_dns.assert_not_called()
         assert db_session.get(ServiceStatus, svc.id).phase == "ensuring_dns"
 
@@ -302,7 +302,7 @@ class TestEnsureDnsStep:
         settings_store.set_setting(db_session, "cf_zone_id", "zone1")
         db_session.commit()
         with patch(_P_SECRET, return_value="cf-token"), patch(_P_DNS) as mock_dns:
-            steps._ensure_dns(db_session, svc, "100.64.0.1")
+            steps.ensure_dns(db_session, svc, "100.64.0.1")
         mock_dns.assert_called_once()
 
     def test_dns_failure_emits_warning_event_without_raising(self, db_session, tmp_data_dir):
@@ -314,7 +314,7 @@ class TestEnsureDnsStep:
             patch(_P_SECRET, return_value="cf-token"),
             patch(_P_DNS, side_effect=RuntimeError("cloudflare down")),
         ):
-            steps._ensure_dns(db_session, svc, "100.64.0.1")  # best-effort: must not raise
+            steps.ensure_dns(db_session, svc, "100.64.0.1")  # best-effort: must not raise
         events = (
             db_session.query(Event)
             .filter(Event.service_id == svc.id, Event.kind == "dns_update_failed")
@@ -341,7 +341,7 @@ class TestReloadIfNeededStep:
         stage = self._stage(tmp_data_dir, config_changed=True)
         result = {"caddy_reloaded": False}
         with patch(_P_RELOAD) as mock_reload:
-            steps._reload_if_needed(db_session, svc, stage, None, result)
+            steps.reload_if_needed(db_session, svc, stage, None, result)
         mock_reload.assert_called_once()
         assert result["caddy_reloaded"] is True
         assert not stage.reload_pending_path.exists()
@@ -354,7 +354,7 @@ class TestReloadIfNeededStep:
         stage = self._stage(tmp_data_dir, config_changed=False, pending=False)
         result = {"caddy_reloaded": False}
         with patch(_P_RELOAD) as mock_reload:
-            steps._reload_if_needed(db_session, svc, stage, None, result)
+            steps.reload_if_needed(db_session, svc, stage, None, result)
         mock_reload.assert_not_called()
         assert result["caddy_reloaded"] is False
 
@@ -366,7 +366,7 @@ class TestReloadIfNeededStep:
             patch(_P_RELOAD, side_effect=RuntimeError("bad Caddyfile")),
             pytest.raises(ReconcileError, match="Caddy reload failed"),
         ):
-            steps._reload_if_needed(db_session, svc, stage, None, result)
+            steps.reload_if_needed(db_session, svc, stage, None, result)
         # The marker survives so the reload is retried on the next reconcile.
         assert stage.reload_pending_path.exists()
         assert result["caddy_reloaded"] is False
@@ -380,7 +380,7 @@ class TestReloadIfNeededStep:
             patch(_P_RELOAD, side_effect=docker.errors.DockerException("no daemon")),
             pytest.raises(ReconcileError, match="Docker/edge unavailable"),
         ):
-            steps._reload_if_needed(db_session, svc, stage, None, result)
+            steps.reload_if_needed(db_session, svc, stage, None, result)
         assert stage.reload_pending_path.exists()
 
 
@@ -389,7 +389,7 @@ class TestRunAndPersistHealthStep:
         svc = create_service_db(db_session)
         checks = {"edge_container_running": True}
         with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value="healthy"):
-            phase, out = steps._run_and_persist_health(
+            phase, out = steps.run_and_persist_health(
                 db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
             )
         assert phase == "healthy"
@@ -423,7 +423,7 @@ class TestRunAndPersistHealthStep:
             )
             checks = {"edge_container_running": True}
             with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value=phase):
-                steps._run_and_persist_health(
+                steps.run_and_persist_health(
                     db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
                 )
             evt = (
@@ -452,7 +452,7 @@ class TestMaybeScheduleProbeRetryStep:
 
     def test_schedules_when_only_probe_failed_and_critical_ok(self):
         with patch(self._P_SCHEDULE) as mock_schedule:
-            steps._maybe_schedule_probe_retry(
+            steps.maybe_schedule_probe_retry(
                 self._checks(https_ok=False), "warning", "svc_probe", "unix:///s.sock"
             )
         mock_schedule.assert_called_once_with("svc_probe", "unix:///s.sock")
@@ -461,7 +461,7 @@ class TestMaybeScheduleProbeRetryStep:
         # The HTTPS probe passing is the sole reason no retry is scheduled here
         # (the phase is still degraded), isolating the ``not https_probe_ok`` guard.
         with patch(self._P_SCHEDULE) as mock_schedule:
-            steps._maybe_schedule_probe_retry(
+            steps.maybe_schedule_probe_retry(
                 self._checks(https_ok=True), "warning", "svc_probe", None
             )
         mock_schedule.assert_not_called()
@@ -470,7 +470,7 @@ class TestMaybeScheduleProbeRetryStep:
         # A healthy aggregate must not spawn a retry even with the probe flag
         # false: the guard requires a degraded (warning/error) phase.
         with patch(self._P_SCHEDULE) as mock_schedule:
-            steps._maybe_schedule_probe_retry(
+            steps.maybe_schedule_probe_retry(
                 self._checks(https_ok=False), "healthy", "svc_probe", None
             )
         mock_schedule.assert_not_called()
@@ -479,7 +479,7 @@ class TestMaybeScheduleProbeRetryStep:
         # A failing CRITICAL check means a full reconcile — not a lightweight probe
         # retry — is the right repair, so no retry is scheduled.
         with patch(self._P_SCHEDULE) as mock_schedule:
-            steps._maybe_schedule_probe_retry(
+            steps.maybe_schedule_probe_retry(
                 self._checks(https_ok=False, critical_ok=False), "error", "svc_probe", None
             )
         mock_schedule.assert_not_called()
@@ -488,7 +488,7 @@ class TestMaybeScheduleProbeRetryStep:
         # Best-effort: a raising schedule_probe_retry (e.g. thread exhaustion) must
         # NOT propagate out of the step and flip an already-committed reconcile.
         with patch(self._P_SCHEDULE, side_effect=RuntimeError("no threads")) as mock_schedule:
-            steps._maybe_schedule_probe_retry(
+            steps.maybe_schedule_probe_retry(
                 self._checks(https_ok=False), "warning", "svc_probe", None
             )  # must not raise
         mock_schedule.assert_called_once()

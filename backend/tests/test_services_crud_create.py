@@ -22,9 +22,7 @@ from app.models.service_status import ServiceStatus
 from app.routers.services import (
     _validate_upstream as _real_validate_upstream,
 )
-from app.routers.services import (
-    _validate_upstream_port,
-)
+from app.services.diagnostics import _validate_upstream_port
 from app.services.errors import DockerUnavailable
 from tests._services_helpers import (
     _create_service,
@@ -608,7 +606,7 @@ class TestUpstreamContainerValidation:
         # captured at import time to bypass the autouse _mock_upstream_validation.
         with (
             patch("docker.DockerClient", side_effect=docker.errors.DockerException(secret)),
-            caplog.at_level(logging.ERROR, logger="app.routers.services"),
+            caplog.at_level(logging.ERROR, logger="app.services.diagnostics"),
             pytest.raises(DockerUnavailable) as exc_info,
         ):
             _real_validate_upstream(db_session, "abc123", 80)
@@ -632,7 +630,7 @@ class TestUpstreamContainerValidation:
             yield fake_client
 
         with (
-            patch("app.routers.services.docker_client", fake_docker_client),
+            patch("app.services.diagnostics.docker_client", fake_docker_client),
             pytest.raises(HTTPException) as exc_info,
         ):
             _real_validate_upstream(db_session, "missing_ctr", 80)

@@ -27,6 +27,7 @@ from app.locks import forget_reconcile_lock, try_service_reconcile_lock
 from app.models.service import Service
 from app.reconciler.reconciler import reconcile_service
 from app.reconciler.status import _persist_status
+from app.services.sweeps import run_id_sweep, snapshot_enabled_service_ids
 
 logger = logging.getLogger(__name__)
 
@@ -38,25 +39,12 @@ ERROR_BACKOFF_SECONDS = 30
 
 def reconcile_all(db: Session, *, socket_path: str | None = None) -> int:
     """Reconcile every enabled service. Returns the count processed."""
-    # Snapshot ids up front: reconcile_service commits per service, which (with
-    # expire_on_commit) expires every other ORM object in this session. A later
-    # `svc.id` would then reload — and raise ObjectDeletedError if that service
-    # was deleted mid-sweep, aborting the whole sweep. Re-fetch each by id inside
-    # the loop so one concurrent delete only skips that service.
-    service_ids = [s.id for s in db.query(Service).filter(Service.enabled.is_(True)).all()]
-    count = 0
-    for service_id in service_ids:
-        try:
-            svc = db.get(Service, service_id)
-            if svc is None:
-                continue  # deleted since the snapshot — nothing to reconcile
-            reconcile_service(db, svc, socket_path=socket_path)
-            count += 1
-        except Exception:
-            rollback_with_lock(db)
-            logger.error("Failed to reconcile service %s", service_id, exc_info=True)
-            count += 1  # still counts as processed
-    return count
+    return run_id_sweep(
+        db,
+        snapshot_enabled_service_ids(db),
+        lambda db, svc: reconcile_service(db, svc, socket_path=socket_path),
+        log_label="reconcile",
+    )
 
 
 def reconcile_one(db: Session, service_id: str, *, socket_path: str | None = None) -> dict:
@@ -101,9 +89,9 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
     generated_dir = Path(paths["generated_dir"])
     certs_dir = Path(paths["certs_dir"])
 
-    # Snapshot ids up front (see reconcile_all): per-service commits expire the
-    # session, so re-fetch each id inside the loop and skip ones deleted mid-sweep.
-    service_ids = [s.id for s in db.query(Service).filter(Service.enabled.is_(True)).all()]
+    # Snapshot ids up front (see app.services.sweeps): a per-service commit
+    # expires the session, so re-fetch each id inside the loop and skip deletes.
+    service_ids = snapshot_enabled_service_ids(db)
     count = 0
     for service_id in service_ids:
         try:

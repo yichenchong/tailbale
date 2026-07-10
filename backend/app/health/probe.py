@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import docker
 
-from app.edge.container_manager import find_edge_container
+from app.edge.container_session import find_edge_container
 
 if TYPE_CHECKING:
     from app.models.service import Service

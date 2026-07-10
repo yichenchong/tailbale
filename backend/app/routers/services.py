@@ -6,10 +6,7 @@ orchestration to :mod:`app.services`. Edge, certificate, reconcile, and other
 service action endpoints live in :mod:`app.routers.service_actions`.
 """
 
-import logging
-
-import docker
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends
 from sqlalchemy.orm import Session
 
 from app import services as service_layer
@@ -24,11 +21,9 @@ from app.schemas.services import (
     ServiceResponse,
     ServiceUpdate,
 )
-from app.services import docker_client, resolve_socket
-from app.services.errors import DockerUnavailable, HostnameSuffixInvalid, ServiceNotFound
+from app.services import diagnostics
+from app.services.errors import HostnameSuffixInvalid, ServiceNotFound
 from app.settings_store import get_setting
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/services",
@@ -38,67 +33,14 @@ router = APIRouter(
 
 
 def _validate_upstream(db: Session, container_id: str, port: int) -> None:
-    """Validate that the upstream container exists and the port is plausible.
+    """Validate the upstream container/port before the lifecycle lock.
 
-    Raises HTTPException on invalid container/port input and DockerUnavailable
-    when Docker is unreachable.
+    Thin seam kept at the historical ``app.routers.services._validate_upstream``
+    patch target (the autouse test fixture and CRUD tests patch it here); the
+    Docker round-trip, port inspection, and error mapping live in the intentful
+    op :func:`app.services.diagnostics.validate_upstream_container_port` (AR15).
     """
-    try:
-        with docker_client(resolve_socket(db)) as client:
-            upstream = client.containers.get(container_id)
-            _validate_upstream_port(upstream, port)
-    except docker.errors.NotFound as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Upstream container '{container_id}' not found",
-        ) from exc
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception(
-            "Cannot connect to Docker to validate upstream container %s", container_id
-        )
-        raise DockerUnavailable(
-            "Cannot connect to Docker to validate upstream container"
-        ) from exc
-
-
-def _validate_upstream_port(container, requested_port: int) -> None:
-    """Check that *requested_port* is plausible for *container*.
-
-    We inspect the container's exposed ports (from its image/config) and, if
-    there are any explicit port definitions, verify the requested port is among
-    them.  If the container has *no* exposed ports at all we let it through —
-    the user may know better.
-    """
-    try:
-        # container.attrs["Config"]["ExposedPorts"] → {"80/tcp": {}, "443/tcp": {}}
-        exposed = container.attrs.get("Config", {}).get("ExposedPorts") or {}
-        # Also check host-published ports under NetworkSettings
-        port_bindings = (
-            container.attrs.get("HostConfig", {}).get("PortBindings") or {}
-        )
-        # Merge both sets of known ports
-        known_ports: set[int] = set()
-        for spec in list(exposed.keys()) + list(port_bindings.keys()):
-            try:
-                known_ports.add(int(spec.split("/")[0]))
-            except (ValueError, IndexError):
-                continue
-
-        if known_ports and requested_port not in known_ports:
-            available = ", ".join(str(p) for p in sorted(known_ports))
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Port {requested_port} is not exposed by container "
-                    f"'{container.name}'. Available ports: {available}"
-                ),
-            )
-    except HTTPException:
-        raise
-    except Exception:
-        pass  # If we can't inspect ports, allow the request through
+    diagnostics.validate_upstream_container_port(db, container_id, port)
 
 
 @router.get("", response_model=ServiceListResponse)
@@ -135,8 +77,9 @@ def create_service(body: ServiceCreate, background_tasks: BackgroundTasks, db: S
     if not configured_domain or not body.hostname.endswith(f".{configured_domain}"):
         raise HostnameSuffixInvalid(body.hostname, configured_domain)
 
-    # Validate upstream container + port (spec §17 steps 2-3) — hard failure.
-    # Kept in the router (not the service layer) so the test suite's
+    # Validate upstream container + port (spec §17 steps 2-3) — hard failure,
+    # BEFORE service_layer.create_service takes the lifecycle lock. The router
+    # keeps the _validate_upstream seam (delegating to diagnostics) so the
     # app.routers.services._validate_upstream patch still intercepts it.
     _validate_upstream(db, body.upstream_container_id, body.upstream_port)
 

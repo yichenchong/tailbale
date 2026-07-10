@@ -23,7 +23,7 @@ import docker
 from app import settings_store
 from app.adapters import cloudflare_adapter
 from app.certs import cert_manager
-from app.edge.container_manager import find_edge_container
+from app.edge.container_session import find_edge_container
 from app.edge.docker_client import close_client, connect
 from app.health import probe
 from app.models.dns_record import DnsRecord

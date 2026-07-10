@@ -27,6 +27,8 @@ from typing import Any
 
 import httpx2
 
+from app.adapters.cloudflare_dns_records import lowest_id
+
 logger = logging.getLogger(__name__)
 
 CF_API_BASE = "https://api.cloudflare.com/client/v4"
@@ -265,7 +267,7 @@ def find_record(
             hostname,
             results[0].get("id"),
         )
-    return results[0]
+    return lowest_id(results)
 
 
 def create_a_record(
