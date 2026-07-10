@@ -8,6 +8,7 @@ import pytest
 
 from app import settings_store
 from app.health import health_checker
+from app.health.checks import certs as cert_checks
 from app.models.service import Service
 from app.settings_store import set_setting
 
@@ -114,7 +115,7 @@ class TestCertNotExpiringSubcheck:
         set_setting(db_session, "cert_renewal_window_days", "0")
         db_session.commit()
 
-        with caplog.at_level(logging.WARNING, logger="app.health.health_checker"):
+        with caplog.at_level(logging.WARNING, logger="app.health.checks.certs"):
             result = health_checker._cert_not_expiring_subcheck(db_session, service, tmp_path)
 
         assert result is False
@@ -134,7 +135,7 @@ class TestCertNotExpiringSubcheck:
                 "get_positive_int_setting",
                 wraps=settings_store.get_positive_int_setting,
             ) as spy,
-            patch.object(health_checker, "_check_cert_not_expiring", return_value=True) as inner,
+            patch.object(cert_checks, "_check_cert_not_expiring", return_value=True) as inner,
         ):
             result = health_checker._cert_not_expiring_subcheck(db_session, service, tmp_path)
 

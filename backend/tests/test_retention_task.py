@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.orm import sessionmaker
 
+import app.database as database_module
 import app.events.retention_task as retention_mod
 from app.events.retention_task import purge_old_events
 from app.models.event import Event
@@ -114,7 +115,7 @@ class TestRunRetentionPurge:
         _add_event(db_session, age_days=3)
         db_session.commit()
 
-        monkeypatch.setattr(retention_mod, "SessionLocal", sessionmaker(bind=db_engine))
+        monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
         deleted = retention_mod.run_retention_purge()
 
         assert deleted == 1
@@ -133,7 +134,7 @@ class TestRunRetentionPurge:
         _add_event(db_session, age_days=1)
         db_session.commit()
 
-        monkeypatch.setattr(retention_mod, "SessionLocal", sessionmaker(bind=db_engine))
+        monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
         with pytest.raises(ValueError):
             retention_mod.run_retention_purge()
 

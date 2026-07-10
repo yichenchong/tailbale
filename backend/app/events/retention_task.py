@@ -15,7 +15,7 @@ import logging
 from sqlalchemy.orm import Session
 
 from app.backoff import run_periodic
-from app.database import SessionLocal, commit_with_lock, db_write_section
+from app.database import commit_with_lock, db_write_section, session_scope
 from app.models.event import Event
 from app.settings_store import get_positive_int_setting
 from app.timeutil import days_from_now
@@ -61,12 +61,9 @@ def purge_old_events(db: Session, *, retention_days: int) -> int:
 
 def run_retention_purge() -> int:
     """Open a session, read the retention window, and purge. Returns rows deleted."""
-    db = SessionLocal()
-    try:
+    with session_scope() as db:
         retention_days = get_positive_int_setting(db, "event_retention_days")
         return purge_old_events(db, retention_days=retention_days)
-    finally:
-        db.close()
 
 
 async def retention_loop() -> None:

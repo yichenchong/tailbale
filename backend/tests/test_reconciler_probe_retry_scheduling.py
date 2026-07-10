@@ -269,7 +269,6 @@ class TestProbeRetryScheduling:
 
         with (
             patch.object(database_module, "SessionLocal", TestSession),
-            patch.object(probe_retry, "SessionLocal", TestSession),
             patch.object(probe_retry, "MAX_RETRIES", 1),
             patch.object(probe_retry, "_compute_delay", return_value=0),
             patch.object(probe_retry.time, "sleep"),

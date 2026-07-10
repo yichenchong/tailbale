@@ -3,7 +3,12 @@
 from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
-from app.health import health_checker
+from app.health import health_checker, runner
+from app.health.checks import certs as cert_checks
+from app.health.checks import config as config_checks
+from app.health.checks import dns as dns_checks
+from app.health.checks import docker as docker_checks
+from app.health.checks import tailscale as tailscale_checks
 from app.models.dns_record import DnsRecord
 from app.models.service_status import ServiceStatus
 from app.secrets import CLOUDFLARE_TOKEN, write_secret
@@ -15,14 +20,14 @@ from ._services_helpers import _create_service_in_db as create_service_in_db
 @contextmanager
 def _healthy_non_dns_checks(current_ip="100.64.0.1"):
     with (
-        patch.object(health_checker, "connect", return_value=MagicMock()),
-        patch.object(health_checker, "_check_upstream_present", return_value=True),
-        patch.object(health_checker, "_check_upstream_network", return_value=True),
-        patch.object(health_checker, "_check_edge", return_value=(True, True)),
-        patch.object(health_checker, "_check_tailscale", return_value=(True, True, current_ip)),
-        patch.object(health_checker, "_check_cert_present", return_value=True),
-        patch.object(health_checker, "_check_cert_not_expiring", return_value=True),
-        patch.object(health_checker, "_check_caddy_config", return_value=True),
+        patch.object(runner, "connect", return_value=MagicMock()),
+        patch.object(docker_checks, "_check_upstream_present", return_value=True),
+        patch.object(docker_checks, "_check_upstream_network", return_value=True),
+        patch.object(docker_checks, "_check_edge", return_value=(True, True)),
+        patch.object(tailscale_checks, "_check_tailscale", return_value=(True, True, current_ip)),
+        patch.object(cert_checks, "_check_cert_present", return_value=True),
+        patch.object(cert_checks, "_check_cert_not_expiring", return_value=True),
+        patch.object(config_checks, "_check_caddy_config", return_value=True),
         patch("app.health.probe.check_https_probe", return_value=True),
     ):
         yield
@@ -146,7 +151,7 @@ class TestCheckLiveDns:
         _add_dns_record(db_session, service, value="100.64.0.1")
 
         with patch.object(
-            health_checker,
+            dns_checks,
             "cloudflare_credentials",
             side_effect=RuntimeError("secret read failed"),
         ):
@@ -250,7 +255,7 @@ class TestRunHealthChecksDnsFlow:
         _configure_cloudflare(db_session)
         mock_find_record.return_value = None
 
-        with patch.object(health_checker, "connect", side_effect=Exception("Docker down")):
+        with patch.object(runner, "connect", side_effect=Exception("Docker down")):
             checks = health_checker.run_health_checks(
                 db_session,
                 service,
@@ -269,7 +274,7 @@ class TestRunHealthChecksDnsFlow:
         db_session.commit()
 
         with (
-            patch.object(health_checker, "connect", side_effect=Exception("Docker down")),
+            patch.object(runner, "connect", side_effect=Exception("Docker down")),
             patch("app.adapters.cloudflare_adapter.find_record") as mock_find_record,
         ):
             checks = health_checker.run_health_checks(

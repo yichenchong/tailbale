@@ -6,7 +6,11 @@ from unittest.mock import MagicMock, patch
 
 import docker.errors
 
-from app.health import health_checker
+from app.health import health_checker, runner
+from app.health.checks import certs as cert_checks
+from app.health.checks import config as config_checks
+from app.health.checks import docker as docker_checks
+from app.health.checks import tailscale as tailscale_checks
 from app.models.dns_record import DnsRecord
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
@@ -33,7 +37,7 @@ def _write_cert_files(certs_dir, service):
 
 
 class TestRunHealthChecks:
-    @patch("app.health.health_checker.connect")
+    @patch("app.health.runner.connect")
     def test_all_healthy(self, mock_connect, db_session, tmp_data_dir):
         service = create_service_in_db(db_session)
         status = db_session.get(ServiceStatus, service.id)
@@ -74,7 +78,7 @@ class TestRunHealthChecks:
         client.containers.get.side_effect = get_container
 
         with (
-            patch.object(health_checker, "_check_cert_not_expiring", return_value=True),
+            patch.object(cert_checks, "_check_cert_not_expiring", return_value=True),
             patch("app.health.probe.check_https_probe", return_value=True) as mock_probe,
         ):
             checks = health_checker.run_health_checks(db_session, service, generated_dir, certs_dir)
@@ -93,7 +97,7 @@ class TestRunHealthChecks:
         assert checks["https_probe_ok"] is True
         mock_probe.assert_called_once_with(service, "100.64.0.1", client)
 
-    @patch("app.health.health_checker.connect")
+    @patch("app.health.runner.connect")
     def test_missing_upstream(self, mock_connect, db_session, tmp_data_dir):
         service = create_service_in_db(db_session)
         client = mock_connect.return_value
@@ -110,7 +114,7 @@ class TestRunHealthChecks:
         assert checks["upstream_network_connected"] is False
         assert checks["edge_container_present"] is False
 
-    @patch("app.health.health_checker.connect")
+    @patch("app.health.runner.connect")
     def test_edge_not_running_blocks_tailscale(self, mock_connect, db_session, tmp_data_dir):
         service = create_service_in_db(db_session)
         client = mock_connect.return_value
@@ -140,7 +144,7 @@ class TestRunHealthChecks:
         assert checks["tailscale_ready"] is False
         assert checks["tailscale_ip_present"] is False
 
-    @patch("app.health.health_checker.connect")
+    @patch("app.health.runner.connect")
     def test_edge_name_conflict_with_other_service_is_not_healthy(
         self,
         mock_connect,
@@ -184,7 +188,7 @@ class TestRunHealthChecks:
     ):
         service = create_service_in_db(db_session)
 
-        with patch.object(health_checker, "connect", side_effect=Exception("Docker down")):
+        with patch.object(runner, "connect", side_effect=Exception("Docker down")):
             checks = health_checker.run_health_checks(
                 db_session,
                 service,
@@ -213,7 +217,7 @@ class TestRunHealthChecks:
         _write_cert_files(certs_dir, service)
 
         with (
-            patch.object(health_checker, "connect", side_effect=Exception("Docker down")),
+            patch.object(runner, "connect", side_effect=Exception("Docker down")),
             patch(
                 "app.certs.cert_manager.get_cert_expiry",
                 return_value=datetime.now(UTC) + timedelta(days=60),
@@ -250,14 +254,14 @@ class TestRunHealthChecks:
         db_session.commit()
 
         with (
-            patch.object(health_checker, "connect", return_value=MagicMock()),
-            patch.object(health_checker, "_check_upstream_present", return_value=True),
-            patch.object(health_checker, "_check_upstream_network", return_value=True),
-            patch.object(health_checker, "_check_edge", return_value=(True, True)),
-            patch.object(health_checker, "_check_tailscale", return_value=(True, True, "100.64.0.99")),
-            patch.object(health_checker, "_check_cert_present", return_value=True),
-            patch.object(health_checker, "_check_cert_not_expiring", return_value=True),
-            patch.object(health_checker, "_check_caddy_config", return_value=True),
+            patch.object(runner, "connect", return_value=MagicMock()),
+            patch.object(docker_checks, "_check_upstream_present", return_value=True),
+            patch.object(docker_checks, "_check_upstream_network", return_value=True),
+            patch.object(docker_checks, "_check_edge", return_value=(True, True)),
+            patch.object(tailscale_checks, "_check_tailscale", return_value=(True, True, "100.64.0.99")),
+            patch.object(cert_checks, "_check_cert_present", return_value=True),
+            patch.object(cert_checks, "_check_cert_not_expiring", return_value=True),
+            patch.object(config_checks, "_check_caddy_config", return_value=True),
             patch("app.health.probe.check_https_probe", return_value=True) as mock_probe,
         ):
             checks = health_checker.run_health_checks(
@@ -286,14 +290,14 @@ class TestRunHealthChecks:
         db_session.commit()
 
         with (
-            patch.object(health_checker, "connect", return_value=MagicMock()),
-            patch.object(health_checker, "_check_upstream_present", return_value=True),
-            patch.object(health_checker, "_check_upstream_network", return_value=True),
-            patch.object(health_checker, "_check_edge", return_value=(True, True)),
-            patch.object(health_checker, "_check_tailscale", return_value=(False, False, None)),
-            patch.object(health_checker, "_check_cert_present", return_value=True),
-            patch.object(health_checker, "_check_cert_not_expiring", return_value=True),
-            patch.object(health_checker, "_check_caddy_config", return_value=True),
+            patch.object(runner, "connect", return_value=MagicMock()),
+            patch.object(docker_checks, "_check_upstream_present", return_value=True),
+            patch.object(docker_checks, "_check_upstream_network", return_value=True),
+            patch.object(docker_checks, "_check_edge", return_value=(True, True)),
+            patch.object(tailscale_checks, "_check_tailscale", return_value=(False, False, None)),
+            patch.object(cert_checks, "_check_cert_present", return_value=True),
+            patch.object(cert_checks, "_check_cert_not_expiring", return_value=True),
+            patch.object(config_checks, "_check_caddy_config", return_value=True),
             patch("app.health.probe.check_https_probe", return_value=False) as mock_probe,
         ):
             checks = health_checker.run_health_checks(
@@ -308,7 +312,7 @@ class TestRunHealthChecks:
         mock_probe.assert_called_once()
         assert mock_probe.call_args.args[1] is None
 
-    @patch("app.health.health_checker.connect")
+    @patch("app.health.runner.connect")
     def test_corrupt_renewal_window_does_not_crash_health_check(
         self,
         mock_connect,
@@ -355,7 +359,7 @@ class TestRunHealthChecks:
         generated_dir, certs_dir = _runtime_dirs(tmp_data_dir)
         _write_caddy_config(generated_dir, service)
 
-        with patch.object(health_checker, "connect", side_effect=Exception("Docker down")):
+        with patch.object(runner, "connect", side_effect=Exception("Docker down")):
             checks = health_checker.run_health_checks(db_session, service, generated_dir, certs_dir)
 
         assert checks["cert_not_expiring"] is False
@@ -368,7 +372,7 @@ class TestRunHealthChecks:
     def test_https_probe_in_check_keys(self, db_session):
         service = create_service_in_db(db_session)
 
-        with patch.object(health_checker, "connect") as mock_connect:
+        with patch.object(runner, "connect") as mock_connect:
             client = mock_connect.return_value
             client.containers.get.side_effect = docker.errors.NotFound("nope")
             checks = health_checker.run_health_checks(db_session, service, "/tmp/gen", "/tmp/certs")
@@ -378,7 +382,7 @@ class TestRunHealthChecks:
     def test_docker_unavailable_includes_probe(self, db_session, tmp_path):
         service = create_service_in_db(db_session)
 
-        with patch.object(health_checker, "connect", side_effect=Exception("no docker")):
+        with patch.object(runner, "connect", side_effect=Exception("no docker")):
             checks = health_checker.run_health_checks(
                 db_session,
                 service,
@@ -469,7 +473,7 @@ class TestGetLiveTailscaleIp:
 
     def test_returns_none_when_docker_unavailable(self, db_session):
         service = create_service_in_db(db_session)
-        with patch.object(health_checker, "connect", side_effect=Exception("no docker")):
+        with patch.object(runner, "connect", side_effect=Exception("no docker")):
             assert health_checker.get_live_tailscale_ip(service) is None
 
     def test_returns_live_ip_via_real_edge_and_tailscale_helpers(self, db_session):
@@ -477,7 +481,7 @@ class TestGetLiveTailscaleIp:
         client = MagicMock()
         client.containers.get.return_value = self._edge_with_ts_ip("100.64.0.5")
 
-        with patch.object(health_checker, "connect", return_value=client):
+        with patch.object(runner, "connect", return_value=client):
             assert health_checker.get_live_tailscale_ip(service) == "100.64.0.5"
 
     def test_returns_none_when_edge_not_running(self, db_session):
@@ -487,7 +491,7 @@ class TestGetLiveTailscaleIp:
         client = MagicMock()
         client.containers.get.return_value = edge
 
-        with patch.object(health_checker, "connect", return_value=client):
+        with patch.object(runner, "connect", return_value=client):
             assert health_checker.get_live_tailscale_ip(service) is None
 
     def test_closes_client_even_on_success(self, db_session):
@@ -498,8 +502,8 @@ class TestGetLiveTailscaleIp:
         client.containers.get.return_value = self._edge_with_ts_ip("100.64.0.9")
 
         with (
-            patch.object(health_checker, "connect", return_value=client),
-            patch.object(health_checker, "close_client") as mock_close,
+            patch.object(runner, "connect", return_value=client),
+            patch.object(runner, "close_client") as mock_close,
         ):
             assert health_checker.get_live_tailscale_ip(service) == "100.64.0.9"
 

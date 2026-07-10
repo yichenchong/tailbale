@@ -2,7 +2,7 @@
 
 from unittest.mock import patch
 
-from app.health import health_checker
+from app.health import health_checker, runner
 
 from ._services_helpers import _create_service_in_db as create_service_in_db
 
@@ -22,7 +22,7 @@ class TestHealthCheckRegistry:
     def test_offline_fallback_returns_exactly_the_registry(self, db_session, tmp_data_dir):
         service = create_service_in_db(db_session)
 
-        with patch.object(health_checker, "connect", side_effect=Exception("Docker down")):
+        with patch.object(runner, "connect", side_effect=Exception("Docker down")):
             checks = health_checker.run_health_checks(
                 db_session,
                 service,

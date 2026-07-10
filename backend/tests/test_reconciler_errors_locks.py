@@ -29,6 +29,8 @@ from tests._reconciler_helpers import (
     _P_START,
     _P_TS_IP,
     _P_WRITE,
+    _STEP_MODULES,
+    patch_across,
 )
 from tests._services_helpers import _create_service_in_db as _create_service
 
@@ -275,7 +277,7 @@ class TestMarkerWriteDurability:
             written.append(Path(path).name)
             return real_atomic(path, text, **kwargs)
 
-        with patch.object(steps, "atomic_write_text", side_effect=_spy):
+        with patch_across(_STEP_MODULES, "atomic_write_text", side_effect=_spy):
             result = reconcile_service(db_session, svc)
 
         assert result["caddy_reloaded"] is True

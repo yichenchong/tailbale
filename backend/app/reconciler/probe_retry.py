@@ -17,7 +17,6 @@ from datetime import UTC, datetime, timedelta
 
 from app.backoff import capped_exponential
 from app.database import (
-    SessionLocal,
     commit_with_lock,
     db_write_section,
     rollback_with_lock,
@@ -116,49 +115,25 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
 
         time.sleep(delay)
 
-        db = SessionLocal()
-        try:
-            svc = db.get(Service, service_id)
-            if not svc or not svc.enabled:
-                logger.info("Probe retry: service %s gone or disabled, stopping", service_id)
-                _clear_retry_state(service_id)
-                return
-
-            status = db.get(ServiceStatus, service_id)
-            if not status:
-                return
-
-            # If already healthy, nothing to do
-            if status.phase == "healthy":
-                logger.info("Probe retry: service %s already healthy", service_id)
-                _clear_retry_state(service_id)
-                return
-
-            observed_status = (
-                status.phase,
-                status.message,
-                status.tailscale_ip,
-                status.edge_container_id,
-                status.health_checks,
-                status.last_reconciled_at,
-                status.probe_retry_at,
-                status.probe_retry_attempt,
-            )
-
-            runtime = get_runtime_paths(db)
-            checks = run_health_checks(
-                db, svc, runtime["generated_dir"], runtime["certs_dir"], socket_path,
-            )
-            new_phase = aggregate_status(checks)
-            with service_reconcile_lock(service_id), db_write_section(db):
-                status = db.get(ServiceStatus, service_id, populate_existing=True)
-                if not status:
-                    # Status (and its cascaded service row) vanished between the
-                    # pre-lock check and here; drop the entry this acquisition
-                    # re-created so the lock registry stays bounded.
-                    forget_reconcile_lock(service_id)
+        with session_scope() as db:
+            try:
+                svc = db.get(Service, service_id)
+                if not svc or not svc.enabled:
+                    logger.info("Probe retry: service %s gone or disabled, stopping", service_id)
+                    _clear_retry_state(service_id)
                     return
-                current_status = (
+
+                status = db.get(ServiceStatus, service_id)
+                if not status:
+                    return
+
+                # If already healthy, nothing to do
+                if status.phase == "healthy":
+                    logger.info("Probe retry: service %s already healthy", service_id)
+                    _clear_retry_state(service_id)
+                    return
+
+                observed_status = (
                     status.phase,
                     status.message,
                     status.tailscale_ip,
@@ -168,62 +143,84 @@ def _probe_retry_loop(service_id: str, socket_path: str | None) -> None:
                     status.probe_retry_at,
                     status.probe_retry_attempt,
                 )
-                if current_status != observed_status:
-                    logger.info(
-                        "Probe retry: service %s status changed while probing; leaving newer status intact",
-                        service_id,
+
+                runtime = get_runtime_paths(db)
+                checks = run_health_checks(
+                    db, svc, runtime["generated_dir"], runtime["certs_dir"], socket_path,
+                )
+                new_phase = aggregate_status(checks)
+                with service_reconcile_lock(service_id), db_write_section(db):
+                    status = db.get(ServiceStatus, service_id, populate_existing=True)
+                    if not status:
+                        # Status (and its cascaded service row) vanished between the
+                        # pre-lock check and here; drop the entry this acquisition
+                        # re-created so the lock registry stays bounded.
+                        forget_reconcile_lock(service_id)
+                        return
+                    current_status = (
+                        status.phase,
+                        status.message,
+                        status.tailscale_ip,
+                        status.edge_container_id,
+                        status.health_checks,
+                        status.last_reconciled_at,
+                        status.probe_retry_at,
+                        status.probe_retry_attempt,
                     )
-                    continue
+                    if current_status != observed_status:
+                        logger.info(
+                            "Probe retry: service %s status changed while probing; leaving newer status intact",
+                            service_id,
+                        )
+                        continue
 
-                status.last_probe_at = datetime.now(UTC)
+                    status.last_probe_at = datetime.now(UTC)
 
-                # Persist the new aggregate phase whenever it changes. A probe
-                # retry runs a FULL health check, so the phase can move either
-                # way between attempts (error->warning as things converge, or
-                # warning->error if the edge container later dies); report the
-                # real direction and a level matching the new phase instead of
-                # always claiming an improvement.
-                if new_phase != status.phase:
-                    old_phase = status.phase
-                    status.phase = new_phase
-                    status.health_checks = checks
-                    status.message = None
-                    if new_phase == "healthy":
-                        status.probe_retry_at = None
-                        status.probe_retry_attempt = None
+                    # Persist the new aggregate phase whenever it changes. A probe
+                    # retry runs a FULL health check, so the phase can move either
+                    # way between attempts (error->warning as things converge, or
+                    # warning->error if the edge container later dies); report the
+                    # real direction and a level matching the new phase instead of
+                    # always claiming an improvement.
+                    if new_phase != status.phase:
+                        old_phase = status.phase
+                        status.phase = new_phase
+                        status.health_checks = checks
+                        status.message = None
+                        if new_phase == "healthy":
+                            status.probe_retry_at = None
+                            status.probe_retry_attempt = None
 
-                    verb = transition_verb(old_phase, new_phase)
-                    message = (
-                        f"Service '{svc.name}' {verb} from {old_phase} "
-                        f"to {new_phase} after probe retry"
-                    )
-                    emit_event(
-                        db, svc.id, EventKind.PROBE_RETRY_PHASE_CHANGE, message,
-                        level=phase_level(new_phase, unknown="warning"),
-                        details={"phase": new_phase, "checks": checks},
-                    )
-                    commit_with_lock(db)
-                    logger.info(
-                        "Probe retry: service %s phase %s -> %s",
-                        service_id, old_phase, new_phase,
-                    )
+                        verb = transition_verb(old_phase, new_phase)
+                        message = (
+                            f"Service '{svc.name}' {verb} from {old_phase} "
+                            f"to {new_phase} after probe retry"
+                        )
+                        emit_event(
+                            db, svc.id, EventKind.PROBE_RETRY_PHASE_CHANGE, message,
+                            level=phase_level(new_phase, unknown="warning"),
+                            details={"phase": new_phase, "checks": checks},
+                        )
+                        commit_with_lock(db)
+                        logger.info(
+                            "Probe retry: service %s phase %s -> %s",
+                            service_id, old_phase, new_phase,
+                        )
 
-                    if new_phase == "healthy":
-                        return  # Done!
-                else:
-                    # Update health checks even if phase didn't change
-                    status.health_checks = checks
-                    commit_with_lock(db)
+                        if new_phase == "healthy":
+                            return  # Done!
+                    else:
+                        # Update health checks even if phase didn't change
+                        status.health_checks = checks
+                        commit_with_lock(db)
 
-        except Exception:
-            rollback_with_lock(db)
-            # WARNING, not INFO: this catches genuinely unexpected failures
-            # (health-check/DB/lock errors), not a normal failing probe. At INFO
-            # they vanish under a typical WARNING+ production filter and the loop
-            # then silently gives up — surface them so operators can see them.
-            logger.warning("Probe retry error for %s", service_id, exc_info=True)
-        finally:
-            db.close()
+            except Exception:
+                rollback_with_lock(db)
+                # WARNING, not INFO: this catches genuinely unexpected failures
+                # (health-check/DB/lock errors), not a normal failing probe. At INFO
+                # they vanish under a typical WARNING+ production filter and the loop
+                # then silently gives up — surface them so operators can see them.
+                logger.warning("Probe retry error for %s", service_id, exc_info=True)
 
     # Exhausted all retries — clear retry state
     _clear_retry_state(service_id)

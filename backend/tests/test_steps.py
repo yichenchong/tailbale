@@ -13,6 +13,7 @@ from app.models.service_status import ServiceStatus
 from app.reconciler import steps
 from app.reconciler.errors import ReconcileError
 from app.reconciler.reconciler import reconcile_service
+from tests._reconciler_helpers import _STEP_MODULES, patch_across
 from tests._services_helpers import create_service_db
 
 # Patch at source modules: reconciler imports them via the module-reference
@@ -529,8 +530,8 @@ class TestIntermediatePhaseVisibility:
             patch(_P_RELOAD),
             patch(_P_AGGREGATE, return_value="healthy"),
             patch(_P_HEALTH, return_value={"edge_container_running": True}),
-            patch.object(steps, "_update_phase", side_effect=rec_update),
-            patch.object(steps, "_persist_status", side_effect=rec_persist),
+            patch_across(_STEP_MODULES, "_update_phase", side_effect=rec_update),
+            patch_across(_STEP_MODULES, "_persist_status", side_effect=rec_persist),
         ):
             result = reconcile_service(db_session, svc)
 

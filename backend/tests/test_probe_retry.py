@@ -61,7 +61,6 @@ def _run_loop(db_session, svc, *, checks, max_retries=1):
     TestSession = sessionmaker(bind=db_session.get_bind())
     with (
         patch.object(database_module, "SessionLocal", TestSession),
-        patch.object(probe_retry, "SessionLocal", TestSession),
         patch.object(probe_retry, "MAX_RETRIES", max_retries),
         patch.object(probe_retry, "_compute_delay", return_value=0),
         patch.object(probe_retry.time, "sleep") as mock_sleep,
@@ -296,7 +295,6 @@ class TestProbeRetryLoop:
         # Delete the service before the loop wakes from sleep.
         with (
             patch.object(database_module, "SessionLocal", TestSession),
-            patch.object(probe_retry, "SessionLocal", TestSession),
             patch.object(probe_retry, "MAX_RETRIES", 1),
             patch.object(probe_retry, "_compute_delay", return_value=0),
             patch.object(probe_retry.time, "sleep"),
