@@ -143,6 +143,15 @@ describe("formatDateTimeOrDash", () => {
       formatDateTime(iso, "America/New_York"),
     )
   })
+
+  it("renders the em-dash sentinel for an unparseable value (FL-OBS1)", () => {
+    // A non-null but invalid value is truthy, so it slips past the `!date`
+    // guard; formatDateTime returns "" for it, and OrDash must map that to the
+    // sentinel rather than a blank cell. Cover both an invalid string and an
+    // invalid Date object so a future refactor can't regress one of them.
+    expect(formatDateTimeOrDash("not a date", "UTC")).toBe("\u2014")
+    expect(formatDateTimeOrDash(new Date("nonsense"), "UTC")).toBe("\u2014")
+  })
 })
 
 describe("useTimezone settings fetch", () => {

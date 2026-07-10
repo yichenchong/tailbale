@@ -101,15 +101,20 @@ export function formatDateTime(
 }
 
 /**
- * Like formatDateTime but renders the em-dash placeholder for a missing value,
- * so table cells show "—" instead of a blank gap when a timestamp is null.
+ * Like formatDateTime but renders the em-dash placeholder for a missing OR
+ * unparseable value, so table cells show "—" instead of a blank gap when a
+ * timestamp is null/absent or a stored string fails to parse. formatDateTime
+ * returns "" for both the null and the invalid-date cases (and always returns a
+ * non-empty string for a real date, via the UTC/ISO fallbacks), so an empty
+ * result here unambiguously means "no displayable value" → sentinel.
  */
 export function formatDateTimeOrDash(
   date: string | Date | null | undefined,
   timezone: string,
 ): string {
   if (!date) return "—"
-  return formatDateTime(date, timezone)
+  const formatted = formatDateTime(date, timezone)
+  return formatted === "" ? "—" : formatted
 }
 
 /** Format a date (no time) using the configured timezone. */
