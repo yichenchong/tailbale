@@ -16,8 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 def prepare_database() -> None:
-    """Ensure runtime directories, tables, and additive migrations are ready."""
+    """Ensure runtime directories, the JWT secret, tables, and additive migrations are ready."""
     config_module.settings.ensure_dirs()
+    config_module.ensure_jwt_secret()
     database_module.Base.metadata.create_all(bind=database_module.engine)
     database_module.run_migrations()
 

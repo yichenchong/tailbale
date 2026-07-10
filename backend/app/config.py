@@ -117,5 +117,16 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
-if not settings.jwt_secret.strip():
-    settings.jwt_secret = _load_or_create_jwt_secret(settings.data_dir)
+
+
+def ensure_jwt_secret() -> None:
+    """Populate ``settings.jwt_secret`` on first run if not supplied via env.
+
+    Extracted out of module import (AR12) so ``import app.config`` performs NO
+    filesystem side effects — importing no longer writes the secret file or
+    creates the secrets dir. The app lifespan (``startup.prepare_database``) and
+    the test harness invoke this explicitly before any JWT is signed/verified; a
+    ``JWT_SECRET`` env value short-circuits it (no file is touched).
+    """
+    if not settings.jwt_secret.strip():
+        settings.jwt_secret = _load_or_create_jwt_secret(settings.data_dir)

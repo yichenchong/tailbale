@@ -18,6 +18,16 @@ from app.main import app
 from app.models.user import User
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _ensure_jwt_secret_bootstrapped():
+    """AR12: importing app.config no longer creates the JWT secret; bootstrap it
+    once for the whole test session (mirrors the app-startup call) so every test
+    that signs/verifies a token has a stable secret regardless of which fixtures
+    it uses."""
+    config_module.ensure_jwt_secret()
+    yield
+
+
 @pytest.fixture()
 def tmp_data_dir(tmp_path):
     """Provide a temporary data directory and patch app.config.settings."""
