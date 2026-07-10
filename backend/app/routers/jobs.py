@@ -12,9 +12,6 @@ import logging
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-# Re-exported for callers/tests that reference ``jobs.CF_CLEANUP_TIMEOUT`` — the
-# single-source-of-truth cleanup cap lives in the adapter (never redefined here).
-from app.adapters.cloudflare_adapter import CF_CLEANUP_TIMEOUT as CF_CLEANUP_TIMEOUT
 from app.auth import get_current_user
 from app.database import commit_with_lock, db_write_section, get_db
 from app.jobs import orphan_cleanup

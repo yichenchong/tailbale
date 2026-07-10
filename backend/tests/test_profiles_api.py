@@ -1,6 +1,6 @@
 """Tests for the app profiles API endpoints."""
 
-from app.routers.profiles import detect_profile
+from app.profiles import detect_profile
 
 
 class TestDetectProfile:

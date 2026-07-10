@@ -22,7 +22,7 @@ from app.adapters.cloudflare_adapter import (
     update_a_record,
     verify_zone,
 )
-from app.routers import jobs
+from app.jobs import orphan_cleanup
 
 
 def _cf_response(success=True, result=None, errors=None):
@@ -745,11 +745,12 @@ class TestCanonicalTimeouts:
 
     def test_cleanup_timeout_is_single_source_of_truth(self):
 
-        # dns_reconciler and jobs must reuse the adapter's constant, not redefine it.
+        # dns_reconciler and orphan-cleanup jobs must reuse the adapter's constant,
+        # not redefine it or reach through a router shim.
         assert dns_reconciler.CF_CLEANUP_TIMEOUT is cf.CF_CLEANUP_TIMEOUT
-        assert jobs.CF_CLEANUP_TIMEOUT is cf.CF_CLEANUP_TIMEOUT
+        assert orphan_cleanup.CF_CLEANUP_TIMEOUT is cf.CF_CLEANUP_TIMEOUT
         assert not hasattr(dns_reconciler, "CF_CLEANUP_TIMEOUT_SECONDS")
-        assert not hasattr(jobs, "CF_CLEANUP_TIMEOUT_SECONDS")
+        assert not hasattr(orphan_cleanup, "CF_CLEANUP_TIMEOUT_SECONDS")
 
 
 class TestOwnershipComment:

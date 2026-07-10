@@ -4,10 +4,11 @@ from unittest.mock import patch
 
 from sqlalchemy import text
 
+from app.jobs.orphan_cleanup import CF_CLEANUP_TIMEOUT
 from app.models.dns_record import DnsRecord
 from app.models.event import Event
 from app.models.job import Job
-from app.routers.jobs import CF_CLEANUP_TIMEOUT, reset_stale_running_jobs
+from app.routers.jobs import reset_stale_running_jobs
 from app.settings_store import set_setting
 from tests._services_helpers import create_service_api
 
