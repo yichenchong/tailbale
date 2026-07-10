@@ -435,6 +435,47 @@ class TestRunAndPersistHealthStep:
             assert evt.level == expected_level
             assert evt.details == {"phase": phase, "checks": checks}
 
+    def test_healthy_persist_clears_stale_probe_retry_schedule(self, db_session, tmp_data_dir):
+        # A probe-retry thread may have scheduled the next retry (probe_retry_at /
+        # probe_retry_attempt) and then gone to sleep. When a full reconcile's
+        # health step finds the service healthy it MUST clear that pending schedule
+        # so the frontend never shows a "next retry at ..." on a healthy service
+        # (the sleeping thread would otherwise not clear it until it next wakes).
+        svc = create_service_db(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.probe_retry_at = datetime.now(UTC) + timedelta(minutes=55)
+        status.probe_retry_attempt = 10
+        db_session.commit()
+        checks = {"edge_container_running": True}
+        with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value="healthy"):
+            steps.run_and_persist_health(
+                db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
+            )
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.phase == "healthy"
+        assert status.probe_retry_at is None
+        assert status.probe_retry_attempt is None
+
+    def test_non_healthy_persist_preserves_probe_retry_schedule(self, db_session, tmp_data_dir):
+        # The converse: a still-degraded (warning/error) health result MUST NOT
+        # wipe a legitimately-pending probe-retry schedule — clearing is scoped to
+        # the healthy transition only, so an in-flight retry keeps its timing.
+        svc = create_service_db(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        retry_at = datetime.now(UTC) + timedelta(minutes=5)
+        status.probe_retry_at = retry_at
+        status.probe_retry_attempt = 3
+        db_session.commit()
+        checks = {"https_probe_ok": False}
+        with patch(_P_HEALTH, return_value=checks), patch(_P_AGGREGATE, return_value="warning"):
+            steps.run_and_persist_health(
+                db_session, svc, Path(tmp_data_dir) / "g", Path(tmp_data_dir) / "c", None
+            )
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.phase == "warning"
+        assert status.probe_retry_at is not None
+        assert status.probe_retry_attempt == 3
+
 
 class TestMaybeScheduleProbeRetryStep:
     """``_maybe_schedule_probe_retry`` was the only reconcile step in ``steps.py``

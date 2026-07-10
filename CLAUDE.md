@@ -56,7 +56,7 @@ HOST_DATA_DIR=$PWD/data docker compose -f docker-compose.prod.yml up -d --build 
 | `models/` | 8 ORM models: Service, ServiceStatus, Certificate, DnsRecord, Event, Job, Setting, User |
 | `routers/` | 11 REST routers: auth, settings, developer, connection_tests, discovery, services, service_actions, events, dashboard, profiles, jobs |
 | `services/` | Transport-agnostic service lifecycle layer (AR1 split of the former `service_ops` god-module) — `create`/`update`/`delete` (with shared `lifecycle` helpers and response `mapping`), `edge_ops`, `cert_ops`, and domain `errors`; routers delegate here and the central handler in `main.py` maps the raised domain exceptions to HTTP |
-| `reconciler/` | **Core engine** — 14-step idempotent per-service reconciliation (per-phase step helpers in `reconciler/steps.py`, wired together by `reconciler.py`); full reconcile hourly + a lightweight 60s health sweep that escalates to a full reconcile on drift |
+| `reconciler/` | **Core engine** — 14-step idempotent per-service reconciliation (per-phase step helpers in the `reconciler/steps/` package, wired together by `reconciler.py`); full reconcile hourly + a lightweight 60s health sweep that escalates to a full reconcile on drift |
 | `edge/` | Edge container management (Caddy + Tailscale lifecycle) |
 | `certs/` | Certificate issuance and renewal (lego ACME) |
 | `adapters/` | Cloudflare DNS adapter, DNS record reconciliation |

@@ -19,8 +19,12 @@ SessionLocal: sessionmaker | None = None
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
-    cursor.execute("PRAGMA journal_mode=WAL")
+    # busy_timeout MUST be set BEFORE journal_mode: switching a fresh database to
+    # WAL (and any later re-assertion) briefly needs a write lock, so a connect
+    # racing another connection would otherwise fail immediately with
+    # "database is locked" instead of waiting out the timeout.
     cursor.execute("PRAGMA busy_timeout=5000")
+    cursor.execute("PRAGMA journal_mode=WAL")
     cursor.close()
 
 

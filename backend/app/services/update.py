@@ -53,7 +53,12 @@ def _apply_hostname_change(db: Session, svc: Service, body, service_id: str) -> 
         raise HostnameInUse(body.hostname)
 
     configured_domain = settings_store.get_setting(db, "base_domain")
-    if not configured_domain or not body.hostname.endswith(f".{configured_domain}"):
+    # Compare case-insensitively, mirroring the create path
+    # (routers/services.py): the hostname is lowercased by the schema, but a
+    # legacy/direct-DB base_domain can hold a mixed-case value (the API validator
+    # only lowercases on write). A raw endswith would then wrongly reject a valid
+    # subdomain on a hostname change while create accepts the same one.
+    if not configured_domain or not body.hostname.endswith(f".{configured_domain.lower()}"):
         raise HostnameSuffixInvalid(body.hostname, configured_domain)
 
     old_hostname = svc.hostname

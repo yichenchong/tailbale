@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.edge import docker_client as dc
-from app.edge.docker_client import close_client, connect
+from app.edge.docker_client import close_client, connect, resolve_socket
 from app.settings_store import set_setting
 from tests._services_helpers import create_service_api
 
@@ -210,3 +210,31 @@ class TestDockerClientPrimitives:
         ):
             raise ValueError("boom")
         fake.close.assert_called_once()
+
+class TestResolveSocket:
+    """``resolve_socket`` is the single socket-resolution policy for the whole
+    app, but was only exercised indirectly (the action endpoints above pass its
+    result through). Pin the documented tri-state contract directly: an
+    unconfigured key resolves to the default socket, a configured value passes
+    through (surrounding whitespace stripped), and an explicitly blank/whitespace
+    value yields ``None`` so callers fall back to ``from_env()`` / DOCKER_HOST."""
+
+    def test_unconfigured_resolves_to_default(self, db_session):
+        assert resolve_socket(db_session) == "unix:///var/run/docker.sock"
+
+    def test_configured_value_passes_through(self, db_session):
+        set_setting(db_session, "docker_socket_path", "tcp://10.0.0.1:2375")
+        assert resolve_socket(db_session) == "tcp://10.0.0.1:2375"
+
+    def test_surrounding_whitespace_is_stripped(self, db_session):
+        set_setting(db_session, "docker_socket_path", "  unix:///x.sock \n")
+        assert resolve_socket(db_session) == "unix:///x.sock"
+
+    def test_blank_value_yields_none(self, db_session):
+        # Explicitly blank => None => caller falls back to docker.from_env().
+        set_setting(db_session, "docker_socket_path", "")
+        assert resolve_socket(db_session) is None
+
+    def test_whitespace_only_value_yields_none(self, db_session):
+        set_setting(db_session, "docker_socket_path", "   \t ")
+        assert resolve_socket(db_session) is None

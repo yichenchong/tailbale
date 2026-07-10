@@ -108,6 +108,33 @@ def test_settings_tolerates_legacy_env_vars(monkeypatch):
         assert not hasattr(s, removed)
 
 
+class TestHostDataDirBlankIsUnset:
+    """A blank HOST_DATA_DIR must resolve to None (unset), never Path('.').
+
+    A bare ``HOST_DATA_DIR=`` in .env or a docker-compose ``${VAR:-}`` expansion
+    of an unset variable both arrive as "". Pydantic would coerce that to
+    ``Path('.')`` (non-None), which makes settings_store._host_path remap every
+    Docker bind-mount source to a bogus RELATIVE path (e.g. "generated"), which
+    the daemon treats as a named volume — silently breaking edge containers.
+    """
+
+    def test_empty_string_becomes_none(self, monkeypatch):
+        monkeypatch.setenv("HOST_DATA_DIR", "")
+        assert Settings().host_data_dir is None
+
+    def test_whitespace_only_becomes_none(self, monkeypatch):
+        monkeypatch.setenv("HOST_DATA_DIR", "   ")
+        assert Settings().host_data_dir is None
+
+    def test_real_path_is_preserved(self, monkeypatch):
+        monkeypatch.setenv("HOST_DATA_DIR", "/mnt/host/data")
+        assert Settings().host_data_dir == _Path("/mnt/host/data")
+
+    def test_unset_defaults_to_none(self, monkeypatch):
+        monkeypatch.delenv("HOST_DATA_DIR", raising=False)
+        assert Settings().host_data_dir is None
+
+
 def test_empty_persisted_jwt_secret_is_regenerated(tmp_path):
     """A persisted-but-empty/whitespace .jwt_secret (e.g. a truncated backup or
     a 0-byte volume mount) must be treated as missing and regenerated, never

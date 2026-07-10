@@ -4,7 +4,7 @@ import secrets
 import stat
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 from app.fsutil import atomic_write_text
@@ -74,6 +74,22 @@ class Settings(BaseSettings):
     port: int = 8080
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    @field_validator("host_data_dir", mode="before")
+    @classmethod
+    def _blank_host_data_dir_is_unset(cls, value: object) -> object:
+        # An empty/whitespace HOST_DATA_DIR must mean "unset" — identical to
+        # omitting it — so get_runtime_paths keeps host paths equal to internal
+        # ones. This is a real deployment shape: a bare ``HOST_DATA_DIR=`` line
+        # in .env, or a docker-compose ``${HOST_DATA_DIR:-}`` expansion of an
+        # unset variable, both arrive as "". Without this, pydantic coerces ""
+        # to ``Path('.')`` (non-None), and _host_path then remaps every Docker
+        # bind-mount source to a bogus RELATIVE path (e.g. "generated"), which
+        # the daemon treats as a named volume — silently breaking edge
+        # container creation.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     # Derived paths
     @property

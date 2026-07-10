@@ -74,7 +74,12 @@ def create_service(body: ServiceCreate, background_tasks: BackgroundTasks, db: S
     # subdomain of it. We derive base_domain server-side rather than trusting
     # the client so the persisted value always matches configuration.
     configured_domain = get_setting(db, "base_domain")
-    if not configured_domain or not body.hostname.endswith(f".{configured_domain}"):
+    # Compare case-insensitively: the hostname is lowercased by the schema, but a
+    # legacy/direct-DB base_domain can hold a mixed-case value (the API validator
+    # only lowercases on write). A raw endswith would then reject a valid
+    # subdomain — settings._reject_base_domain_change_with_services guards the
+    # same legacy case the same way.
+    if not configured_domain or not body.hostname.endswith(f".{configured_domain.lower()}"):
         raise HostnameSuffixInvalid(body.hostname, configured_domain)
 
     # Validate upstream container + port (spec §17 steps 2-3) — hard failure,

@@ -8,10 +8,12 @@ SNAPSHOT the target set up front and re-fetch (or skip) per item inside the loop
 
 :func:`snapshot_enabled_service_ids` is that snapshot. :func:`run_id_sweep` is the
 simplest shared loop shape — re-fetch by id, skip if deleted, run the body,
-rollback+log+count on error — used by the full reconcile sweep. Sweeps with extra
-per-item control flow (the health sweep's skip-if-lock-contended, the renewal
-scan's ``session_scope`` ownership) consume only the snapshot and keep their own
-loop, so a domain-specific guard is never flattened away.
+rollback+log+count on error — used by the full reconcile sweep. The health sweep
+needs extra per-item control flow (skip-if-lock-contended), so it consumes only
+:func:`snapshot_enabled_service_ids` and keeps its own loop. ``run_renewal_scan``
+guards the same hazard independently: it owns its ``session_scope`` and snapshots
+``(service, hostname)`` tuples up front (it needs the hostname for the failure-log
+path after a rollback expires the row), so it does not use this module at all.
 """
 
 from __future__ import annotations

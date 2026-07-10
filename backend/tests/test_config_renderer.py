@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from app.edge import config_renderer
+from app.edge import caddy_snippet, config_renderer
 from app.edge.config_renderer import render_caddyfile, write_caddyfile
 
 
@@ -70,6 +70,22 @@ class TestRenderCaddyfile:
 
         assert "header X-Custom true" in result
         assert "log { output stdout }" in result
+
+    def test_snippet_block_is_single_source_for_validator(self):
+        """The block-escape validator (``caddy_snippet.validate_caddy_snippet``)
+        lexes ``render_snippet_block``'s output to guarantee the validated bytes
+        equal the bytes render_caddyfile embeds. Guard that single source of
+        truth: caddy_snippet must reuse THIS module's renderer, not a divergent
+        copy — a fork would let the validated form drift from the rendered form
+        and reopen the block-escape hole.
+        """
+        assert (
+            caddy_snippet.render_snippet_block is config_renderer.render_snippet_block
+        )
+        # And render_caddyfile embeds exactly that renderer's output verbatim.
+        snippet = "handle { respond ok }"
+        rendered = config_renderer.render_snippet_block(snippet)
+        assert rendered in render_caddyfile(_make_service(custom_caddy_snippet=snippet))
 
     def test_whitespace_only_custom_snippet(self):
         """Document current behavior: a whitespace-only snippet is still truthy,

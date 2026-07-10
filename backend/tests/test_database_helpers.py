@@ -10,6 +10,7 @@ from sqlalchemy import create_engine, event
 from sqlalchemy import inspect as _inspect
 from sqlalchemy import text as _text
 
+import app.database as database_module
 import app.models as _registered_models  # noqa: F401  -- register every table on Base.metadata
 from app.database import (
     _DB_WRITE_MUTEX,
@@ -63,6 +64,9 @@ class FakeSession:
 
     def rollback(self):
         self.calls.append("rollback")
+
+    def close(self):
+        self.calls.append("close")
 
 
 def test_db_write_section_uses_no_autoflush_and_rolls_back_on_error():
@@ -522,6 +526,39 @@ def test_set_sqlite_pragma_applies_to_overflow_connections(tmp_path):
     finally:
         engine.dispose()
 
+
+class _RecordingCursor:
+    def __init__(self, log):
+        self._log = log
+
+    def execute(self, sql):
+        self._log.append(sql)
+
+    def close(self):
+        pass
+
+
+class _RecordingConnection:
+    def __init__(self):
+        self.log: list[str] = []
+
+    def cursor(self):
+        return _RecordingCursor(self.log)
+
+
+def test_set_sqlite_pragma_sets_busy_timeout_before_journal_mode():
+    """busy_timeout MUST be issued BEFORE journal_mode=WAL. Switching a fresh DB
+    to WAL (and re-asserting it on later connects) briefly needs a write lock; a
+    connect racing another connection would fail immediately with 'database is
+    locked' unless busy_timeout is already armed. Order matters, so pin it."""
+    conn = _RecordingConnection()
+    _set_sqlite_pragma(conn, None)
+    busy_i = next(i for i, s in enumerate(conn.log) if "busy_timeout" in s)
+    journal_i = next(i for i, s in enumerate(conn.log) if "journal_mode" in s)
+    assert busy_i < journal_i, (
+        f"busy_timeout must be set before journal_mode; got order {conn.log}"
+    )
+
 # ---------------------------------------------------------------------------
 # AR12: importing app.database must be side-effect-free — it builds NO engine.
 # The engine/SessionLocal only exist after an explicit init_engine() call.
@@ -549,3 +586,62 @@ def test_importing_app_database_builds_no_engine():
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# session_scope / get_db / rollback_with_lock lifecycle contracts
+# ---------------------------------------------------------------------------
+
+
+def test_session_scope_closes_session_on_normal_exit(monkeypatch):
+    made: list[FakeSession] = []
+
+    def _factory():
+        made.append(FakeSession())
+        return made[-1]
+
+    monkeypatch.setattr(database_module, "SessionLocal", _factory)
+    with database_module.session_scope() as db:
+        assert db is made[0]
+        assert db.calls == []  # not closed while the block is live
+    assert made[0].calls == ["close"], "session_scope must close on normal exit"
+
+
+def test_session_scope_closes_session_even_when_body_raises(monkeypatch):
+    made: list[FakeSession] = []
+
+    def _factory():
+        made.append(FakeSession())
+        return made[-1]
+
+    monkeypatch.setattr(database_module, "SessionLocal", _factory)
+    with pytest.raises(RuntimeError), database_module.session_scope():
+        raise RuntimeError("boom")
+    # It owns only the lifecycle: it closes but never commits/rolls back itself.
+    assert made[0].calls == ["close"], "session_scope must close even on error"
+
+
+def test_get_db_dependency_closes_session_when_generator_finishes(monkeypatch):
+    made: list[FakeSession] = []
+
+    def _factory():
+        made.append(FakeSession())
+        return made[-1]
+
+    monkeypatch.setattr(database_module, "SessionLocal", _factory)
+    gen = database_module.get_db()
+    db = next(gen)
+    assert db is made[0]
+    assert db.calls == []  # still open mid-request
+    gen.close()  # FastAPI drives the finally on request teardown
+    assert made[0].calls == ["close"], "get_db must close the session on teardown"
+
+
+def test_rollback_with_lock_rolls_back_under_the_write_lock():
+    # rollback_with_lock is the innermost tier-3 helper the other write helpers
+    # delegate to; standalone it must roll back while holding the reentrant write
+    # mutex (so a caller already holding it does not deadlock).
+    db = FakeSession()
+    with _DB_WRITE_MUTEX:
+        database_module.rollback_with_lock(db)
+    assert db.calls == ["rollback"]

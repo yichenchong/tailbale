@@ -1,4 +1,4 @@
-import { useState } from "react"
+import { useId, useState } from "react"
 import { Loader2, Save } from "lucide-react"
 import { api, type ServiceItem, type ServiceUpdateRequest } from "@/lib/api"
 import {
@@ -31,6 +31,8 @@ export function ServiceEditForm({
   setError: (value: string | null) => void
 }) {
   const [saving, setSaving] = useState(false)
+  const nameErrorId = useId()
+  const nameError = edit.normalizedName !== "" && !edit.nameValid
   const canSave = edit.nameValid && edit.portValid && !saving
 
   const handleSave = async () => {
@@ -83,10 +85,12 @@ export function ServiceEditForm({
           <label className="block">
             <span className="text-xs font-medium text-zinc-600">Name</span>
             <input type="text" value={edit.name} onChange={(e) => edit.setName(e.target.value)}
+              aria-invalid={nameError ? true : undefined}
+              aria-describedby={nameError ? nameErrorId : undefined}
               className="mt-1 block w-full rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500" />
           </label>
-          {edit.normalizedName !== "" && !edit.nameValid && (
-            <p className="mt-1 text-xs text-red-600">{SERVICE_NAME_LENGTH_MESSAGE}.</p>
+          {nameError && (
+            <p id={nameErrorId} className="mt-1 text-xs text-red-600">{SERVICE_NAME_LENGTH_MESSAGE}.</p>
           )}
           <label className="block">
             <span className="text-xs font-medium text-zinc-600">Upstream Port</span>

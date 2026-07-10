@@ -115,10 +115,13 @@ def reconcile_dns(
 
     # Cloudflare I/O is deliberately outside the SQLite write lock.  Only the
     # local row/event mutations below are serialized. Cap each call at the short
-    # CF_CLEANUP_TIMEOUT (10s): reconcile holds the per-service reconcile
-    # lock across these calls, so a slow/unreachable Cloudflare must not stretch
-    # the worst case (list + create/update + best-effort duplicate deletes) toward
-    # the 30s default. This mirrors cleanup_dns_record / the orphan-cleanup job.
+    # CF_CLEANUP_TIMEOUT (10s): the DNS step runs these calls while co-holding the
+    # per-service reconcile lock AND the GLOBAL ops mutex (locks._GLOBAL_OPS_MUTEX,
+    # tier 2b), which every service's DNS step must take -- so a slow/unreachable
+    # Cloudflare here stalls the DNS step of ALL services (and the orphan-cleanup
+    # job) for the full window. The short cap bounds that worst case (list +
+    # create/update + best-effort duplicate deletes) instead of letting it stretch
+    # toward the 30s default. This mirrors cleanup_dns_record / the orphan-cleanup job.
     records = list_a_records(cf_token, zone_id, hostname, "A", timeout=CF_CLEANUP_TIMEOUT)
     existing = select_owned_or_lowest(records, own_comment)
     action = "noop"

@@ -385,3 +385,30 @@ class TestFullHealthCheckLiveTailscaleIp:
         assert body["tailscale_ip"] == "100.64.0.1"
         assert body["checks"]["dns_matches_ip"] is True
         assert body["extended"]["cf_ip_matches_tailscale"] is True
+
+class TestBaseDomainSuffixCaseInsensitive:
+    """create_service must match the hostname's base-domain suffix
+    case-insensitively. The API validator lowercases base_domain on write, but a
+    legacy/direct-DB deployment can hold a mixed-case stored value; a raw
+    case-sensitive endswith would 422 a perfectly valid lowercase subdomain."""
+
+    def test_mixed_case_stored_base_domain_accepts_lowercase_subdomain(
+        self, client, db_session
+    ):
+        # Write a mixed-case base_domain directly, bypassing the lowercasing
+        # schema validator (simulating a legacy stored value).
+        set_setting(db_session, "base_domain", "Example.COM")
+        db_session.commit()
+
+        # Pre-fix: "app.example.com".endswith(".Example.COM") is False -> 422.
+        resp = _create_service(client, name="App", hostname="app.example.com")
+        assert resp.status_code == 201
+
+    def test_hostname_outside_mixed_case_domain_still_rejected(
+        self, client, db_session
+    ):
+        set_setting(db_session, "base_domain", "Example.COM")
+        db_session.commit()
+
+        resp = _create_service(client, name="App", hostname="app.wrong.com")
+        assert resp.status_code == 422

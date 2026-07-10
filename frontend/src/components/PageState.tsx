@@ -17,7 +17,7 @@ interface PageLoadingProps extends PageStateProps {
 
 export function PageLoading({ children, className = DEFAULT_LOADING_CLASS, iconClassName = DEFAULT_LOADING_ICON_CLASS }: PageLoadingProps) {
   return (
-    <div className={cn(className)}>
+    <div role="status" className={cn(className)}>
       <Loader2 className={cn(iconClassName)} />
       {children}
     </div>

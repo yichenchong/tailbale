@@ -2,6 +2,7 @@
 
 import asyncio
 import threading
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -499,3 +500,31 @@ class TestHealthCheckAll:
         assert doomed_status.phase == "disabled"
         assert doomed_status.message == "Service disabled by user"
         assert doomed_status.health_checks is None
+
+    def test_healthy_sweep_clears_stale_probe_retry_schedule(self, db_session):
+        # A background probe-retry thread schedules the NEXT retry (probe_retry_at
+        # / probe_retry_attempt) and then sleeps — up to an hour on later attempts.
+        # If the service recovers to healthy through the fast sweep (not through
+        # the probe-retry thread itself), the sweep MUST clear that pending
+        # schedule so the UI never shows a "next retry at ..." on an already-
+        # healthy service until the sleeping thread finally wakes and clears it.
+        svc = _create_service(db_session)
+        status = db_session.get(ServiceStatus, svc.id)
+        status.phase = "warning"
+        status.probe_retry_at = datetime.now(UTC) + timedelta(minutes=55)
+        status.probe_retry_attempt = 10
+        db_session.commit()
+        with (
+            patch("app.health.health_checker.run_health_checks", return_value={"ok": True}),
+            patch("app.health.health_checker.aggregate_status", return_value="healthy"),
+            patch.object(loop_mod, "reconcile_one") as mock_reconcile,
+        ):
+            count = loop_mod.health_check_all(db_session, socket_path=None)
+        assert count == 1
+        # Recovered via the silent healthy path — no escalation clears it for us.
+        mock_reconcile.assert_not_called()
+        db_session.expire_all()
+        status = db_session.get(ServiceStatus, svc.id)
+        assert status.phase == "healthy"
+        assert status.probe_retry_at is None
+        assert status.probe_retry_attempt is None

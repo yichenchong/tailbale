@@ -132,6 +132,17 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
                     continue
                 checks = health_checker.run_health_checks(db, svc, generated_dir, certs_dir, socket_path)
                 phase = health_checker.aggregate_status(checks)
+                # A recovery to healthy retires any in-flight background
+                # probe-retry: clear the scheduled next-retry fields so the UI
+                # never shows a pending "next retry at ..." on a healthy service
+                # (the sleeping probe-retry thread would otherwise not clear them
+                # until it next wakes — up to an hour on later attempts). Scoped to
+                # the healthy transition: a still-degraded phase keeps its retry.
+                clear_retry = (
+                    {"probe_retry_at": None, "probe_retry_attempt": None}
+                    if phase == "healthy"
+                    else {}
+                )
                 _persist_status(
                     db,
                     service_id,
@@ -145,6 +156,7 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
                     health_checks=checks,
                     last_probe_at=datetime.now(UTC),
                     event=None,
+                    **clear_retry,
                 )
                 if phase != "healthy":
                     # Drift detected — escalate to a full reconcile, which emits the

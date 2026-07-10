@@ -2,6 +2,7 @@ import { AlertTriangle } from "lucide-react"
 import { type ServiceItem, type EdgeVersionResponse } from "@/lib/api"
 import { formatDateTime } from "@/lib/useTimezone"
 import { formatCertExpiry } from "@/lib/certStatus"
+import { phaseLabel } from "@/lib/statusStyles"
 import { Row } from "./Row"
 
 /**
@@ -30,7 +31,7 @@ export function EdgeVersionPanel({
         <Row label="TS Hostname" value={service.ts_hostname} />
         <Row label="Tailscale IP" value={service.status?.tailscale_ip || "—"} />
         <Row label="Cert Expiry" value={cert.text} valueClassName={cert.style} />
-        <Row label="Phase" value={phase} />
+        <Row label="Phase" value={phaseLabel(phase)} />
         <Row label="Message" value={service.status?.message || "—"} />
         <Row label="Last Reconciled" value={service.status?.last_reconciled_at ? formatDateTime(service.status.last_reconciled_at, tz) : "Never"} />
         {edgeVersion && (

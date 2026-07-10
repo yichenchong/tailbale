@@ -209,7 +209,7 @@ It is not re-created per deploy, so it never accumulates. Remove it with
 | `HOST_PORT` | No | `6780` | Host port the admin UI is published on: the full mapping is `BIND_ADDR:HOST_PORT` → container `PORT`. Reach the UI at `http://<host-or-tailnet-ip>:HOST_PORT`. |
 | `HOST` | No | `0.0.0.0` | Listen address **inside the container** (leave as `0.0.0.0`; Docker forwards the published port to it) |
 | `BIND_ADDR` | No | `127.0.0.1` | Host interface the published port binds to. Loopback by default; set to your tailnet IP for `http://<tailnet-ip>:HOST_PORT`, or `0.0.0.0` to expose on all host interfaces. |
-| `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path |
+| `DOCKER_SOCKET` | No | `unix:///var/run/docker.sock` | Docker socket path used **only** by Compose/`deploy.sh`/`redeploy.sh` to bind-mount the socket into the container. The orchestrator itself does **not** read this env var — its effective socket is configured in the in-app setup wizard (stored in the DB as `docker_socket_path`). If you override this to a non-default path, also update the socket in Settings. |
 
 ## Updating
 

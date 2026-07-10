@@ -305,6 +305,46 @@ class TestProcessServiceCert:
         assert db_session.query(Event).filter(Event.kind == "cert_issued").count() == 0
         assert db_session.query(Event).filter(Event.kind == "cert_failed").count() == 1
 
+    @patch("app.certs.renewal_task.get_cert_expiry")
+    @patch("app.certs.renewal_task.renew_cert")
+    @patch("app.certs.renewal_task.read_secret")
+    def test_records_failure_when_renew_raises(
+        self, mock_secret, mock_renew, mock_expiry, db_session
+    ):
+        """Prior-bug-class guard at the orchestration level. A cert within the
+        renewal window takes the RENEW branch; if renew_cert raises (lego/DNS
+        error, and its fresh-issue fallback also failed), process_service_cert
+        must record the failure and emit ONLY cert_failed - never cert_renewed
+        or cert_issued. Existing failure tests exercise only the ISSUE branch
+        (mock_expiry -> None); the renew branch's failure honesty was unpinned,
+        so a regression re-labelling a failed renewal as a success would slip
+        through. The manual force endpoint reads last_failure to report honestly,
+        so this also protects 'a failed forced renewal must not report success'."""
+
+        mock_secret.return_value = "cf-token"
+        # Cert exists and expires within the 30-day window -> needs_renew path.
+        soon = datetime.now(UTC) + timedelta(days=5)
+        mock_expiry.return_value = soon
+        mock_renew.side_effect = RuntimeError("lego renew failed: DNS timeout")
+
+        svc = create_service_db(db_session)
+        process_service_cert(db_session, svc)
+
+        mock_renew.assert_called_once()
+        cert = db_session.get(Certificate, svc.id)
+        assert cert is not None
+        assert cert.last_failure is not None
+        assert "DNS timeout" in cert.last_failure
+        assert cert.next_retry_at is not None
+
+        assert db_session.query(Event).filter(Event.kind == "cert_failed").count() == 1
+        assert (
+            db_session.query(Event)
+            .filter(Event.kind.in_(["cert_renewed", "cert_issued"]))
+            .count()
+            == 0
+        )
+
 
     @patch("app.certs.renewal_task.get_cert_expiry")
     @patch("app.certs.renewal_task.read_secret")

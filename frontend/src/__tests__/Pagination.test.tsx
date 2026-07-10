@@ -135,6 +135,15 @@ describe("Pagination component", () => {
     expect(screen.getByText("1–50 of 120")).toBeInTheDocument()
   })
 
+  it("marks Prev/Next as type=button so they never submit an enclosing form", () => {
+    render(<Pagination {...defaults} />)
+    // Bare <button> defaults to type=submit; inside a <form> a Prev/Next click
+    // would submit it. Every other button in the app sets type=button; these
+    // must match.
+    expect(screen.getByText("Previous")).toHaveAttribute("type", "button")
+    expect(screen.getByText("Next")).toHaveAttribute("type", "button")
+  })
+
   it("disables Next on the last page", () => {
     render(<Pagination {...defaults} offset={100} page={3} />)
     expect(screen.getByText("Next")).toBeDisabled()

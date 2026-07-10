@@ -48,6 +48,8 @@ def _persist_status(
     health_checks: dict | object = _UNSET,
     last_probe_at: datetime | None | object = _UNSET,
     last_reconciled_at: datetime | None | object = _UNSET,
+    probe_retry_at: datetime | None | object = _UNSET,
+    probe_retry_attempt: int | None | object = _UNSET,
     event: dict | None = None,
 ) -> None:
     with service_reconcile_lock(service_id), db_write_section(db):
@@ -66,6 +68,10 @@ def _persist_status(
             status.last_probe_at = last_probe_at
         if last_reconciled_at is not _UNSET:
             status.last_reconciled_at = last_reconciled_at
+        if probe_retry_at is not _UNSET:
+            status.probe_retry_at = probe_retry_at
+        if probe_retry_attempt is not _UNSET:
+            status.probe_retry_attempt = probe_retry_attempt
         if event is not None:
             emit_event(
                 db,

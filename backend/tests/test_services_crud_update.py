@@ -357,6 +357,20 @@ class TestUpdateHostnameBaseDomain:
         assert data["hostname"].endswith(f".{data['base_domain']}")
         assert data["base_domain"] == "example.com"
 
+    def test_hostname_change_mixed_case_base_domain_accepted(self, client, db_session):
+        # A legacy/direct-DB base_domain can hold a mixed-case value (the API
+        # validator only lowercases on write); the hostname is lowercased by the
+        # schema. The hostname-change suffix check MUST compare case-insensitively
+        # (mirroring the create path), or a valid subdomain change is wrongly
+        # rejected with 422 while create accepts the same hostname.
+        svc_id = _create_service(client, name="App", hostname="app.example.com").json()["id"]
+        set_setting(db_session, "base_domain", "Example.COM")
+        db_session.commit()
+
+        resp = client.put(f"/api/services/{svc_id}", json={"hostname": "new.example.com"})
+        assert resp.status_code == 200
+        assert resp.json()["hostname"] == "new.example.com"
+
 
 class TestUpdatePortValidationHoistedOutOfLock:
     """The upstream-port revalidation does a Docker round-trip. It must run

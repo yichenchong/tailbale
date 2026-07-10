@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { formatDateTime, _resetTimezoneCache } from "@/lib/useTimezone"
 import { mockService, renderWithRoute } from "./serviceDetailTestUtils"
+import { makeService, makeServiceStatus } from "./factories"
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -24,7 +25,7 @@ describe("ServiceDetail page - render", () => {
       expect(screen.getByText("Nextcloud")).toBeInTheDocument()
     })
     expect(screen.getAllByText("nextcloud.example.com").length).toBeGreaterThanOrEqual(1)
-    expect(screen.getAllByText("pending").length).toBeGreaterThanOrEqual(1)
+    expect(screen.getAllByText("Pending").length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText("Enabled")).toBeInTheDocument()
   })
 
@@ -293,5 +294,64 @@ describe("ServiceDetail page - render", () => {
     fireEvent.click(eventsTab)
     expect(eventsTab).toHaveAttribute("aria-selected", "true")
     expect(edgeTab).toHaveAttribute("aria-selected", "false")
+  })
+
+  it("supports roving tabindex and arrow-key navigation on the logs tablist", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockService),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Nextcloud")).toBeInTheDocument())
+
+    const edgeTab = screen.getByRole("tab", { name: "Edge Logs" })
+    const eventsTab = screen.getByRole("tab", { name: "Events" })
+
+    // Only the selected tab is in the tab sequence (roving tabindex).
+    expect(edgeTab).toHaveAttribute("tabindex", "0")
+    expect(eventsTab).toHaveAttribute("tabindex", "-1")
+
+    // ArrowRight moves selection/focus to the next tab.
+    edgeTab.focus()
+    fireEvent.keyDown(edgeTab, { key: "ArrowRight" })
+    expect(eventsTab).toHaveAttribute("aria-selected", "true")
+    expect(edgeTab).toHaveAttribute("aria-selected", "false")
+    expect(eventsTab).toHaveAttribute("tabindex", "0")
+    expect(eventsTab).toHaveFocus()
+
+    // ArrowRight wraps around to the first tab.
+    fireEvent.keyDown(eventsTab, { key: "ArrowRight" })
+    expect(edgeTab).toHaveAttribute("aria-selected", "true")
+    expect(edgeTab).toHaveFocus()
+
+    // ArrowLeft wraps back to the last tab; Home/End jump to the ends.
+    fireEvent.keyDown(edgeTab, { key: "ArrowLeft" })
+    expect(eventsTab).toHaveAttribute("aria-selected", "true")
+    fireEvent.keyDown(eventsTab, { key: "Home" })
+    expect(edgeTab).toHaveAttribute("aria-selected", "true")
+    fireEvent.keyDown(edgeTab, { key: "End" })
+    expect(eventsTab).toHaveAttribute("aria-selected", "true")
+  })
+
+  it("humanizes an in-progress reconcile phase with an in-progress pill (ARCH-UX-3)", async () => {
+    const inProgress = makeService({
+      status: makeServiceStatus({ phase: "ensuring_cert", message: "Checking certificate" }),
+    })
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(inProgress),
+    }))
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Nextcloud")).toBeInTheDocument())
+
+    // The humanized label (not raw snake_case) appears both in the header badge
+    // and in the Runtime "Phase" row.
+    const labels = screen.getAllByText("Ensuring certificate")
+    expect(labels.length).toBeGreaterThanOrEqual(1)
+    // The header status badge is styled as the blue "working" pill, not the
+    // neutral grey fallback.
+    const badge = labels.find((el) => el.classList.contains("bg-blue-100"))
+    expect(badge).toBeDefined()
+    expect(badge).toHaveClass("bg-blue-100", "text-blue-700")
   })
 })

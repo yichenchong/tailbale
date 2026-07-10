@@ -88,7 +88,7 @@ describe("Services page", () => {
       expect(screen.getByText("Nextcloud")).toBeInTheDocument()
     })
     expect(screen.getByText("nextcloud.example.com")).toBeInTheDocument()
-    expect(screen.getByText("healthy")).toBeInTheDocument()
+    expect(screen.getByText("Healthy")).toBeInTheDocument()
   })
 
   it("renders edge IP column", async () => {

@@ -52,10 +52,19 @@ def lowest_id(records: list[Record]) -> Record | None:
 
 def find_by_id(records: list[Record], record_id: str) -> Record | None:
     """Return the record whose ``id`` equals *record_id* (compared as strings),
-    or ``None`` if no record in the set has that id."""
+    or ``None`` if no record in the set has that id.
+
+    A record with a missing/empty ``id`` is skipped, never matched: without this
+    guard a malformed entry's ``str(None) == "None"`` would spuriously match a
+    ``None``/``"None"`` target (mirrors the falsy-id skip in
+    :func:`owned_duplicates`), so orphan-cleanup never acts on the wrong record.
+    """
     target = str(record_id)
     for record in records:
-        if str(record.get("id")) == target:
+        record_id_value = record.get("id")
+        if not record_id_value:
+            continue
+        if str(record_id_value) == target:
             return record
     return None
 

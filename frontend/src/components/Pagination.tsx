@@ -64,6 +64,7 @@ export function Pagination({
   return (
     <div className="mt-3 flex gap-2 items-center text-sm">
       <button
+        type="button"
         disabled={offset === 0}
         onClick={onPrev}
         className="px-3 py-1 border rounded disabled:opacity-50"
@@ -74,6 +75,7 @@ export function Pagination({
         {offset + 1}–{Math.min(offset + limit, total)} of {total}
       </span>
       <button
+        type="button"
         disabled={offset + limit >= total}
         onClick={onNext}
         className="px-3 py-1 border rounded disabled:opacity-50"

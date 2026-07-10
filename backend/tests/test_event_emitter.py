@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from app.events.event_emitter import EVENT_KINDS, emit_event
+from app.events.querying import escape_like, query_events
 from app.events.serialization import event_to_dict
 from app.events.types import EventKind
 from app.models.event import Event
@@ -282,3 +283,143 @@ class TestEventToDict:
     def test_empty_fields_projects_empty_dict(self, db_session):
         evt = self._make_event(db_session)
         assert event_to_dict(evt, fields=()) == {}
+
+
+class TestEscapeLike:
+    """LIKE/ILIKE metacharacter escaping. Backslash MUST be escaped first, else
+    the backslashes introduced for ``%``/``_`` would themselves be doubled and
+    the escape char would no longer protect the wildcards."""
+
+    def test_wildcards_and_backslash_escaped(self):
+        assert escape_like("a_b%c") == r"a\_b\%c"
+
+    def test_backslash_escaped_before_wildcards(self):
+        # If ``\`` were escaped AFTER ``%``/``_``, the ``\`` prepended to the
+        # wildcards would get doubled and the pattern would break. Pin the order.
+        assert escape_like(r"x\_y") == r"x\\\_y"
+
+    def test_plain_text_unchanged(self):
+        assert escape_like("plain text") == "plain text"
+
+
+class TestQueryEvents:
+    """Direct coverage of the shared event-query helper: filters, whitespace-safe
+    escaped search, stable ordering, and count-before-pagination semantics."""
+
+    def _add(self, db, *, kind="reconcile_completed", level="info",
+             message="msg", service_id=None, created_at=None):
+        evt = Event(
+            service_id=service_id,
+            kind=kind,
+            level=level,
+            message=message,
+            created_at=created_at or datetime(2026, 1, 1, 0, 0, 0),
+        )
+        db.add(evt)
+        db.flush()
+        return evt.id
+
+    def test_search_escapes_underscore_wildcard(self, db_session):
+        # The literal search term "a_b" must match "a_b" but NOT "axb": if
+        # escape_like/escape="\\" were broken, "_" would act as a single-char
+        # LIKE wildcard and wrongly match "axb".
+        hit = self._add(db_session, message="a_b literal")
+        self._add(db_session, message="axb wildcard trap")
+        db_session.commit()
+
+        rows, total = query_events(db_session, search="a_b")
+
+        assert total == 1
+        assert {r.id for r in rows} == {hit}
+
+    def test_search_escapes_percent_wildcard(self, db_session):
+        # A literal "%" in the term must not become a match-anything wildcard.
+        hit = self._add(db_session, message="save 50% today")
+        self._add(db_session, message="no discount here")
+        db_session.commit()
+
+        rows, _ = query_events(db_session, search="50%", include_total=False)
+
+        assert {r.id for r in rows} == {hit}
+
+    def test_search_is_case_insensitive_and_substring(self, db_session):
+        hit = self._add(db_session, message="Reconcile COMPLETED for svc")
+        db_session.commit()
+
+        rows, _ = query_events(db_session, search="completed", include_total=False)
+
+        assert {r.id for r in rows} == {hit}
+
+    def test_whitespace_only_search_is_no_filter(self, db_session):
+        self._add(db_session, message="one")
+        self._add(db_session, message="two")
+        db_session.commit()
+
+        rows, total = query_events(db_session, search="   ")
+
+        assert total == 2
+        assert len(rows) == 2
+
+    def test_filters_by_service_kind_level_and_kinds(self, db_session):
+        svc = Service(
+            id="svc_q", name="Q", upstream_container_id="c1",
+            upstream_container_name="q", upstream_port=80,
+            hostname="q.example.com", base_domain="example.com",
+            edge_container_name="edge_q", network_name="net_q",
+            ts_hostname="edge-q",
+        )
+        db_session.add(svc)
+        db_session.flush()
+        target = self._add(
+            db_session, kind="cert_issued", level="warning",
+            message="target", service_id="svc_q",
+        )
+        self._add(db_session, kind="cert_renewed", level="warning", message="other kind")
+        self._add(db_session, kind="cert_issued", level="info", message="other level")
+        self._add(db_session, kind="cert_issued", level="warning", message="no service")
+        db_session.commit()
+
+        rows, total = query_events(
+            db_session, service_id="svc_q", kind="cert_issued", level="warning",
+            kinds=("cert_issued", "cert_renewed"),
+        )
+
+        assert total == 1
+        assert {r.id for r in rows} == {target}
+
+    def test_stable_order_created_at_desc_then_id_desc(self, db_session):
+        # Ties on created_at break by id desc (deterministic pagination). A newer
+        # event always precedes an older one regardless of insertion order.
+        newer = self._add(db_session, created_at=datetime(2026, 6, 1, 12, 0, 0))
+        older = self._add(db_session, created_at=datetime(2026, 1, 1, 12, 0, 0))
+        tie_a = self._add(db_session, created_at=datetime(2026, 3, 1, 12, 0, 0))
+        tie_b = self._add(db_session, created_at=datetime(2026, 3, 1, 12, 0, 0))
+        db_session.commit()
+
+        rows, _ = query_events(db_session, include_total=False)
+        ids = [r.id for r in rows]
+
+        assert ids[0] == newer
+        assert ids[-1] == older
+        tie_slice = [i for i in ids if i in (tie_a, tie_b)]
+        assert tie_slice == sorted((tie_a, tie_b), reverse=True)
+
+    def test_count_reflects_full_match_not_page(self, db_session):
+        # total must count every match, independent of limit/offset paging.
+        for _ in range(5):
+            self._add(db_session)
+        db_session.commit()
+
+        rows, total = query_events(db_session, limit=2, offset=1)
+
+        assert total == 5
+        assert len(rows) == 2
+
+    def test_include_total_false_skips_count(self, db_session):
+        self._add(db_session)
+        db_session.commit()
+
+        rows, total = query_events(db_session, include_total=False)
+
+        assert total is None
+        assert len(rows) == 1

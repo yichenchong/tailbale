@@ -262,6 +262,43 @@ class TestRenewCert:
         assert "run" not in renew_args
         assert not (cert_dir / "current").exists()
 
+    @patch("app.certs.lego_runner._run_lego")
+    def test_forced_renew_double_failure_raises_and_publishes_nothing(
+        self, mock_lego, tmp_path
+    ):
+        """Prior-bug-class guard: a FORCED renewal whose `lego renew` fails AND
+        whose fresh-issue fallback also fails must PROPAGATE the RuntimeError,
+        never return a (dir, fresh_issued) success tuple. The renew fallback
+        calls issue_cert OUTSIDE its own try, so issue_cert's failure escapes;
+        if a regression wrapped that fallback in a swallowing try, a forced
+        renewal that actually failed would be reported as succeeded (exactly the
+        bug the honesty contract forbids). Nothing may be published either."""
+
+        cert_dir = tmp_path / "certs" / "test.example.com"
+        lego_dir = tmp_path / "lego"
+        lego_certs = lego_dir / "certificates"
+        lego_certs.mkdir(parents=True)
+        cert_pem, key_pem = _real_pem_pair()
+        (lego_certs / "test.example.com.crt").write_bytes(cert_pem)
+        (lego_certs / "test.example.com.key").write_bytes(key_pem)
+
+        # Both the renew AND the fallback fresh issue fail the same way (e.g. a
+        # persistent ACME/DNS error or rate limit).
+        mock_lego.side_effect = RuntimeError("lego failed: rate limited")
+
+        with pytest.raises(RuntimeError, match="rate limited"):
+            renew_cert(
+                "test.example.com", "a@b.com", "cf-token",
+                cert_dir, lego_dir, days=30, force=True,
+            )
+
+        # renew (raised) then the fallback fresh issue (also raised): two calls.
+        invoked = [c.args[0] for c in mock_lego.call_args_list]
+        assert any("renew" in a for a in invoked)
+        assert any("run" in a for a in invoked)
+        # A failed forced renewal must publish nothing: no current symlink.
+        assert not (cert_dir / "current").exists()
+
 class TestRenewFallbackAfterSC2Cleanup:
     """SC2 removes lego's per-hostname cert artifacts on service delete /
     hostname change. That is only safe because ``renew_cert`` falls back to a

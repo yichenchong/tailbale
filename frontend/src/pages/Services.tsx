@@ -4,7 +4,7 @@ import { api, type ServiceItem } from "@/lib/api"
 import { useTimezone } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
 import { formatCertExpiry } from "@/lib/certStatus"
-import { phaseStyle } from "@/lib/statusStyles"
+import { phaseStyle, phaseLabel } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { useTransientMessage } from "@/lib/useTransientMessage"
 import { PageError, PageLoading } from "@/components/PageState"
@@ -155,7 +155,7 @@ export default function Services() {
                         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
                         phaseStyle(phase)
                       )}>
-                        {phase}
+                        {phaseLabel(phase)}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-sm text-zinc-500 font-mono">

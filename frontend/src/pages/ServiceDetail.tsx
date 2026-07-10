@@ -1,10 +1,10 @@
-import { useCallback, useEffect, useState } from "react"
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react"
 import { useParams, useNavigate } from "react-router-dom"
 import { api, type EdgeVersionResponse } from "@/lib/api"
 import { useResource } from "@/lib/useResource"
 import { useTimezone, formatDate } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
-import { phaseStyle } from "@/lib/statusStyles"
+import { phaseStyle, phaseLabel } from "@/lib/statusStyles"
 import { useTransientMessage } from "@/lib/useTransientMessage"
 import { PageError, PageLoading } from "@/components/PageState"
 import { ArrowLeft } from "lucide-react"
@@ -103,7 +103,7 @@ export default function ServiceDetail() {
             "inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium",
             phaseStyle(phase)
           )}>
-            {phase}
+            {phaseLabel(phase)}
           </span>
           <span className={cn(
             "inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium",
@@ -161,45 +161,73 @@ export default function ServiceDetail() {
   )
 }
 
+const LOG_TABS = [
+  { key: "edge", label: "Edge Logs" },
+  { key: "events", label: "Events" },
+] as const
+type LogTab = (typeof LOG_TABS)[number]["key"]
+
 function LogsTabs() {
-  const [logsTab, setLogsTab] = useState<"edge" | "events">("edge")
+  const [logsTab, setLogsTab] = useState<LogTab>("edge")
+  // Roving tabindex + Arrow/Home/End keyboard navigation for the WAI-ARIA
+  // tablist (APG tabs pattern), matching SettingsPage's tablist. Only the
+  // active tab is in the tab sequence; arrow keys move (and follow) selection.
+  const tabRefs = useRef<Partial<Record<LogTab, HTMLButtonElement | null>>>({})
+
+  const onTabKeyDown = (e: KeyboardEvent<HTMLButtonElement>) => {
+    const currentIndex = LOG_TABS.findIndex((t) => t.key === logsTab)
+    let nextIndex: number
+    switch (e.key) {
+      case "ArrowRight":
+        nextIndex = (currentIndex + 1) % LOG_TABS.length
+        break
+      case "ArrowLeft":
+        nextIndex = (currentIndex - 1 + LOG_TABS.length) % LOG_TABS.length
+        break
+      case "Home":
+        nextIndex = 0
+        break
+      case "End":
+        nextIndex = LOG_TABS.length - 1
+        break
+      default:
+        return
+    }
+    e.preventDefault()
+    const nextKey = LOG_TABS[nextIndex].key
+    setLogsTab(nextKey)
+    tabRefs.current[nextKey]?.focus()
+  }
+
   return (
     <div className="mt-6 rounded-md border border-zinc-200">
       <div className="flex border-b border-zinc-200" role="tablist" aria-label="Service logs">
-        <button
-          type="button"
-          role="tab"
-          id="logs-tab-edge"
-          aria-selected={logsTab === "edge"}
-          aria-controls="logs-panel"
-          onClick={() => setLogsTab("edge")}
-          className={cn(
-            "px-4 py-2.5 text-sm font-medium",
-            logsTab === "edge" ? "border-b-2 border-zinc-900 text-zinc-900" : "text-zinc-500 hover:text-zinc-700"
-          )}
-        >
-          Edge Logs
-        </button>
-        <button
-          type="button"
-          role="tab"
-          id="logs-tab-events"
-          aria-selected={logsTab === "events"}
-          aria-controls="logs-panel"
-          onClick={() => setLogsTab("events")}
-          className={cn(
-            "px-4 py-2.5 text-sm font-medium",
-            logsTab === "events" ? "border-b-2 border-zinc-900 text-zinc-900" : "text-zinc-500 hover:text-zinc-700"
-          )}
-        >
-          Events
-        </button>
+        {LOG_TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            id={`logs-tab-${t.key}`}
+            aria-selected={logsTab === t.key}
+            aria-controls="logs-panel"
+            tabIndex={logsTab === t.key ? 0 : -1}
+            ref={(el) => { tabRefs.current[t.key] = el }}
+            onKeyDown={onTabKeyDown}
+            onClick={() => setLogsTab(t.key)}
+            className={cn(
+              "px-4 py-2.5 text-sm font-medium",
+              logsTab === t.key ? "border-b-2 border-zinc-900 text-zinc-900" : "text-zinc-500 hover:text-zinc-700"
+            )}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
       <div
         className="flex min-h-[200px] items-center justify-center p-6"
         role="tabpanel"
         id="logs-panel"
-        aria-labelledby={logsTab === "edge" ? "logs-tab-edge" : "logs-tab-events"}
+        aria-labelledby={`logs-tab-${logsTab}`}
       >
         <p className="text-sm text-zinc-400">
           {logsTab === "edge"

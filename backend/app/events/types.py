@@ -29,7 +29,7 @@ class EventKind:
     SERVICE_SNIPPET_CHANGED = "service_snippet_changed"
 
     # Edge container / proxy lifecycle (services/edge_ops.py; reconciler
-    # steps.py dicts emitted via status.py)
+    # steps/ dicts emitted via status.py)
     EDGE_STARTED = "edge_started"
     EDGE_RESTARTED = "edge_restarted"
     EDGE_RECREATED = "edge_recreated"
@@ -42,7 +42,7 @@ class EventKind:
     CERT_RENEWED = "cert_renewed"
     CERT_FAILED = "cert_failed"
 
-    # DNS records (adapters/dns_reconciler.py, reconciler/steps.py)
+    # DNS records (adapters/dns_reconciler.py, reconciler/steps/)
     DNS_CREATED = "dns_created"
     DNS_UPDATED = "dns_updated"
     DNS_REMOVED = "dns_removed"
@@ -56,7 +56,7 @@ class EventKind:
     DNS_ORPHAN_RETRY_FAILED = "dns_orphan_retry_failed"
     DNS_ORPHAN_DISMISSED = "dns_orphan_dismissed"
 
-    # Reconciliation (reconciler/probe_retry.py, reconciler/steps.py,
+    # Reconciliation (reconciler/probe_retry.py, reconciler/steps/,
     # reconciler/reconciler.py)
     PROBE_RETRY_PHASE_CHANGE = "probe_retry_phase_change"
     RECONCILE_COMPLETED = "reconcile_completed"

@@ -50,6 +50,21 @@ class TestCheckHttpsProbe:
         assert probe.check_https_probe(_service(), "100.64.0.1", client=None) is False
         assert "Docker client unavailable" in caplog.text
 
+    def test_edge_container_not_found(self, caplog):
+        # find_edge_container returns None (named lookup NotFound + empty label
+        # search): the probe must report the container-absent reason and False,
+        # never crash or fall through to exec_run on a None container.
+        client = MagicMock()
+        client.containers.get.side_effect = docker.errors.NotFound("no such container")
+        client.containers.list.return_value = []
+
+        assert (
+            probe.check_https_probe(_service(hostname="gone.example.com"), "100.64.0.1", client)
+            is False
+        )
+        assert "edge container not found" in caplog.text
+        client.containers.list.assert_called_once()
+
     def test_success(self):
         service = _service(hostname="probe.example.com")
         client = _client_with_edge(_running_edge(0, b"200"))

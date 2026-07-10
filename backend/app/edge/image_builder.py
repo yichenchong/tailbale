@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 
 
 EDGE_IMAGE = "tailbale-edge:latest"
-# Relative to the app working directory inside the orchestrator container
+# Absolute path inside the orchestrator container (WORKDIR /app) where the
+# Dockerfile bundles the edge/ build context (COPY edge/ ./edge-image/).
 _EDGE_CONTEXT = Path("/app/edge-image")
 # Serializes ensure_edge_image so a startup build and a concurrent lazy build
 # (reconcile/recreate) cannot both rebuild the same tag at once.

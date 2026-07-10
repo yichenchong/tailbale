@@ -3,6 +3,7 @@
 import pytest
 
 from app.health.health_checker import aggregate_status
+from app.health.status_policy import phase_level, phase_rank, transition_verb
 
 PASSING_CHECKS = {
     "upstream_container_present": True,
@@ -61,3 +62,42 @@ class TestAggregateStatus:
 
     def test_empty_checks_healthy(self):
         assert aggregate_status({}) == "healthy"
+
+
+class TestStatusPolicy:
+    def test_phase_rank_orders_health_phases(self):
+        assert phase_rank("healthy") < phase_rank("warning") < phase_rank("error")
+
+    def test_phase_rank_unknown_ranks_worst(self):
+        assert phase_rank("pending") == 3
+        assert phase_rank("error") < phase_rank("pending")
+
+    @pytest.mark.parametrize(
+        ("phase", "expected"),
+        [("healthy", "info"), ("warning", "warning"), ("error", "error")],
+    )
+    def test_phase_level_maps_health_phases(self, phase, expected):
+        assert phase_level(phase) == expected
+
+    def test_phase_level_unknown_defaults_to_error(self):
+        assert phase_level("pending") == "error"
+
+    def test_phase_level_unknown_override(self):
+        assert phase_level("pending", unknown="warning") == "warning"
+
+    def test_phase_level_error_ignores_unknown_override(self):
+        # error is a KNOWN phase and must map to "error" regardless of the
+        # unknown fallback; probe_retry passes unknown="warning". A regression
+        # that returned the fallback before the explicit error branch would break.
+        assert phase_level("error", unknown="warning") == "error"
+
+    def test_transition_verb_improved_degraded_changed(self):
+        assert transition_verb("error", "healthy") == "improved"
+        assert transition_verb("healthy", "error") == "degraded"
+        assert transition_verb("warning", "warning") == "changed"
+
+    def test_transition_across_unknown_phase_uses_worst_rank(self):
+        # non-health phases rank worst, so LEAVING one reads as an improvement and
+        # ENTERING one as a degradation (historical _UNKNOWN_PHASE_RANK behavior).
+        assert transition_verb("pending", "error") == "improved"
+        assert transition_verb("error", "pending") == "degraded"

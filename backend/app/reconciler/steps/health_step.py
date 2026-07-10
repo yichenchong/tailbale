@@ -35,6 +35,13 @@ def run_and_persist_health(
     phase = health_checker.aggregate_status(checks)
     now = datetime.now(UTC)
     level = phase_level(phase)
+    # A recovery to healthy retires any in-flight background probe-retry: clear
+    # the scheduled next-retry fields so the UI never shows a pending "next retry
+    # at ..." on a healthy service. The probe-retry thread also clears these when
+    # it drives the recovery itself, but when recovery arrives via this full
+    # reconcile (or the fast sweep) the sleeping thread would otherwise not clear
+    # them until it next wakes — up to an hour on later attempts.
+    clear_retry = {"probe_retry_at": None, "probe_retry_attempt": None} if phase == "healthy" else {}
     _persist_status(
         db,
         service_id,
@@ -49,5 +56,6 @@ def run_and_persist_health(
             "level": level,
             "details": {"phase": phase, "checks": checks},
         },
+        **clear_retry,
     )
     return phase, checks

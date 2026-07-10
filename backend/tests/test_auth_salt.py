@@ -94,3 +94,28 @@ class TestLongPasswordPrehash:
         hashed = auth_module.hash_password(real, db_session)
         assert auth_module.verify_password(impostor, hashed, db_session) is False
         assert auth_module.verify_password(real, hashed, db_session) is True
+
+
+class TestVerifyPasswordMalformedHash:
+    """verify_password must fail auth gracefully on a corrupt stored hash.
+
+    bcrypt.checkpw raises ValueError on any non-bcrypt hash string ("Invalid
+    salt"). A DB row whose password_hash was truncated/corrupted (botched
+    backup restore, manual edit, legacy row) must therefore read as a failed
+    credential (return False -> 401), never propagate the ValueError and 500
+    the login endpoint. This pins the ``except ValueError`` guard.
+    """
+
+    def test_empty_hash_returns_false(self, db_session):
+        assert auth_module.verify_password("securepassword123", "", db_session) is False
+
+    def test_non_bcrypt_hash_returns_false(self, db_session):
+        assert (
+            auth_module.verify_password("securepassword123", "not-a-bcrypt-hash", db_session)
+            is False
+        )
+
+    def test_truncated_bcrypt_hash_returns_false(self, db_session):
+        # A real bcrypt hash chopped mid-string is no longer parseable.
+        good = auth_module.hash_password("securepassword123", db_session)
+        assert auth_module.verify_password("securepassword123", good[:20], db_session) is False
