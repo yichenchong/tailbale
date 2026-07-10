@@ -12,24 +12,10 @@ class Base(DeclarativeBase):
     pass
 
 
-engine = create_engine(
-    f"sqlite:///{settings.db_path}",
-    connect_args={"check_same_thread": False},
-    # AnyIO caps sync request handlers at ~40 threads, each holding one session
-    # for the life of its request. The background loops (reconcile sweep,
-    # renewal scan, probe-retry, enable/update-edge) run on their OWN threads
-    # and each open a separate session, so at request saturation a background
-    # checkout would be the 41st and queue/time out behind the request threads.
-    # Size the pool ABOVE 40 (10 + 40 = 50 total) to give those loops genuine
-    # headroom. Writes still serialize via _DB_WRITE_MUTEX.
-    pool_size=10,
-    max_overflow=40,
-    pool_timeout=30,
-    echo=False,
-)
+engine: Engine | None = None
+SessionLocal: sessionmaker | None = None
 
 
-@event.listens_for(engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
@@ -37,7 +23,32 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
     cursor.execute("PRAGMA busy_timeout=5000")
     cursor.close()
 
-SessionLocal = sessionmaker(bind=engine, autoflush=False)
+
+def init_engine() -> None:
+    """Build the SQLAlchemy engine and session factory, assigning module globals.
+
+    Idempotent: a second call is a no-op once the engine exists.
+    """
+    global engine, SessionLocal
+    if engine is not None:
+        return
+    engine = create_engine(
+        f"sqlite:///{settings.db_path}",
+        connect_args={"check_same_thread": False},
+        # AnyIO caps sync request handlers at ~40 threads, each holding one session
+        # for the life of its request. The background loops (reconcile sweep,
+        # renewal scan, probe-retry, enable/update-edge) run on their OWN threads
+        # and each open a separate session, so at request saturation a background
+        # checkout would be the 41st and queue/time out behind the request threads.
+        # Size the pool ABOVE 40 (10 + 40 = 50 total) to give those loops genuine
+        # headroom. Writes still serialize via _DB_WRITE_MUTEX.
+        pool_size=10,
+        max_overflow=40,
+        pool_timeout=30,
+        echo=False,
+    )
+    event.listen(engine, "connect", _set_sqlite_pragma)
+    SessionLocal = sessionmaker(bind=engine, autoflush=False)
 
 # Tier-3 (innermost) lock in the process-wide lock order; see app.locks for the
 # canonical tiering/AB-BA invariant. Acquire AFTER any tier-1/2 lock, never before.

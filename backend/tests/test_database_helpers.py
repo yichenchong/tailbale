@@ -1,6 +1,9 @@
 """Regression tests for serialized database write helpers."""
 
+import subprocess
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, event
@@ -518,3 +521,31 @@ def test_set_sqlite_pragma_applies_to_overflow_connections(tmp_path):
                 conn.close()
     finally:
         engine.dispose()
+
+# ---------------------------------------------------------------------------
+# AR12: importing app.database must be side-effect-free — it builds NO engine.
+# The engine/SessionLocal only exist after an explicit init_engine() call.
+# A fresh subprocess is used so the conftest session-autouse init_engine()
+# fixture (which runs in THIS interpreter) cannot mask a regression.
+# ---------------------------------------------------------------------------
+
+
+def test_importing_app_database_builds_no_engine():
+    """`import app.database` must leave engine/SessionLocal as None; only an
+    explicit init_engine() constructs them."""
+    code = (
+        "import app.database as d\n"
+        "assert d.engine is None and d.SessionLocal is None, 'import built an engine'\n"
+        "d.init_engine()\n"
+        "assert d.engine is not None and d.SessionLocal is not None, 'init_engine did not build'\n"
+        "print('OK')\n"
+    )
+    backend_dir = Path(__file__).resolve().parents[1]
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=backend_dir,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "OK" in result.stdout

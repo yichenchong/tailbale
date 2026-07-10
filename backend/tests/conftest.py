@@ -28,6 +28,16 @@ def _ensure_jwt_secret_bootstrapped():
     yield
 
 
+@pytest.fixture(autouse=True, scope="session")
+def _init_db_engine():
+    """AR12: importing app.database no longer builds the SQLAlchemy engine; run
+    the explicit bootstrap once for the whole test session (mirrors the
+    app-startup call) so database_module.engine / SessionLocal are non-None
+    before _client_for_engine captures them and before any other fixture."""
+    database_module.init_engine()
+    yield
+
+
 @pytest.fixture()
 def tmp_data_dir(tmp_path):
     """Provide a temporary data directory and patch app.config.settings."""
@@ -74,6 +84,7 @@ def db_session(tmp_data_dir, db_engine):
 
 @contextmanager
 def _client_for_engine(db_engine, *, bypass_auth: bool):
+    database_module.init_engine()
     original_engine = database_module.engine
     original_session_local = database_module.SessionLocal
     database_module.engine = db_engine

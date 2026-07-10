@@ -7,7 +7,7 @@ from sqlalchemy import create_engine, inspect, text
 from sqlalchemy import event as sa_event
 from sqlalchemy.exc import IntegrityError
 
-from app.database import _set_sqlite_pragma, engine, run_migrations
+import app.database as database_module
 from app.migrations import _INDEX_MIGRATIONS
 from app.models import (
     Certificate,
@@ -442,7 +442,7 @@ class TestSqliteForeignKeyCascade:
     def test_production_engine_has_pragma_listener(self):
 
 
-        assert sa_event.contains(engine, "connect", _set_sqlite_pragma)
+        assert sa_event.contains(database_module.engine, "connect", database_module._set_sqlite_pragma)
 
 # ---------------------------------------------------------------------------
 # Service delete: history rows (Event/Job) are preserved, not orphaned
@@ -676,23 +676,23 @@ class TestDashboardHotPathIndexBackfill:
 
         eng = self._legacy_engine()
         assert "expires_at" not in self._indexed_columns(eng, "certificates")
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         assert "expires_at" in self._indexed_columns(eng, "certificates")
 
     def test_backfills_service_status_phase_index(self):
 
         eng = self._legacy_engine()
         assert "phase" not in self._indexed_columns(eng, "service_status")
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         assert "phase" in self._indexed_columns(eng, "service_status")
 
     def test_backfill_is_idempotent(self):
 
         eng = self._legacy_engine()
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         # A second pass must not raise (CREATE INDEX IF NOT EXISTS) and must leave
         # the indexes intact.
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         assert "expires_at" in self._indexed_columns(eng, "certificates")
         assert "phase" in self._indexed_columns(eng, "service_status")
 
@@ -762,14 +762,14 @@ class TestTokenVersionMigration:
     def test_backfills_token_version_column(self):
         eng = self._legacy_engine()
         assert "token_version" not in self._columns(eng, "users")
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         assert "token_version" in self._columns(eng, "users")
 
     def test_backfill_is_idempotent(self):
         eng = self._legacy_engine()
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         # A second pass must not raise (has-column guard) and leave it intact.
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         assert "token_version" in self._columns(eng, "users")
 
 
@@ -812,16 +812,16 @@ class TestServiceStatusProbeColumnsMigration:
         before = self._columns(eng, "service_status")
         for col in self._PROBE_COLUMNS:
             assert col not in before
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         after = self._columns(eng, "service_status")
         for col in self._PROBE_COLUMNS:
             assert col in after
 
     def test_backfill_is_idempotent(self):
         eng = self._legacy_engine()
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         # A second pass must not raise (has-column guard) and leave them intact.
-        run_migrations(eng)
+        database_module.run_migrations(eng)
         after = self._columns(eng, "service_status")
         for col in self._PROBE_COLUMNS:
             assert col in after

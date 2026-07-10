@@ -27,6 +27,7 @@ def _reset_login_rate_limiter() -> Iterator[None]:
 @pytest.fixture()
 def auth_client(tmp_data_dir) -> Iterator[TestClient]:
     """TestClient WITHOUT the suite-wide auth bypass, for auth endpoint tests."""
+    database_module.init_engine()  # idempotent; ensures the real engine exists before save/replace/restore
     original_engine = database_module.engine
     original_session_local = database_module.SessionLocal
 
