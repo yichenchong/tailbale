@@ -11,7 +11,7 @@ export function cn(...inputs: ClassValue[]) {
  * single-argument behavior (`Error.message` else `String(e)`) is preserved.
  */
 export function errorMessage(e: unknown, fallback = ""): string {
-  if (e instanceof Error) return e.message
+  if (e instanceof Error) return e.message || fallback
   return fallback || String(e)
 }
 

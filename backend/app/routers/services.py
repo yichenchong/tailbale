@@ -207,23 +207,3 @@ def delete_service(
         raise ServiceNotFound()
 
     service_layer.delete_service_record(db, svc, cleanup_dns=cleanup_dns)
-
-
-# Compatibility exports for callers that imported the former action helpers
-# from app.routers.services before AR-N1 split them into service_actions.
-from app.routers.service_actions import (  # noqa: E402
-    _get_service_or_404,
-    _raise_edge_failure,
-    _run_edge_job,
-    edge_action,
-)
-
-__all__ = [
-    "_get_service_or_404",
-    "_raise_edge_failure",
-    "_run_edge_job",
-    "_validate_upstream",
-    "_validate_upstream_port",
-    "edge_action",
-    "router",
-]

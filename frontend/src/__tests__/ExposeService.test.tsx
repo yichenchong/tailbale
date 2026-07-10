@@ -174,6 +174,94 @@ describe("ExposeService page - prefill", () => {
     })
   })
 
+  it("clears detected profile state when only the discovered container name changes", async () => {
+    const ports = JSON.stringify([{ container_port: "80", host_port: null, protocol: "tcp" }])
+    const secondDetect = Promise.withResolvers<{
+      detected_profile: string | null
+      profile: null
+    }>()
+    let detectCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+      }
+      if (String(url).includes("/profiles/detect")) {
+        detectCalls += 1
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            detectCalls === 1
+              ? Promise.resolve({
+                  detected_profile: "nextcloud",
+                  profile: {
+                    name: "Nextcloud",
+                    recommended_port: 80,
+                    healthcheck_path: "/status.php",
+                    preserve_host_header: false,
+                    post_setup_reminder: null,
+                    image_patterns: ["nextcloud"],
+                  },
+                })
+              : secondDetect.promise,
+        })
+      }
+      if (opts?.method === "POST") {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve({ ...mockCreatedService, id: "svc_renamed" }),
+        })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    render(
+      <MemoryRouter initialEntries={[`/expose?container_id=c1&container_name=nextcloud&image=nextcloud:28&ports=${encodeURIComponent(ports)}`]}>
+        <Routes>
+          <Route
+            path="/expose"
+            element={
+              <>
+                <ExposeService />
+                <Link to={`/expose?container_id=c1&container_name=renamed&image=nextcloud:28&ports=${encodeURIComponent(ports)}`}>
+                  Rename container
+                </Link>
+              </>
+            }
+          />
+        </Routes>
+      </MemoryRouter>
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText(/Detected/)).toBeInTheDocument()
+    })
+
+    await userEvent.click(screen.getByRole("link", { name: "Rename container" }))
+
+    await waitFor(() => {
+      expect(screen.getByRole("textbox", { name: "Service Name" })).toHaveValue("renamed")
+      expect(screen.queryByText(/Detected/)).not.toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Create Service"))
+
+    await waitFor(() => {
+      const createCall = fetchMock.mock.calls.find(
+        (call: unknown[]) =>
+          String(call[0]).includes("/api/services") &&
+          typeof call[1] === "object" &&
+          (call[1] as RequestInit).method === "POST"
+      )
+      expect(JSON.parse(String((createCall?.[1] as RequestInit).body))).toMatchObject({
+        name: "renamed",
+        app_profile: null,
+        healthcheck_path: null,
+        preserve_host_header: true,
+      })
+    })
+  })
+
   it("derives the edge container/network preview from the service name, not the hostname prefix", async () => {
     render(
       <MemoryRouter initialEntries={["/expose?container_id=c1&container_name=myapp&image=myapp:1&ports=[]"]}>

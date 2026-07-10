@@ -88,6 +88,15 @@ class TestListEvents:
         assert data["total"] == 1
         assert data["events"][0]["message"] == "Probe app_1 ok"
 
+    def test_filter_by_search_strips_whitespace_before_matching(self, client, db_session):
+        _add_event(db_session, message="DNS record created for app.example.com")
+        _add_event(db_session, message="Edge container started")
+
+        resp = client.get("/api/events?search=%20%20DNS%20%20")
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["events"][0]["message"] == "DNS record created for app.example.com"
+
     def test_filter_by_service_id(self, client, db_session):
         svc = _create_service(db_session)
         _add_event(db_session, service_id=svc.id, message="Linked")

@@ -7,7 +7,8 @@ import { formatCertExpiry } from "@/lib/certStatus"
 import { phaseStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { useTransientMessage } from "@/lib/useTransientMessage"
-import { Loader2, Plus, ExternalLink } from "lucide-react"
+import { PageError, PageLoading } from "@/components/PageState"
+import { Plus, ExternalLink } from "lucide-react"
 import { RowActionsMenu } from "@/components/service/RowActionsMenu"
 import { useRowActionMenu, type RowActionMenuItem } from "@/components/service/useRowActionMenu"
 import { serviceLifecycleActions } from "@/components/service/lifecycleActions"
@@ -46,11 +47,7 @@ export default function Services() {
   }
 
   if (loading && services.length === 0) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading services...
-      </div>
-    )
+    return <PageLoading>Loading services...</PageLoading>
   }
 
   return (
@@ -80,9 +77,9 @@ export default function Services() {
       )}
 
       {error && services.length === 0 ? (
-        <div role="alert" className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+        <PageError className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
           Unable to load services: {error}
-        </div>
+        </PageError>
       ) : services.length === 0 ? (
         <div className="mt-8 rounded-md bg-zinc-50 px-4 py-12 text-center">
           <p className="text-sm text-zinc-500">No services exposed yet.</p>

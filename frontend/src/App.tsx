@@ -27,17 +27,22 @@ function App() {
   const [setupUserExists, setSetupUserExists] = useState<boolean | null>(null)
   const [bootError, setBootError] = useState<string | null>(null)
   useEffect(() => {
+    let cancelled = false
+
     api.auth
       .status()
       .then(async (s) => {
+        if (cancelled) return
         setBootError(null)
         setSetupComplete(s.setup_complete)
         setAuthenticated(s.authenticated)
         if (!s.setup_complete) {
           try {
             const progress = await api.auth.setupProgress()
+            if (cancelled) return
             setSetupUserExists(progress.user_exists)
           } catch (err) {
+            if (cancelled) return
             setBootError(errorMessage(err, "Unable to load setup progress"))
             setSetupUserExists(true)
           }
@@ -46,11 +51,16 @@ function App() {
         }
       })
       .catch((err) => {
+        if (cancelled) return
         setBootError(errorMessage(err, "Unable to load app status"))
         setSetupComplete(false)
         setAuthenticated(false)
         setSetupUserExists(false)
       })
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const onLogin = useCallback(() => {

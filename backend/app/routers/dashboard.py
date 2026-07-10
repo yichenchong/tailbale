@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 from app import settings_store
 from app.auth import get_current_user
 from app.database import get_db
+from app.events.querying import query_events
 from app.events.serialization import event_to_dict
 from app.models.certificate import Certificate
-from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.timeutil import days_from_now, iso
@@ -85,21 +85,12 @@ def dashboard_summary(db: Session = Depends(get_db)):
         })
 
     # Recent errors (last 20 error-level events)
-    recent_errors = (
-        db.query(Event)
-        .filter(Event.level == "error")
-        .order_by(Event.created_at.desc(), Event.id.desc())
-        .limit(20)
-        .all()
+    recent_errors, _ = query_events(
+        db, level="error", limit=20, include_total=False
     )
 
     # Recent events (last 20)
-    recent_events = (
-        db.query(Event)
-        .order_by(Event.created_at.desc(), Event.id.desc())
-        .limit(20)
-        .all()
-    )
+    recent_events, _ = query_events(db, limit=20, include_total=False)
 
     return {
         "services": {

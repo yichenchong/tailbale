@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react"
 import { cn } from "@/lib/utils"
-import { Loader2 } from "lucide-react"
+import { PageError, PageLoading } from "@/components/PageState"
 import { useSettings } from "./settings/useSettings"
 import { GeneralTab } from "./settings/GeneralTab"
 import { CloudflareTab } from "./settings/CloudflareTab"
@@ -40,17 +40,13 @@ export default function SettingsPage() {
   }, [settings, tab])
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading settings...
-      </div>
-    )
+    return <PageLoading>Loading settings...</PageLoading>
   }
 
   if (!settings) {
     return (
       <div className="p-8">
-        <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error || "Failed to load settings"}</div>
+        <PageError>{error || "Failed to load settings"}</PageError>
       </div>
     )
   }

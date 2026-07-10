@@ -22,6 +22,8 @@ def summarize_probe_output(output: bytes | str | None, limit: int = 200) -> str:
     text = " ".join(text.split())
     if len(text) <= limit:
         return text
+    if limit <= 3:
+        return text[: max(limit, 0)]
     return text[: limit - 3] + "..."
 
 
@@ -66,7 +68,7 @@ def log_https_probe_failure(
 
 
 def probe_failure_reason(
-    exit_code: int, output: bytes | None
+    exit_code: int, output: bytes | str | None
 ) -> tuple[str, str | None] | None:
     """Classify a curl HTTPS-probe exec result; ``None`` means healthy.
 
@@ -85,7 +87,12 @@ def probe_failure_reason(
     """
     if exit_code != 0:
         return "curl returned non-zero", None
-    raw = (output or b"").decode("utf-8", errors="replace").strip()
+    raw_output = (
+        output.decode("utf-8", errors="replace")
+        if isinstance(output, bytes)
+        else (output or "")
+    )
+    raw = raw_output.strip()
     http_code = raw[-3:] if len(raw) >= 3 else raw
     if len(http_code) != 3 or not http_code.isdigit():
         return "curl did not return a valid HTTP status", None
@@ -96,7 +103,7 @@ def probe_failure_reason(
     return None
 
 
-def classify_probe_result(exit_code: int, output: bytes | None) -> bool:
+def classify_probe_result(exit_code: int, output: bytes | str | None) -> bool:
     """Return ``True`` iff the curl probe indicates Caddy is serving HTTPS.
 
     Boolean view of :func:`probe_failure_reason` (a passing probe is one with no

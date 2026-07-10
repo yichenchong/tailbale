@@ -126,6 +126,8 @@ describe("Services page", () => {
     await waitFor(() => {
       expect(screen.getByLabelText("Actions")).toBeInTheDocument()
     })
+    fireEvent.click(screen.getByLabelText("Actions"))
+    expect(screen.getByRole("menu", { name: "Actions" })).toBeInTheDocument()
   })
 
   it("hides edge actions for disabled services", async () => {

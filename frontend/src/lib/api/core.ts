@@ -2,6 +2,16 @@ const API_BASE = "/api"
 
 type ApiErrorDetail = unknown
 
+const ERROR_DETAIL_KEYS = ["message", "msg", "error"] as const
+
+function formatObjectErrorDetail(detail: Record<string, unknown>): string | null {
+  for (const key of ERROR_DETAIL_KEYS) {
+    const value = detail[key]
+    if (typeof value === "string" && value) return value
+  }
+  return null
+}
+
 /**
  * Thrown by non-redirecting requests (e.g. `api.getSafe`) when the server
  * responds 401. Callers that must NOT bounce to /login (background pollers)
@@ -27,10 +37,7 @@ function formatErrorDetail(detail: ApiErrorDetail): string | null {
       .map((item) => {
         if (typeof item === "string") return item
         if (item && typeof item === "object") {
-          for (const key of ["msg", "message", "error"]) {
-            const value = (item as Record<string, unknown>)[key]
-            if (typeof value === "string" && value) return value
-          }
+          return formatObjectErrorDetail(item as Record<string, unknown>)
         }
         return null
       })
@@ -38,10 +45,7 @@ function formatErrorDetail(detail: ApiErrorDetail): string | null {
     return messages.length > 0 ? messages.join("; ") : null
   }
   if (detail && typeof detail === "object") {
-    for (const key of ["message", "msg", "error"]) {
-      const value = (detail as Record<string, unknown>)[key]
-      if (typeof value === "string" && value) return value
-    }
+    return formatObjectErrorDetail(detail as Record<string, unknown>)
   }
   return null
 }

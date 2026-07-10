@@ -8,8 +8,8 @@ import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
 import { usePolledFreshness } from "@/lib/usePolledFreshness"
+import { PageError, PageLoading } from "@/components/PageState"
 import {
-  Loader2,
   Activity,
   CheckCircle2,
   AlertTriangle,
@@ -32,15 +32,11 @@ export default function Dashboard() {
   })
 
   if (loading && !data) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading dashboard...
-      </div>
-    )
+    return <PageLoading>Loading dashboard...</PageLoading>
   }
 
   if (error && !data) {
-    return <div role="alert" className="rounded-md bg-red-50 p-4 text-red-700">{error}</div>
+    return <PageError className="rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>
   }
 
   if (!data) return null

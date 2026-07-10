@@ -50,7 +50,7 @@ class TestReconcileFailuresAndLocks:
         events = db_session.query(Event).filter(Event.kind == "reconcile_failed").all()
         assert len(events) == 1
 
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_SECRET)
     def test_handles_network_failure(self, mock_secret, mock_network, db_session, tmp_data_dir):
         svc = _create_service(db_session)
@@ -106,7 +106,7 @@ class TestReconcileFailuresAndLocks:
     @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)
@@ -162,10 +162,10 @@ class TestReconcileFailuresAndLocks:
                 max_active_calls = max(max_active_calls, active_calls)
             try:
                 time.sleep(0.1)
+                return "net123", args[1]
             finally:
                 with call_lock:
                     active_calls -= 1
-
         mock_network.side_effect = slow_network
 
         errors: list[Exception] = []
@@ -239,7 +239,7 @@ class TestMarkerWriteDurability:
     @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)

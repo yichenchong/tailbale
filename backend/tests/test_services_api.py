@@ -169,7 +169,7 @@ class TestActionEndpointErrorDetailGeneric:
             "app.certs.renewal_task.process_service_cert",
             side_effect=RuntimeError(secret),
         ), patch("app.secrets.read_secret", return_value="cf-token"), caplog.at_level(
-            logging.ERROR, logger="app.routers.services"
+            logging.ERROR, logger="app.routers.service_actions"
         ):
             resp = client.post(f"/api/services/{svc_id}/renew-cert")
 
@@ -184,7 +184,7 @@ class TestActionEndpointErrorDetailGeneric:
         mock_reload.side_effect = RuntimeError(secret)
         svc_id = _create_service(client, name="App2", hostname="app2.example.com").json()["id"]
 
-        with caplog.at_level(logging.ERROR, logger="app.routers.services"):
+        with caplog.at_level(logging.ERROR, logger="app.routers.service_actions"):
             resp = client.post(f"/api/services/{svc_id}/reload")
 
         assert resp.status_code == 500
@@ -198,7 +198,7 @@ class TestActionEndpointErrorDetailGeneric:
         mock_reload.side_effect = docker.errors.DockerException(secret)
         svc_id = _create_service(client, name="App2", hostname="app2.example.com").json()["id"]
 
-        with caplog.at_level(logging.ERROR, logger="app.routers.services"):
+        with caplog.at_level(logging.ERROR, logger="app.routers.service_actions"):
             resp = client.post(f"/api/services/{svc_id}/reload")
 
         assert resp.status_code == 503
@@ -212,7 +212,7 @@ class TestActionEndpointErrorDetailGeneric:
         mock_restart.side_effect = requests.exceptions.ConnectionError(secret)
         svc_id = _create_service(client, name="App3", hostname="app3.example.com").json()["id"]
 
-        with caplog.at_level(logging.ERROR, logger="app.routers.services"):
+        with caplog.at_level(logging.ERROR, logger="app.routers.service_actions"):
             resp = client.post(f"/api/services/{svc_id}/restart-edge")
 
         assert resp.status_code == 503
@@ -229,7 +229,7 @@ class TestActionEndpointErrorDetailGeneric:
         mock_recreate.side_effect = docker.errors.DockerException(secret)
         svc_id = _create_service(client, name="App4", hostname="app4.example.com").json()["id"]
 
-        with caplog.at_level(logging.ERROR, logger="app.routers.services"):
+        with caplog.at_level(logging.ERROR, logger="app.routers.service_actions"):
             resp = client.post(f"/api/services/{svc_id}/recreate-edge")
 
         assert resp.status_code == 503

@@ -109,6 +109,31 @@ describe("api client", () => {
     await expect(api.get("/bad")).rejects.toThrow("Could not read logs")
   })
 
+  it("prefers the same detail key order for objects and array items", async () => {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({
+        detail: [
+          { msg: "array msg", message: "array message", error: "array error" },
+          { msg: "object msg", message: "object message", error: "object error" },
+        ],
+      }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("array message; object message")
+
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: () => Promise.resolve({
+        detail: { msg: "single msg", message: "single message", error: "single error" },
+      }),
+    })
+
+    await expect(api.get("/bad")).rejects.toThrow("single message")
+  })
+
   it("joins an array of plain-string error details (FL2)", async () => {
     // A handler may return `detail` as a bare string array rather than the
     // {loc,msg} objects; each non-blank string is kept and joined, not dropped.

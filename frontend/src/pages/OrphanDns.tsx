@@ -6,6 +6,7 @@ import { cn, errorMessage } from "@/lib/utils"
 import { jobStatusStyle } from "@/lib/statusStyles"
 import { usePaginatedResource } from "@/lib/usePaginatedResource"
 import { Pagination } from "@/components/Pagination"
+import { PageLoading } from "@/components/PageState"
 
 export default function OrphanDns() {
   const tz = useTimezone()
@@ -103,9 +104,9 @@ export default function OrphanDns() {
       )}
 
       {loading ? (
-        <div className="mt-8 flex items-center gap-2 text-zinc-500">
-          <Loader2 className="h-5 w-5 animate-spin" /> Loading...
-        </div>
+        <PageLoading className="mt-8 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
+          Loading...
+        </PageLoading>
       ) : jobs.length === 0 ? (
         // Don't claim "All clean!" when the list is empty only because the load
         // failed — the error banner above already explains what happened.

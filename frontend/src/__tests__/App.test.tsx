@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, fireEvent } from "@testing-library/react"
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { renderRoute } from "./testkit"
 import App from "@/App"
 import { Sidebar } from "@/components/Sidebar"
@@ -130,6 +130,49 @@ describe("App setup flow", () => {
     })
     expect(window.location.pathname).toBe("/login")
     expect(screen.queryByText(/Step \d of 6:/)).not.toBeInTheDocument()
+  })
+
+  it("cancels boot work after unmount", async () => {
+    window.history.replaceState({}, "", "/")
+    const status = Promise.withResolvers<{
+      ok: boolean
+      status: number
+      json: () => Promise<{ setup_complete: boolean; authenticated: boolean }>
+    }>()
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url.includes("/api/auth/status")) {
+        return status.promise
+      }
+      if (url.includes("/api/auth/setup-progress")) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () => Promise.resolve({ user_exists: false }),
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({}),
+      })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { unmount } = render(<App />)
+    unmount()
+
+    await act(async () => {
+      status.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ setup_complete: false, authenticated: false }),
+      })
+      await status.promise
+    })
+
+    expect(
+      fetchMock.mock.calls.some((call) => String(call[0]).includes("/api/auth/setup-progress"))
+    ).toBe(false)
   })
 
   it("shows startup error instead of assuming setup is complete when auth status fails", async () => {

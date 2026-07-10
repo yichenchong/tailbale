@@ -191,12 +191,19 @@ def test_manual_testing_has_no_fictional_progress_tracker():
 
 def test_claude_md_documents_services_package():
     """AR1 split the former ``service_ops`` god-module into a ``services/``
-    package (crud/edge_ops/cert_ops/errors). CLAUDE.md's Backend Structure
-    table must document that package so the module map does not mislead a
-    reader into thinking service lifecycle logic still lives in one module or
+    package (create/update/delete/edge_ops/cert_ops/errors). CLAUDE.md's Backend
+    Structure table must document that package so the module map does not mislead
+    a reader into thinking service lifecycle logic still lives in one module or
     only inside ``routers/services.py``. Guard tied to the real package layout."""
     services_dir = ROOT / "backend" / "app" / "services"
-    for submodule in ("crud.py", "edge_ops.py", "cert_ops.py", "errors.py"):
+    for submodule in (
+        "create.py",
+        "update.py",
+        "delete.py",
+        "edge_ops.py",
+        "cert_ops.py",
+        "errors.py",
+    ):
         assert (services_dir / submodule).is_file(), (
             f"services/{submodule} missing — update this test if the package layout changed"
         )

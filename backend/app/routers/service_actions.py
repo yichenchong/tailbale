@@ -19,16 +19,14 @@ from sqlalchemy.orm import Session
 from app import services as service_layer
 from app.auth import get_current_user
 from app.database import get_db
+from app.events.querying import query_events
 from app.events.serialization import event_to_dict
-from app.models.event import Event
 from app.models.service import Service
 from app.reconciler import reconcile_loop
 from app.services import resolve_socket
 from app.services.errors import DockerUnavailable, ServiceError, ServiceNotFound
 
-# Keep the historical logger name so existing no-leak assertions and log filters
-# continue to observe the same source while action endpoints live in this module.
-logger = logging.getLogger("app.routers.services")
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/api/services",
@@ -50,7 +48,9 @@ def _raise_edge_failure(exc: Exception, *, failure_detail: str) -> NoReturn:
     if isinstance(exc, RuntimeError):
         logger.exception("Edge action failed: %s", failure_detail)
         raise ServiceError(failure_detail, status_code=500) from None
-    if isinstance(exc, (docker.errors.DockerException, requests.exceptions.ConnectionError)):
+    if isinstance(
+        exc, (docker.errors.DockerException, requests.exceptions.ConnectionError)
+    ):
         logger.exception("Docker unavailable during edge action: %s", failure_detail)
         raise DockerUnavailable() from None
     logger.exception("Unexpected error during edge action: %s", failure_detail)
@@ -134,15 +134,12 @@ def get_cert_logs(
 ):
     """Get cert-related events for a service."""
     _get_service_or_404(service_id, db)
-    events = (
-        db.query(Event)
-        .filter(
-            Event.service_id == service_id,
-            Event.kind.in_(["cert_issued", "cert_renewed", "cert_failed"]),
-        )
-        .order_by(Event.created_at.desc(), Event.id.desc())
-        .limit(limit)
-        .all()
+    events, _ = query_events(
+        db,
+        service_id=service_id,
+        kinds=("cert_issued", "cert_renewed", "cert_failed"),
+        limit=limit,
+        include_total=False,
     )
     return {
         "events": [

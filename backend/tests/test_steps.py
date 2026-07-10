@@ -521,7 +521,7 @@ class TestIntermediatePhaseVisibility:
             patch(_P_RENDER, return_value="caddyfile content"),
             patch(_P_WRITE),
             patch(_P_CERT),
-            patch(_P_NETWORK),
+            patch(_P_NETWORK, return_value=("net123", "upstream123")),
             patch(_P_CREATE_EDGE, return_value="cid"),
             patch(_P_FIND_EDGE, return_value=None),
             patch(_P_START),

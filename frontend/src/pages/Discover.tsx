@@ -2,7 +2,8 @@ import { useCallback, useState } from "react"
 import { useNavigate } from "react-router-dom"
 import { api, type DiscoveredContainer } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { Loader2, Search, Globe } from "lucide-react"
+import { PageError, PageLoading } from "@/components/PageState"
+import { Search, Globe } from "lucide-react"
 import { useTimezone } from "@/lib/useTimezone"
 import { useResource } from "@/lib/useResource"
 import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
@@ -118,13 +119,11 @@ export default function Discover() {
       {/* Content */}
       <div className="mt-4">
         {loading && containers.length === 0 ? (
-          <div className="flex items-center gap-2 py-8 text-zinc-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading containers...
-          </div>
+          <PageLoading className="flex items-center gap-2 py-8 text-zinc-500">
+            Loading containers...
+          </PageLoading>
         ) : error && containers.length === 0 ? (
-          <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error}
-          </div>
+          <PageError>{error}</PageError>
         ) : containers.length === 0 ? (
           <div className="rounded-md bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
             No containers found. Make sure Docker is accessible and containers are running.

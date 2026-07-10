@@ -1,8 +1,9 @@
 import { Fragment, useCallback, useEffect, useState } from "react"
 import { api, type EventItem, type EventsResponse } from "@/lib/api"
 import { useTimezone, formatDateTimeOrDash } from "@/lib/useTimezone"
-import { Loader2, AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
+import { AlertCircle, Info, AlertTriangle, Search, ChevronDown, ChevronRight } from "lucide-react"
 import { cn, errorMessage } from "@/lib/utils"
+import { PageError, PageLoading } from "@/components/PageState"
 import { eventLevelStyle } from "@/lib/statusStyles"
 import { useResource } from "@/lib/useResource"
 import { usePaginatedResource } from "@/lib/usePaginatedResource"
@@ -118,11 +119,11 @@ export default function Events() {
 
       {/* Content */}
       {loading ? (
-        <div className="mt-8 flex items-center gap-2 text-zinc-500">
-          <Loader2 className="h-5 w-5 animate-spin" /> Loading events...
-        </div>
+        <PageLoading className="mt-8 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
+          Loading events...
+        </PageLoading>
       ) : error ? (
-        <div role="alert" className="mt-4 rounded-md bg-red-50 p-4 text-red-700">{error}</div>
+        <PageError className="mt-4 rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>
       ) : events.length === 0 ? (
         <div className="mt-8 text-zinc-500">No events found.</div>
       ) : (

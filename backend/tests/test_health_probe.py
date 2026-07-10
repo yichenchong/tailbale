@@ -173,12 +173,38 @@ class TestClassifyProbeResult:
         assert probe.classify_probe_result(exit_code, output) is expected
 
 
+class TestProbeFailureReason:
+    @pytest.mark.parametrize("output", [b"200", "200"])
+    def test_accepts_successful_bytes_or_text_output(self, output):
+        assert probe.probe_failure_reason(0, output) is None
+
+    @pytest.mark.parametrize("output", [None, b"", ""])
+    def test_accepts_empty_output_shapes_as_invalid_status(self, output):
+        assert probe.probe_failure_reason(0, output) == (
+            "curl did not return a valid HTTP status",
+            None,
+        )
+
+
 class TestSummarizeProbeOutput:
     def test_none_output_is_empty_string(self):
         assert probe.summarize_probe_output(None) == ""
 
     def test_bytes_are_decoded_and_whitespace_collapsed(self):
         assert probe.summarize_probe_output(b"  curl:  (7)\n failed ") == "curl: (7) failed"
+
+    @pytest.mark.parametrize(
+        ("limit", "expected"),
+        [
+            (0, ""),
+            (1, "x"),
+            (2, "xx"),
+            (3, "xxx"),
+            (4, "x..."),
+        ],
+    )
+    def test_truncation_never_exceeds_limit_at_boundary(self, limit, expected):
+        assert probe.summarize_probe_output("x" * 500, limit=limit) == expected
 
     def test_long_output_is_truncated_with_ellipsis(self):
         result = probe.summarize_probe_output("x" * 500, limit=200)

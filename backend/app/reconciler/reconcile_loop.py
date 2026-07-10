@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -169,33 +170,51 @@ def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
     return count
 
 
-async def reconcile_loop() -> None:
-    """Async background loop that periodically reconciles all enabled services."""
+async def _sweep_loop(
+    *,
+    name: str,
+    startup_delay: int,
+    interval_setting: str,
+    sweep: Callable[..., int],
+    log_message: str,
+) -> None:
+    """Run a dynamic-interval background sweep with shared error backoff."""
     # Holds the interval read inside the most recent successful sweep so the
-    # loop keeps honoring the dynamic reconcile_interval_seconds setting without
-    # opening a second session just to re-read it.
+    # loop keeps honoring dynamic settings without opening a second session just
+    # to re-read them.
     interval = {"value": ERROR_BACKOFF_SECONDS}
 
     async def _work() -> None:
         def _run_sweep() -> tuple[int, int]:
             with session_scope() as db:
-                iv = settings_store.get_positive_int_setting(db, "reconcile_interval_seconds")
-                cnt = reconcile_all(db, socket_path=docker_client.resolve_socket(db))
+                iv = settings_store.get_positive_int_setting(db, interval_setting)
+                cnt = sweep(db, socket_path=docker_client.resolve_socket(db))
                 return cnt, iv
 
         count, iv = await asyncio.to_thread(_run_sweep)
         interval["value"] = iv
-        logger.info("Reconcile sweep complete — %d services processed", count)
+        logger.info(log_message, count)
 
     await run_periodic(
-        name="Reconcile loop",
-        startup_delay=5,
+        name=name,
+        startup_delay=startup_delay,
         interval_fn=lambda: interval["value"],
         work=_work,
         on_error=lambda _exc: capped_exponential(
             0, base=ERROR_BACKOFF_SECONDS, cap=ERROR_BACKOFF_SECONDS
         ),
         logger=logger,
+    )
+
+
+async def reconcile_loop() -> None:
+    """Async background loop that periodically reconciles all enabled services."""
+    await _sweep_loop(
+        name="Reconcile loop",
+        startup_delay=5,
+        interval_setting="reconcile_interval_seconds",
+        sweep=reconcile_all,
+        log_message="Reconcile sweep complete — %d services processed",
     )
 
 
@@ -206,27 +225,10 @@ async def health_check_loop() -> None:
     an unhealthy service is detected and escalated to a full reconcile within
     ~1 min, while the healthy steady state stays cheap and silent.
     """
-    # See reconcile_loop: stash the last dynamic interval read in-session.
-    interval = {"value": ERROR_BACKOFF_SECONDS}
-
-    async def _work() -> None:
-        def _run_sweep() -> tuple[int, int]:
-            with session_scope() as db:
-                iv = settings_store.get_positive_int_setting(db, "health_check_interval_seconds")
-                cnt = health_check_all(db, socket_path=docker_client.resolve_socket(db))
-                return cnt, iv
-
-        count, iv = await asyncio.to_thread(_run_sweep)
-        interval["value"] = iv
-        logger.info("Health sweep complete — %d services processed", count)
-
-    await run_periodic(
+    await _sweep_loop(
         name="Health check loop",
         startup_delay=5,
-        interval_fn=lambda: interval["value"],
-        work=_work,
-        on_error=lambda _exc: capped_exponential(
-            0, base=ERROR_BACKOFF_SECONDS, cap=ERROR_BACKOFF_SECONDS
-        ),
-        logger=logger,
+        interval_setting="health_check_interval_seconds",
+        sweep=health_check_all,
+        log_message="Health sweep complete — %d services processed",
     )

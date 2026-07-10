@@ -43,10 +43,10 @@ def days_from_now(days: int) -> datetime | None:
 def iso(dt: datetime | None) -> str | None:
     """Serialize *dt* to ISO-8601, or ``None`` when *dt* is ``None``.
 
-    The single home for the ``dt.isoformat() if dt else None`` wire-format idiom
-    duplicated across every response shaper (``services/mapping.to_response``,
-    ``routers/{events,jobs,dashboard,services}``, ``services/cert_ops``). Storage
-    is naive UTC (``NaiveUTCDateTime``) and the wire format is deliberately the
+    The single home for the nullable ``dt.isoformat() if dt else None`` wire-format
+    idiom used by response shapers when a timestamp may be absent (``routers/``
+    endpoints, ``services/cert_ops`` and service-status fields). Stored datetimes
+    are naive UTC (``NaiveUTCDateTime``), and the wire format is deliberately the
     naive ``.isoformat()`` — the frontend's ``parseBackendDate`` relies on the
     absent tz designator — so this does NOT attach UTC (unlike ``as_utc``, which
     is for in-process comparisons only).

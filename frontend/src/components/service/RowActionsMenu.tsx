@@ -34,7 +34,7 @@ export function RowActionsMenu({
           <div
             ref={menu.menuRef}
             role="menu"
-            aria-label="Service actions"
+            aria-label={label}
             className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
             style={{ top: menu.menuPos.top, left: menu.menuPos.left }}
             onKeyDown={menu.handleMenuKeyDown}

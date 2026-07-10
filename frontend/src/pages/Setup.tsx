@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils"
 import { Loader2, CheckCircle, XCircle, ArrowRight, ArrowLeft } from "lucide-react"
+import { PageLoading } from "@/components/PageState"
 import { STEPS, useSetupWizard } from "./useSetupWizard"
 
 export default function Setup({ onSetupComplete }: { onSetupComplete?: () => void }) {
@@ -39,9 +40,9 @@ export default function Setup({ onSetupComplete }: { onSetupComplete?: () => voi
 
   if (initializing) {
     return (
-      <div className="mx-auto max-w-lg py-12 px-4 flex items-center gap-2 text-zinc-500">
-        <Loader2 className="h-5 w-5 animate-spin" /> Loading setup progress...
-      </div>
+      <PageLoading className="mx-auto max-w-lg py-12 px-4 flex items-center gap-2 text-zinc-500" iconClassName="h-5 w-5 animate-spin">
+        Loading setup progress...
+      </PageLoading>
     )
   }
 

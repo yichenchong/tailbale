@@ -1,6 +1,6 @@
 """Service CRUD API tests: update (name/hostname/port) and update-time validation, plus snippet-redacting update events.
 
-Mirrors app.services.crud (split from test_services_crud.py)."""
+Covers update behavior after the app.services facade split from test_services_crud.py."""
 
 import hashlib
 import threading

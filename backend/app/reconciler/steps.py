@@ -109,22 +109,22 @@ def _ensure_network(db: Session, service: Service, socket_path: str | None) -> N
     """Creating-network step: ensure the Docker network and heal a stale upstream id."""
     service_id = service.id
     _update_phase(db, service_id, "creating_network", "Ensuring Docker network")
-    network_result = network_manager.ensure_network(
+    network_id, resolved_upstream_id = network_manager.ensure_network(
         service.network_name,
         service.upstream_container_id,
         socket_path,
         service.upstream_container_name,
     )
-    resolved_upstream_id = (
-        network_result[1]
-        if isinstance(network_result, tuple) and len(network_result) == 2
-        else service.upstream_container_id
-    )
     if resolved_upstream_id != service.upstream_container_id:
         with db_write_section(db):
             service.upstream_container_id = resolved_upstream_id
             commit_with_lock(db)
-    logger.info("Network %s ready for service %s", service.network_name, service_id)
+    logger.info(
+        "Network %s (%s) ready for service %s",
+        service.network_name,
+        network_id,
+        service_id,
+    )
 
 
 def _ensure_cert(db: Session, service: Service, cert_path: Path) -> None:

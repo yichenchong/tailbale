@@ -1,6 +1,6 @@
 """Service CRUD API tests: create + read (list/get), service/snippet-audit events, and create-time validation (hostname, base_domain, upstream container/port).
 
-Mirrors app.services.crud (split from test_services_crud.py)."""
+Covers create/read behavior after the app.services facade split from test_services_crud.py."""
 
 import contextlib
 import hashlib

@@ -6,7 +6,8 @@ import { useTimezone, formatDate } from "@/lib/useTimezone"
 import { cn, errorMessage } from "@/lib/utils"
 import { phaseStyle } from "@/lib/statusStyles"
 import { useTransientMessage } from "@/lib/useTransientMessage"
-import { Loader2, ArrowLeft } from "lucide-react"
+import { PageError, PageLoading } from "@/components/PageState"
+import { ArrowLeft } from "lucide-react"
 import { useServiceDetail } from "@/components/service/useServiceDetail"
 import { ServiceEditForm } from "@/components/service/ServiceEditForm"
 import { EdgeVersionPanel } from "@/components/service/EdgeVersionPanel"
@@ -68,11 +69,7 @@ export default function ServiceDetail() {
   }, [loadEdgeVersion])
 
   if (loading) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading...
-      </div>
-    )
+    return <PageLoading>Loading...</PageLoading>
   }
 
   if (error && !service) {
@@ -81,7 +78,7 @@ export default function ServiceDetail() {
         <button onClick={() => navigate("/services")} className="mb-4 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-700">
           <ArrowLeft className="h-4 w-4" /> Back to Services
         </button>
-        <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>
+        <PageError>{error}</PageError>
       </div>
     )
   }

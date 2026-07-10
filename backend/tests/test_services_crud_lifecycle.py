@@ -1,6 +1,6 @@
 """Service CRUD API tests: disable/delete lifecycle, hostname-change teardown (DNS/cert cleanup), background-reconcile isolation, and lego-artifact cleanup.
 
-Mirrors app.services.crud (split from test_services_crud.py)."""
+Covers lifecycle behavior after the app.services facade split from test_services_crud.py."""
 
 import threading
 from datetime import UTC, datetime, timedelta

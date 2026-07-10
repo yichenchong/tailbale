@@ -48,7 +48,7 @@ class TestRequestHelper:
                 "POST",
                 "/zones/z1/dns_records",
                 token="cf-token",
-                json={"name": "app.example.com"},
+                json_body={"name": "app.example.com"},
                 timeout=12.5,
                 action="create_a_record",
             )
@@ -61,6 +61,11 @@ class TestRequestHelper:
             timeout=12.5,
         )
         mock_check.assert_called_once_with(response, "create_a_record")
+
+    def test_request_helper_does_not_shadow_json_module_name(self):
+        params = inspect.signature(cf._request).parameters
+        assert "json" not in params
+        assert "json_body" in params
 
     @patch("app.adapters.cloudflare_adapter.httpx2.delete")
     def test_omits_absent_optional_kwargs(self, mock_delete):

@@ -118,7 +118,7 @@ export function useExposeForm() {
     return () => {
       profileRequest.invalidate()
     }
-  }, [containerId, containerImage, availablePorts, profileRequest])
+  }, [containerId, containerName, containerImage, availablePorts, profileRequest])
 
   const baseDomain = settings?.general.base_domain || "example.com"
   const normalizedName = name.trim()

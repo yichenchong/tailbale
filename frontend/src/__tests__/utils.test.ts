@@ -41,4 +41,8 @@ describe("errorMessage utility", () => {
   it("still prefers Error.message over a fallback", () => {
     expect(errorMessage(new Error("Specific"), "Generic")).toBe("Specific")
   })
+
+  it("uses a fallback for Error values with blank messages", () => {
+    expect(errorMessage(new Error(""), "Fallback message")).toBe("Fallback message")
+  })
 })

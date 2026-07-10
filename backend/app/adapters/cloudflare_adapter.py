@@ -41,14 +41,14 @@ CF_DEFAULT_TIMEOUT = 30.0
 # double it to ~60s). Cap it short to bound the worst-case global stall.
 CF_CLEANUP_TIMEOUT = 10.0
 
-# Records requested per page when listing matching DNS records. Cloudflare's
-# list endpoint defaults to per_page=20, so a hostname with more than 20 matching
-# records (external tampering / a runaway create loop) would SILENTLY truncate at
-# page 1 — breaking find_record's "pick deterministically, stable across calls"
-# guarantee (the global-lowest id could live on an unseen page). Request a larger
-# page in a SINGLE round-trip (never a multi-page loop — that would defeat the
-# bounded-stall cap above by issuing N requests under the lifecycle lock) and warn
-# if Cloudflare still reports more matches than were returned.
+# Records requested per page when listing matching DNS records. Always send an
+# explicit, larger page size so a hostname with many matching records (external
+# tampering / a runaway create loop) is less likely to be truncated at page 1 —
+# truncation would break find_record's "pick deterministically, stable across
+# calls" guarantee if the global-lowest id lived on an unseen page. Use a SINGLE
+# round-trip (never a multi-page loop — that would defeat the bounded-stall cap
+# above by issuing N requests under the lifecycle lock) and warn if Cloudflare
+# still reports more matches than were returned.
 CF_FIND_PER_PAGE = 100
 
 
@@ -154,7 +154,7 @@ def _request(
     token: str,
     timeout: float,
     action: str,
-    json: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
 ) -> dict:
     """Issue a single Cloudflare API request and return the checked response body."""
@@ -162,8 +162,8 @@ def _request(
         "headers": _headers(token),
         "timeout": timeout,
     }
-    if json is not None:
-        kwargs["json"] = json
+    if json_body is not None:
+        kwargs["json"] = json_body
     if params is not None:
         kwargs["params"] = params
 
@@ -203,9 +203,9 @@ def list_a_records(
 ) -> list[dict[str, Any]]:
     """Return ALL DNS records matching ``hostname``+``record_type``, sorted by id.
 
-    Each dict is the raw Cloudflare record (including ``id``, ``content`` and
-    ``comment`` — Cloudflare returns ``comment`` by default, so it is never stripped).
-    Sorting by id gives a deterministic, stable order across calls so the lowest-id
+    Each dict is the raw Cloudflare record (including ``id``, ``content`` and any
+    ``comment`` field the API returns — this adapter never strips it). Sorting by
+    id gives a deterministic, stable order across calls so the lowest-id
     fallback pick is reproducible. Emits a truncation warning when Cloudflare reports
     more matches than this single page returned (never loops pages — that would defeat
     the bounded-stall cap by issuing N requests under the lifecycle lock).
@@ -295,7 +295,7 @@ def create_a_record(
         "POST",
         f"/zones/{zone_id}/dns_records",
         token=token,
-        json=body,
+        json_body=body,
         timeout=timeout,
         action="create_a_record",
     )
@@ -331,7 +331,7 @@ def update_a_record(
         "PATCH",
         f"/zones/{zone_id}/dns_records/{record_id}",
         token=token,
-        json=body,
+        json_body=body,
         timeout=timeout,
         action="update_a_record",
     )
