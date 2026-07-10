@@ -71,6 +71,10 @@ export function useRowActionMenu(): RowActionMenuController {
   }, [openMenuId, close])
 
   const handleMenuKeyDown = useCallback((e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (e.key === "Tab") {
+      close(false)
+      return
+    }
     const items = Array.from(
       e.currentTarget.querySelectorAll<HTMLElement>('[role="menuitem"]'),
     )
@@ -96,7 +100,7 @@ export function useRowActionMenu(): RowActionMenuController {
     e.preventDefault()
     setMenuActiveIndex(next)
     items[next].focus()
-  }, [])
+  }, [close])
 
   return { openMenuId, menuPos, menuRef, menuActiveIndex, open, close, toggle, handleMenuKeyDown }
 }

@@ -606,6 +606,35 @@ describe("Services page a11y contract (FPA)", () => {
     expect(document.activeElement).toBe(items[last])
   })
 
+  it("closes the row actions menu on Tab without preventing native focus movement", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve(mockServiceData),
+    }))
+    // Test loading-boundary: stub fetch before importing the page/API client.
+    const { default: Services } = await import("@/pages/Services")
+    renderRoute(<Services />)
+    await waitFor(() => {
+      expect(screen.getByText("Nextcloud")).toBeInTheDocument()
+    })
+    const btn = screen.getByLabelText("Actions")
+    fireEvent.click(btn)
+    const menu = screen.getByRole("menu")
+    expect(btn).toHaveAttribute("aria-expanded", "true")
+
+    const event = new KeyboardEvent("keydown", {
+      key: "Tab",
+      bubbles: true,
+      cancelable: true,
+    })
+    const preventDefault = vi.spyOn(event, "preventDefault")
+    fireEvent(menu, event)
+
+    expect(preventDefault).not.toHaveBeenCalled()
+    expect(screen.queryByRole("menu")).not.toBeInTheDocument()
+    expect(btn).toHaveAttribute("aria-expanded", "false")
+  })
+
   it("closes the row actions menu on scroll and on resize", async () => {
     // The menu is position:fixed at coords captured on open, so scrolling an
     // ancestor or resizing would detach it from its trigger; both close it.
