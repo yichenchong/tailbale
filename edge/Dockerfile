@@ -1,4 +1,4 @@
-FROM tailscale/tailscale:v1.98.5
+FROM tailscale/tailscale:v1.98.8
 
 ARG TARGETARCH=amd64
 ARG TARGETVARIANT

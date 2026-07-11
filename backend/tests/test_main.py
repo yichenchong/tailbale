@@ -125,6 +125,7 @@ class TestLifespanBackgroundTasks:
 
         # Point lifespan table creation, migrations, and startup sessions at the
         # test engine and neutralize heavy/external startup steps.
+        monkeypatch.setattr(database_module, "engine", db_engine)
         monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
         monkeypatch.setattr(database_module, "run_migrations", lambda *a, **k: None)
         monkeypatch.setattr(jobs_mod, "reset_stale_running_jobs", lambda *a, **k: None)
@@ -165,6 +166,7 @@ class TestLifespanBackgroundTasks:
         were never cancelled (a leak) and the shutdown itself raised."""
 
 
+        monkeypatch.setattr(database_module, "engine", db_engine)
         monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
         monkeypatch.setattr(database_module, "run_migrations", lambda *a, **k: None)
         monkeypatch.setattr(jobs_mod, "reset_stale_running_jobs", lambda *a, **k: None)
