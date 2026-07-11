@@ -18,16 +18,20 @@ export function ProbeRetryBanner({
   attempt: number | null
   tz: string
 }) {
-  const [, setTick] = useState(0)
+  // `now` is derived from `tick` (not read directly via `Date.now()` in the
+  // render body) so the component stays a pure function of its state: the
+  // 1Hz interval below advances `tick`, and each tick captures a fresh `now`
+  // used only for that render's countdown math.
+  const [tick, setTick] = useState(() => Date.now())
 
   // Re-render every second so the countdown stays live
   useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1000)
+    const id = setInterval(() => setTick(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
 
   const retryDate = parseBackendDate(retryAt)
-  const diffMs = retryDate.getTime() - Date.now()
+  const diffMs = retryDate.getTime() - tick
 
   let timeLabel: string
   if (diffMs <= 0) {

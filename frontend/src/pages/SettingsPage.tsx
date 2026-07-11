@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent } from "react"
+import { useRef, useState, type KeyboardEvent } from "react"
 import { cn } from "@/lib/utils"
 import { PageError, PageLoading } from "@/components/PageState"
 import { useSettings } from "./settings/useSettings"
@@ -33,11 +33,15 @@ export default function SettingsPage() {
     setTestResult,
   } = useSettings()
 
-  useEffect(() => {
-    if (settings && !settings.general.developer_mode && tab === "Developer") {
-      setTab("General")
-    }
-  }, [settings, tab])
+  // If developer mode is off and the user is parked on the Developer tab
+  // (e.g. it was just turned off from this same tab), bounce to General.
+  // Derived during render, not an effect: the condition is self-clearing
+  // (it only holds while tab === "Developer"), so it settles in one extra
+  // render with no risk of looping, and the redirect is visible on the very
+  // first paint rather than one tick later.
+  if (settings && !settings.general.developer_mode && tab === "Developer") {
+    setTab("General")
+  }
 
   if (loading) {
     return <PageLoading>Loading settings...</PageLoading>

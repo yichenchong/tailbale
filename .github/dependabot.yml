@@ -1,6 +1,9 @@
 version: 2
 updates:
   # Backend Python dependencies (backend/requirements.txt, requirements-dev.txt)
+  # `backend-all` has no update-types restriction, so major bumps join the
+  # group too instead of spawning their own PR (the previous minor/patch-only
+  # restriction is what caused a scheduled run to open ~20 separate PRs).
   - package-ecosystem: "pip"
     directory: "/backend"
     schedule:
@@ -14,10 +17,9 @@ updates:
       prefix: "chore"
       include: "scope"
     groups:
-      backend-minor-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      backend-all:
+        patterns:
+          - "*"
 
   # Frontend npm dependencies (frontend/package.json)
   - package-ecosystem: "npm"
@@ -33,10 +35,9 @@ updates:
       prefix: "chore"
       include: "scope"
     groups:
-      frontend-minor-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      frontend-all:
+        patterns:
+          - "*"
 
   # Orchestrator production image (root Dockerfile: python base + pinned lego release)
   - package-ecosystem: "docker"
@@ -51,6 +52,10 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      docker-root-all:
+        patterns:
+          - "*"
 
   # Edge container image (edge/Dockerfile: tailscale/tailscale base + pinned caddy release)
   - package-ecosystem: "docker"
@@ -66,6 +71,10 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      docker-edge-all:
+        patterns:
+          - "*"
 
   # GitHub Actions workflow action versions (.github/workflows/*.yml)
   - package-ecosystem: "github-actions"
@@ -80,3 +89,7 @@ updates:
     commit-message:
       prefix: "chore"
       include: "scope"
+    groups:
+      github-actions-all:
+        patterns:
+          - "*"

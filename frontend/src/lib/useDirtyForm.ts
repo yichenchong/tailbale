@@ -44,7 +44,9 @@ export function useDirtyForm<S, V extends Record<string, FieldValue>>(
   extract: (settings: S) => V,
 ): DirtyForm<V> {
   const extractRef = useRef(extract)
-  extractRef.current = extract
+  useEffect(() => {
+    extractRef.current = extract
+  })
   const [values, setValues] = useState<V>(() => extract(settings))
   const edited = useRef<Set<string>>(new Set())
 

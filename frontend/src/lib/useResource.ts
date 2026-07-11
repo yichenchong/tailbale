@@ -78,22 +78,50 @@ export function useResource<T>(
 
   // Latest option callbacks held in refs so `run` stays referentially stable
   // (it depends only on `fetcher`) without ever reading a stale closure.
+  // Synced via an effect (not assigned during render) so refs are only ever
+  // written during the commit phase; `run` only reads them from later
+  // effects/callbacks/intervals, never synchronously in the same render.
   const onDataRef = useRef(opts.onData)
-  onDataRef.current = opts.onData
   const mapErrorRef = useRef(opts.mapError)
-  mapErrorRef.current = opts.mapError
+  useEffect(() => {
+    onDataRef.current = opts.onData
+    mapErrorRef.current = opts.mapError
+  })
 
-  const run = useCallback(
-    async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
-      const id = ++requestId.current
-      // A foreground load owns the spinner and clears the prior error up front;
-      // a background refresh leaves both alone so the current view stays put.
+  // Starts a fetch immediately and synchronously -- callable directly from an
+  // effect's top level (unlike `run` below) because it never touches state,
+  // so a mount-triggered load actually starts in the same tick React commits
+  // the effect, which several callers (and tests asserting on network
+  // activity right after mount) depend on. A synchronous throw from
+  // `fetcher` is caught here and turned into a rejection rather than left to
+  // propagate synchronously.
+  const begin = useCallback((): { id: number; pending: Promise<T> } => {
+    const id = ++requestId.current
+    let pending: Promise<T>
+    try {
+      pending = Promise.resolve(fetcher())
+    } catch (syncErr) {
+      pending = Promise.reject(syncErr as unknown)
+    }
+    return { id, pending }
+  }, [fetcher])
+
+  // Applies the outcome of a fetch started by `begin`. Every state update
+  // lives here, so this (unlike `begin`) must never be called directly from
+  // an effect's top level -- callers defer it a microtask (see the mount
+  // effect below) or call it from a non-effect context (event handler, poll
+  // interval callback).
+  const commit = useCallback(
+    async (id: number, pending: Promise<T>, background: boolean): Promise<void> => {
+      // A foreground load owns the spinner and clears the prior error up
+      // front; a background refresh leaves both alone so the current view
+      // stays put.
       if (!background) {
         setLoading(true)
         setError(null)
       }
       try {
-        const result = await fetcher()
+        const result = await pending
         if (id !== requestId.current) return
         if (onDataRef.current?.(result) === true) return
         setDataState(result)
@@ -111,7 +139,19 @@ export function useResource<T>(
         setLoading(false)
       }
     },
-    [fetcher],
+    [],
+  )
+
+  // Public refresh entry point (manual refresh, poll interval): starts and
+  // commits a fetch in one call. Never invoked directly from an effect's top
+  // level, so `commit`'s setState calls are not subject to the same
+  // deferral `begin`/`commit` need when driven from the mount effect below.
+  const run = useCallback(
+    async ({ background = false }: { background?: boolean } = {}): Promise<void> => {
+      const { id, pending } = begin()
+      await commit(id, pending, background)
+    },
+    [begin, commit],
   )
 
   const setData = useCallback((value: T) => {
@@ -123,13 +163,20 @@ export function useResource<T>(
 
   // Initial load + reload whenever the fetcher identity changes. The cleanup
   // bumps the guard so a response still in flight at unmount / fetcher-change
-  // can never write state.
+  // can never write state. `begin()` is called directly (synchronously
+  // starting the fetch in this tick); `commit` -- which does all the state
+  // updates -- is deferred one microtask so this effect never directly calls
+  // a function that itself calls setState. That microtask still resolves
+  // well before the next paint, so this is imperceptible to the user and to
+  // `act()`-wrapped tests (which already drain the microtask queue).
   useEffect(() => {
-    if (immediate) void run()
+    if (!immediate) return
+    const { id, pending } = begin()
+    void Promise.resolve().then(() => commit(id, pending, false))
     return () => {
       requestId.current += 1
     }
-  }, [run, immediate])
+  }, [begin, commit, immediate])
 
   // Optional background polling, torn down on unmount / interval change.
   useEffect(() => {

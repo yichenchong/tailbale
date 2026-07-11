@@ -1,9 +1,9 @@
-import { useEffect, useState } from "react"
+import { useEffect, useSyncExternalStore } from "react"
 import { getJsonSafe } from "@/lib/utils"
 
 /** @internal exported for test cleanup */
 export let cachedTimezone: string | null = null
-const subscribers = new Set<(tz: string) => void>()
+const subscribers = new Set<() => void>()
 const BROWSER_TZ = Intl.DateTimeFormat().resolvedOptions().timeZone
 
 export function _resetTimezoneCache() {
@@ -17,7 +17,16 @@ export function _resetTimezoneCache() {
  */
 export function setConfiguredTimezone(tz: string): void {
   cachedTimezone = tz
-  for (const notify of subscribers) notify(tz)
+  for (const notify of subscribers) notify()
+}
+
+function subscribe(onStoreChange: () => void): () => void {
+  subscribers.add(onStoreChange)
+  return () => subscribers.delete(onStoreChange)
+}
+
+function getSnapshot(): string {
+  return cachedTimezone ?? BROWSER_TZ
 }
 
 /**
@@ -25,28 +34,21 @@ export function setConfiguredTimezone(tz: string): void {
  * Falls back to the browser's local timezone until settings are loaded.
  */
 export function useTimezone(): string {
-  const [tz, setTz] = useState(cachedTimezone ?? BROWSER_TZ)
+  const tz = useSyncExternalStore(subscribe, getSnapshot)
 
   useEffect(() => {
-    subscribers.add(setTz)
-    if (cachedTimezone) {
-      setTz(cachedTimezone)
-    } else {
-      getJsonSafe<{ general?: { timezone?: string } }>("/api/settings")
-        .then((data) => {
-          // Ignore a late settings response if a timezone has since been
-          // established — by an explicit setConfiguredTimezone (e.g. saving
-          // the General settings) or a sibling consumer's fetch. Applying it
-          // here would clobber the newer value back to a stale one and
-          // re-render every mounted consumer with the wrong zone.
-          if (!cachedTimezone && data?.general?.timezone) {
-            setConfiguredTimezone(data.general.timezone)
-          }
-        })
-    }
-    return () => {
-      subscribers.delete(setTz)
-    }
+    if (cachedTimezone) return
+    getJsonSafe<{ general?: { timezone?: string } }>("/api/settings")
+      .then((data) => {
+        // Ignore a late settings response if a timezone has since been
+        // established — by an explicit setConfiguredTimezone (e.g. saving
+        // the General settings) or a sibling consumer's fetch. Applying it
+        // here would clobber the newer value back to a stale one and
+        // re-render every mounted consumer with the wrong zone.
+        if (!cachedTimezone && data?.general?.timezone) {
+          setConfiguredTimezone(data.general.timezone)
+        }
+      })
   }, [])
 
   return tz

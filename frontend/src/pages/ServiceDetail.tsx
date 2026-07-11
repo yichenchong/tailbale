@@ -65,7 +65,10 @@ export default function ServiceDetail() {
   }, [id, clear])
 
   useEffect(() => {
-    void loadEdgeVersion()
+    // Deferred a microtask so the async function's synchronous prefix
+    // (setEdgeVersion(null) inside loadEdgeVersion) runs outside the
+    // effect's own callback frame, not synchronously within it.
+    void Promise.resolve().then(() => loadEdgeVersion())
   }, [loadEdgeVersion])
 
   if (loading) {
