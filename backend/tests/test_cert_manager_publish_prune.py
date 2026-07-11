@@ -150,7 +150,7 @@ class TestAtomicCopyCerts:
         # must refuse.
         bad_cert = tmp_path / "bad_cert.pem"
         bad_key = tmp_path / "bad_key.pem"
-        other = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        other = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         _write_cert_key_pair(bad_cert, bad_key, cert_key=other)
 
         with pytest.raises(RuntimeError, match="mismatched"):

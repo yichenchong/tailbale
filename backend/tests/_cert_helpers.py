@@ -25,7 +25,7 @@ def _fake_lego_proc(lines, returncode=0, wait_side_effect=None):
 @functools.cache
 def _real_pem_pair(tag: int = 0) -> tuple[bytes, bytes]:
     """Return ``(fullchain_pem, privkey_pem)`` for a matching self-signed pair."""
-    key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")])
     cert = (
         x509.CertificateBuilder()
@@ -49,7 +49,7 @@ def _real_pem_pair(tag: int = 0) -> tuple[bytes, bytes]:
 def _write_cert_key_pair(cert_path, key_path, *, key=None, cert_key=None):
     """Write a self-signed cert + private key, optionally as a mismatched pair."""
     if key is None:
-        key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     if cert_key is None:
         cert_key = key
     subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")])
