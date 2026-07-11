@@ -7,7 +7,7 @@ export type RowActionMenuItem =
 export interface RowActionMenuController {
   openMenuId: string | null
   menuPos: { top: number; left: number } | null
-  menuRef: RefObject<HTMLDivElement>
+  menuRef: RefObject<HTMLDivElement | null>
   menuActiveIndex: number
   open: (id: string, trigger: HTMLButtonElement) => void
   close: (restoreFocus?: boolean) => void
@@ -53,9 +53,18 @@ export function useRowActionMenu(): RowActionMenuController {
     return () => document.removeEventListener("keydown", onKeyDown)
   }, [openMenuId, close])
 
+  // Reset the active index as soon as the menu opens/closes/switches rows.
+  // Derived during render (not an effect) so the first paint of a newly-open
+  // menu already highlights item 0; the actual DOM focus() call below still
+  // has to stay in an effect since it needs the mounted menu node.
+  const [syncedMenuId, setSyncedMenuId] = useState<string | null>(null)
+  if (openMenuId !== syncedMenuId) {
+    setSyncedMenuId(openMenuId)
+    setMenuActiveIndex(0)
+  }
+
   useEffect(() => {
     if (openMenuId === null) return
-    setMenuActiveIndex(0)
     menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
   }, [openMenuId])
 

@@ -15,12 +15,13 @@ export function RowActionsMenu({
   menu: RowActionMenuController
   label?: string
 }) {
-  const open = menu.openMenuId === rowId
+  const { openMenuId, menuPos, menuRef, menuActiveIndex, close, toggle, handleMenuKeyDown } = menu
+  const open = openMenuId === rowId
   return (
     <div className="inline-block">
       <button
         type="button"
-        onClick={(e) => menu.toggle(rowId, e.currentTarget)}
+        onClick={(e) => toggle(rowId, e.currentTarget)}
         className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
         aria-label={label}
         aria-haspopup="true"
@@ -28,19 +29,19 @@ export function RowActionsMenu({
       >
         <MoreVertical className="h-4 w-4" />
       </button>
-      {open && menu.menuPos && (
+      {open && menuPos && (
         <>
-          <div className="fixed inset-0 z-10" onClick={() => menu.close()} />
+          <div className="fixed inset-0 z-10" onClick={() => close()} />
           <div
-            ref={menu.menuRef}
+            ref={menuRef}
             role="menu"
             aria-label={label}
             className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
-            style={{ top: menu.menuPos.top, left: menu.menuPos.left }}
-            onKeyDown={menu.handleMenuKeyDown}
+            style={{ top: menuPos.top, left: menuPos.left }}
+            onKeyDown={handleMenuKeyDown}
           >
             {items.map((item, index) => {
-              const tabIndex = index === menu.menuActiveIndex ? 0 : -1
+              const tabIndex = index === menuActiveIndex ? 0 : -1
               const base = "block w-full px-3 py-1.5 text-left text-sm"
               if ("to" in item) {
                 return (

@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 
 import { useResource, type UseResourceOptions, type UseResourceResult } from "@/lib/useResource"
 
@@ -32,8 +32,12 @@ export function usePolledResource<T>(
 
   // Hold the caller's onData in a ref so `markFresh` stays referentially stable
   // (and so `useResource`'s `run` identity does) without capturing a stale one.
+  // Synced via an effect (not during render) since `markFresh` only reads it
+  // later, from useResource's own async fetch effects/poll interval.
   const onDataRef = useRef(onData)
-  onDataRef.current = onData
+  useEffect(() => {
+    onDataRef.current = onData
+  })
 
   const markFresh = useCallback((data: T): boolean | void => {
     // Preserve the caller's onData contract: if it claims the response (returns

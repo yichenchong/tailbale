@@ -80,7 +80,9 @@ export function useSettings(): UseSettingsResult {
   }, [loadRequest])
 
   useEffect(() => {
-    void load()
+    // Deferred a microtask so `load`'s synchronous prefix (setLoading(true) /
+    // setError("")) runs outside the effect's own callback frame.
+    void Promise.resolve().then(() => load())
   }, [load])
 
   const save = useCallback(

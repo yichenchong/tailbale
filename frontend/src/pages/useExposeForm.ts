@@ -56,6 +56,9 @@ export function useExposeForm() {
   const containerImage = searchParams.get("image") || ""
   const portsJson = searchParams.get("ports") || "[]"
   const availablePorts = useMemo(() => parsePortsParam(portsJson), [portsJson])
+  // Identifies "the container this form targets"; combines every value that
+  // should reset the form/profile-detection state when it changes.
+  const resetKey = `${containerId}\u0000${containerName}\u0000${containerImage}\u0000${portsJson}`
 
   // Form state
   const [name, setName] = useState(containerName)
@@ -73,8 +76,13 @@ export function useExposeForm() {
   const [appProfile, setAppProfile] = useState<string | null>(null)
   const profileRequest = useLatestRequest()
 
-
-  useEffect(() => {
+  // Reset every field to its default whenever the target container changes.
+  // Derived during render (not an effect) so the reset is visible on the very
+  // first paint of the new target, per React's "adjusting state when a prop
+  // changes" pattern.
+  const [syncedFormResetKey, setSyncedFormResetKey] = useState(resetKey)
+  if (resetKey !== syncedFormResetKey) {
+    setSyncedFormResetKey(resetKey)
     setName(containerName)
     setHostnamePrefix(defaultHostnamePrefix(containerName))
     setPort(availablePorts.length > 0 ? availablePorts[0].container_port : "80")
@@ -83,13 +91,20 @@ export function useExposeForm() {
     setPreserveHost(true)
     setCustomSnippet("")
     setEnabled(true)
-  }, [containerId, containerName, containerImage, availablePorts])
+  }
 
-  useEffect(() => {
-    const token = profileRequest.next()
+  // Clear the previously-detected profile the same way, so the old
+  // container's profile never flashes before the fresh detect() below lands.
+  const [syncedProfileResetKey, setSyncedProfileResetKey] = useState(resetKey)
+  if (resetKey !== syncedProfileResetKey) {
+    setSyncedProfileResetKey(resetKey)
     setDetectedProfile(null)
     setProfileData(null)
     setAppProfile(null)
+  }
+
+  useEffect(() => {
+    const token = profileRequest.next()
 
     // Auto-detect app profile from image name
     if (containerImage) {

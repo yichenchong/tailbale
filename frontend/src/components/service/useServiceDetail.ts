@@ -67,10 +67,14 @@ export function useServiceDetail(id: string | undefined): UseServiceDetailResult
   }, [service, seedFrom])
 
   // Close the edit form when navigating to another service so the next load's
-  // seed is not suppressed by a stale-open form.
-  useEffect(() => {
+  // seed is not suppressed by a stale-open form. Derived during render (not an
+  // effect) so the closed form is visible on the very first paint of the new
+  // id, per React's "adjusting state when a prop changes" pattern.
+  const [syncedId, setSyncedId] = useState(id)
+  if (id !== syncedId) {
+    setSyncedId(id)
     setEditing(false)
-  }, [id])
+  }
 
   useEffect(() => {
     editingRef.current = editing

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
 
 export interface PaginationProps {
   /** Zero-based offset of the first item on the current page. */
@@ -36,12 +36,17 @@ export function Pagination({
   onNext,
   onGoToPage,
 }: PaginationProps) {
-  // Local draft so the user can type freely; mirrors the live page on every
-  // navigation (Prev/Next, a jump, or a shrink-clamp) so it never drifts.
+  // Local draft so the user can type freely; synced back to the live page
+  // whenever it changes (Prev/Next, a jump, or a shrink-clamp) so it never
+  // drifts. `syncedPage` tracks the page last synced from; derived during
+  // render (not an effect) per React's "adjusting state when a prop
+  // changes" pattern.
   const [draft, setDraft] = useState(String(page))
-  useEffect(() => {
+  const [syncedPage, setSyncedPage] = useState(page)
+  if (page !== syncedPage) {
+    setSyncedPage(page)
     setDraft(String(page))
-  }, [page])
+  }
 
   // Controls are pointless when the whole list fits on one page.
   if (total <= limit) return null
