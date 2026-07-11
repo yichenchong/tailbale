@@ -11,8 +11,9 @@ import OrphanDns from "@/pages/OrphanDns"
 import SettingsPage from "@/pages/SettingsPage"
 import Setup from "@/pages/Setup"
 import Login from "@/pages/Login"
-import { api, type AuthStatus } from "@/lib/api"
+import { api } from "@/lib/api"
 import { useDynamicFavicon } from "@/lib/useFavicon"
+import { errorMessage } from "@/lib/utils"
 
 /** Wrapper that enables favicon polling only for authenticated routes. */
 function AuthenticatedLayout() {
@@ -23,18 +24,43 @@ function AuthenticatedLayout() {
 function App() {
   const [setupComplete, setSetupComplete] = useState<boolean | null>(null)
   const [authenticated, setAuthenticated] = useState<boolean | null>(null)
-
+  const [setupUserExists, setSetupUserExists] = useState<boolean | null>(null)
+  const [bootError, setBootError] = useState<string | null>(null)
   useEffect(() => {
-    api
-      .get<AuthStatus>("/auth/status")
-      .then((s) => {
+    let cancelled = false
+
+    api.auth
+      .status()
+      .then(async (s) => {
+        if (cancelled) return
+        setBootError(null)
         setSetupComplete(s.setup_complete)
         setAuthenticated(s.authenticated)
+        if (!s.setup_complete) {
+          try {
+            const progress = await api.auth.setupProgress()
+            if (cancelled) return
+            setSetupUserExists(progress.user_exists)
+          } catch (err) {
+            if (cancelled) return
+            setBootError(errorMessage(err, "Unable to load setup progress"))
+            setSetupUserExists(true)
+          }
+        } else {
+          setSetupUserExists(null)
+        }
       })
-      .catch(() => {
-        setSetupComplete(true)
+      .catch((err) => {
+        if (cancelled) return
+        setBootError(errorMessage(err, "Unable to load app status"))
+        setSetupComplete(false)
         setAuthenticated(false)
+        setSetupUserExists(false)
       })
+
+    return () => {
+      cancelled = true
+    }
   }, [])
 
   const onLogin = useCallback(() => {
@@ -43,13 +69,41 @@ function App() {
 
   const onSetupComplete = useCallback(() => {
     setSetupComplete(true)
+    setAuthenticated(true)
   }, [])
 
   // Still loading
-  if (setupComplete === null || authenticated === null) return null
+  if (
+    setupComplete === null ||
+    authenticated === null ||
+    (setupComplete === false && setupUserExists === null)
+  ) return null
 
-  // Determine where unauthenticated users should go
-  const redirect = !setupComplete ? "/setup" : !authenticated ? "/login" : null
+  if (bootError) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg p-6">
+        <h1 className="text-xl font-semibold">Startup error</h1>
+        <p className="mt-2 text-sm text-zinc-500">{bootError}</p>
+        <button
+          className="mt-4 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white"
+          onClick={() => window.location.reload()}
+        >
+          Retry
+        </button>
+      </div>
+    )
+  }
+
+  // Determine where unauthenticated users should go. Once the admin account
+  // exists, incomplete setup still needs a login path because settings writes
+  // are authenticated.
+  const redirect = !setupComplete
+    ? authenticated || !setupUserExists
+      ? "/setup"
+      : "/login"
+    : !authenticated
+      ? "/login"
+      : null
 
   return (
     <BrowserRouter>
@@ -57,11 +111,27 @@ function App() {
         {/* Setup wizard — redirect to dashboard if already completed */}
         <Route
           path="setup"
-          element={setupComplete ? <Navigate to="/" replace /> : <Setup onSetupComplete={onSetupComplete} />}
+          element={
+            setupComplete ? (
+              <Navigate to="/" replace />
+            ) : setupUserExists && !authenticated ? (
+              <Navigate to="/login" replace />
+            ) : (
+              <Setup onSetupComplete={onSetupComplete} />
+            )
+          }
         />
         <Route
           path="login"
-          element={authenticated ? <Navigate to="/" replace /> : <Login onLogin={onLogin} />}
+          element={
+            !setupComplete && !setupUserExists ? (
+              <Navigate to="/setup" replace />
+            ) : authenticated ? (
+              <Navigate to="/" replace />
+            ) : (
+              <Login onLogin={onLogin} />
+            )
+          }
         />
 
         {redirect ? (

@@ -1,68 +1,63 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { api, type DiscoveredContainer, type DiscoveryResponse, type ServiceListResponse } from "@/lib/api"
+import { api, type DiscoveredContainer } from "@/lib/api"
 import { cn } from "@/lib/utils"
-import { Loader2, Search, Globe, RefreshCw } from "lucide-react"
-import { useTimezone, formatTime } from "@/lib/useTimezone"
+import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
+import { Search, Globe } from "lucide-react"
+import { useTimezone } from "@/lib/useTimezone"
+import { usePolledResource } from "@/lib/usePolledResource"
+import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
 
 const POLL_INTERVAL = 30_000 // 30 seconds
+
+interface DiscoverData {
+  containers: DiscoveredContainer[]
+  // How many exposures (services) each container already has, keyed by container id.
+  exposureCounts: Record<string, number>
+}
 
 export default function Discover() {
   const navigate = useNavigate()
   const tz = useTimezone()
-  const [containers, setContainers] = useState<DiscoveredContainer[]>([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState("")
+  const [appliedSearch, setAppliedSearch] = useState("")
   const [runningOnly, setRunningOnly] = useState(true)
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
-  // Track how many exposures each container already has
-  const [exposureCounts, setExposureCounts] = useState<Record<string, number>>({})
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const load = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setLoading(true)
-    setError(null)
-    try {
-      const [discovery, services] = await Promise.all([
-        api.get<DiscoveryResponse>(`/discovery/containers?${new URLSearchParams({
-          running_only: String(runningOnly),
-          hide_managed: "true",
-          ...(search ? { search } : {}),
-        })}`),
-        api.get<ServiceListResponse>("/services"),
-      ])
-      setContainers(discovery.containers)
-      const counts: Record<string, number> = {}
-      for (const svc of services.services) {
-        const phase = svc.status?.phase
-        if (phase === 'healthy' || phase === 'warning') {
-          counts[svc.upstream_container_id] = (counts[svc.upstream_container_id] || 0) + 1
-        }
+  // Composite fetcher: merge the discovery + services endpoints and derive each
+  // container's exposure count. Memoized over its inputs so a filter/search
+  // change re-runs the load (mirrors the old useEffect(load, [load]) pattern).
+  const fetcher = useCallback(async (): Promise<DiscoverData> => {
+    const [discovery, services] = await Promise.all([
+      api.discovery.containers({ runningOnly, search: appliedSearch }),
+      api.services.list(),
+    ])
+    const exposureCounts: Record<string, number> = {}
+    for (const svc of services.services) {
+      if (svc.upstream_container_id) {
+        exposureCounts[svc.upstream_container_id] = (exposureCounts[svc.upstream_container_id] || 0) + 1
       }
-      setExposureCounts(counts)
-      setLastRefresh(new Date())
-    } catch (e) {
-      setError(String(e))
-    } finally {
-      setLoading(false)
     }
-  }, [runningOnly, search])
+    return { containers: discovery.containers, exposureCounts }
+  }, [runningOnly, appliedSearch])
 
-  // Load on mount and when runningOnly changes
-  useEffect(() => {
-    load(true)
-  }, [runningOnly])
+  // Shared fetch/loading/error/race-guard/poll machine. The background poll keeps
+  // the current list visible and clears the error only on success (no flicker);
+  // the 30s cadence matches the old hand-rolled setInterval. `lastSuccessAt`
+  // drives the "Updated ..." / stale-data affordances.
+  const { data, loading, error, refresh, lastSuccessAt } = usePolledResource(fetcher, {
+    intervalMs: POLL_INTERVAL,
+  })
+  const containers = data?.containers ?? []
+  const exposureCounts = data?.exposureCounts ?? {}
 
-  // Auto-refresh every 30s
-  useEffect(() => {
-    timerRef.current = setInterval(() => load(false), POLL_INTERVAL)
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
+  const handleSearch = () => {
+    if (search === appliedSearch) {
+      void refresh()
+    } else {
+      setAppliedSearch(search)
     }
-  }, [load])
-
-  const handleSearch = () => load(true)
+  }
 
   const handleExpose = (container: DiscoveredContainer) => {
     const params = new URLSearchParams({
@@ -81,25 +76,12 @@ export default function Discover() {
           <h1 className="text-2xl font-bold">Discover Containers</h1>
           <p className="mt-1 text-sm text-zinc-500">Find running Docker containers to expose as HTTPS services.</p>
         </div>
-        <div className="flex items-center gap-3">
-          {lastRefresh && (
-            <span className="text-xs text-zinc-400">
-              Updated {formatTime(lastRefresh, tz)}
-            </span>
-          )}
-          <button
-            onClick={() => load(true)}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-          >
-            {loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            Refresh
-          </button>
-        </div>
+        <PolledRefreshControl
+          lastRefresh={lastSuccessAt}
+          timezone={tz}
+          loading={loading}
+          onRefresh={() => { void refresh() }}
+        />
       </div>
 
       {/* Filters */}
@@ -112,6 +94,7 @@ export default function Discover() {
             onChange={(e) => setSearch(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && handleSearch()}
             placeholder="Search by name or image..."
+            aria-label="Search containers by name or image"
             className="w-full rounded-md border border-zinc-300 py-2 pl-9 pr-3 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
           />
         </div>
@@ -134,29 +117,33 @@ export default function Discover() {
 
       {/* Content */}
       <div className="mt-4">
-        {loading ? (
-          <div className="flex items-center gap-2 py-8 text-zinc-500">
-            <Loader2 className="h-4 w-4 animate-spin" /> Loading containers...
-          </div>
-        ) : error ? (
-          <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
-            {error}
-          </div>
-        ) : containers.length === 0 ? (
-          <div className="rounded-md bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
-            No containers found. Make sure Docker is accessible and containers are running.
-          </div>
-        ) : (
+        <ResourceBoundary
+          loading={loading && containers.length === 0}
+          errored={!!error && containers.length === 0}
+          empty={containers.length === 0}
+          loadingSlot={
+            <PageLoading className="flex items-center gap-2 py-8 text-zinc-500">
+              Loading containers...
+            </PageLoading>
+          }
+          errorSlot={<PageError>{error}</PageError>}
+          emptySlot={
+            <div className="rounded-md bg-zinc-50 px-4 py-8 text-center text-sm text-zinc-500">
+              No containers found. Make sure Docker is accessible and containers are running.
+            </div>
+          }
+        >
+          <StaleDataBanner error={error} lastRefresh={lastSuccessAt} timezone={tz} className="mb-3" />
           <div className="overflow-x-auto rounded-md border border-zinc-200">
             <table className="min-w-full divide-y divide-zinc-200">
               <thead className="bg-zinc-50">
                 <tr>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Name</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Image</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Ports</th>
+                  <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Networks</th>
+                  <th scope="col" className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Action</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-100 bg-white">
@@ -201,7 +188,7 @@ export default function Discover() {
               </tbody>
             </table>
           </div>
-        )}
+        </ResourceBoundary>
       </div>
     </div>
   )

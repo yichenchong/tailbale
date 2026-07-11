@@ -1,522 +1,103 @@
-"""Tests for health checker subchecks and aggregation."""
+"""Aggregate health status tests."""
 
-import json
-from unittest.mock import MagicMock, patch
+import pytest
 
-import docker.errors
+from app.health.health_checker import aggregate_status
+from app.health.status_policy import phase_level, phase_rank, transition_verb
 
-from app.health.health_checker import aggregate_status, run_health_checks
-from app.models.dns_record import DnsRecord
-from app.models.service import Service
-from app.models.service_status import ServiceStatus
-
-
-def _create_service(db, **overrides):
-    defaults = {
-        "name": "TestApp", "upstream_container_id": "abc123",
-        "upstream_container_name": "testapp", "upstream_scheme": "http",
-        "upstream_port": 80, "hostname": "testapp.example.com",
-        "base_domain": "example.com", "edge_container_name": "edge_testapp",
-        "network_name": "edge_net_testapp", "ts_hostname": "edge-testapp",
-    }
-    defaults.update(overrides)
-    svc = Service(**defaults)
-    db.add(svc)
-    db.flush()
-    db.add(ServiceStatus(service_id=svc.id, phase="pending"))
-    db.commit()
-    return svc
-
-
-def _create_service_via_api(client, **overrides):
-    """Create a service through the API."""
-    body = {
-        "name": "App",
-        "upstream_container_id": "abc123",
-        "upstream_container_name": "app",
-        "upstream_scheme": "http",
-        "upstream_port": 80,
-        "hostname": "app.example.com",
-        "base_domain": "example.com",
-    }
-    body.update(overrides)
-    return client.post("/api/services", json=body)
+PASSING_CHECKS = {
+    "upstream_container_present": True,
+    "upstream_network_connected": True,
+    "edge_container_present": True,
+    "edge_container_running": True,
+    "tailscale_ready": True,
+    "tailscale_ip_present": True,
+    "cert_present": True,
+    "cert_not_expiring": True,
+    "dns_record_present": True,
+    "dns_matches_ip": True,
+    "caddy_config_present": True,
+    "https_probe_ok": True,
+}
 
 
 class TestAggregateStatus:
     def test_all_pass(self):
-        checks = {
-            "upstream_container_present": True, "upstream_network_connected": True,
-            "edge_container_present": True, "edge_container_running": True,
-            "tailscale_ready": True, "tailscale_ip_present": True,
-            "cert_present": True, "cert_not_expiring": True,
-            "dns_record_present": True, "dns_matches_ip": True,
-            "caddy_config_present": True,
-        }
-        assert aggregate_status(checks) == "healthy"
+        assert aggregate_status(PASSING_CHECKS) == "healthy"
 
     def test_critical_fail_gives_error(self):
         checks = {"edge_container_present": False, "edge_container_running": False}
         assert aggregate_status(checks) == "error"
 
     def test_warning_check_fails(self):
-        checks = {
-            "edge_container_present": True, "edge_container_running": True,
-            "tailscale_ip_present": True, "cert_present": True,
-            "cert_not_expiring": False,
-        }
+        checks = PASSING_CHECKS | {"cert_not_expiring": False}
         assert aggregate_status(checks) == "warning"
 
     def test_critical_overrides_warning(self):
         checks = {
-            "edge_container_present": True, "edge_container_running": True,
+            "edge_container_present": True,
+            "edge_container_running": True,
             "tailscale_ip_present": False,
-            "cert_present": True, "cert_not_expiring": False,
+            "cert_present": True,
+            "cert_not_expiring": False,
         }
         assert aggregate_status(checks) == "error"
+
+    @pytest.mark.parametrize(
+        "failed_check",
+        [
+            "upstream_container_present",
+            "upstream_network_connected",
+            "tailscale_ready",
+            "caddy_config_present",
+        ],
+    )
+    def test_operational_failures_are_errors(self, failed_check):
+        checks = PASSING_CHECKS | {failed_check: False}
+        assert aggregate_status(checks) == "error"
+
+    def test_dns_record_absent_is_warning(self):
+        checks = PASSING_CHECKS | {"dns_record_present": False}
+        assert aggregate_status(checks) == "warning"
 
     def test_empty_checks_healthy(self):
         assert aggregate_status({}) == "healthy"
 
 
-class TestRunHealthChecks:
-    @patch("app.health.health_checker._get_docker_client")
-    def test_all_healthy(self, mock_docker, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-
-        status = db_session.get(ServiceStatus, svc.id)
-        status.tailscale_ip = "100.64.0.1"
-
-        dns = DnsRecord(service_id=svc.id, hostname=svc.hostname, record_id="r1", value="100.64.0.1")
-        db_session.add(dns)
-        db_session.commit()
-
-        generated_dir = tmp_data_dir / "generated"
-        certs_dir = tmp_data_dir / "certs"
-
-        (generated_dir / svc.id).mkdir(parents=True, exist_ok=True)
-        (generated_dir / svc.id / "Caddyfile").write_text("test")
-
-        (certs_dir / svc.hostname).mkdir(parents=True, exist_ok=True)
-        (certs_dir / svc.hostname / "fullchain.pem").write_text("cert")
-        (certs_dir / svc.hostname / "privkey.pem").write_text("key")
-
-        client = mock_docker.return_value
-
-        upstream_container = MagicMock()
-        upstream_container.attrs = {"NetworkSettings": {"Networks": {"edge_net_testapp": {}}}}
-
-        edge_container = MagicMock()
-        edge_container.status = "running"
-
-        ts_output = json.dumps({"BackendState": "Running", "Self": {"TailscaleIPs": ["100.64.0.1"]}})
-        exec_result = MagicMock()
-        exec_result.exit_code = 0
-        exec_result.output = ts_output.encode()
-        edge_container.exec_run.return_value = exec_result
-
-        def get_container(name):
-            if name == svc.upstream_container_id:
-                return upstream_container
-            if name == svc.edge_container_name:
-                return edge_container
-            raise Exception(f"Not found: {name}")
-
-        client.containers.get.side_effect = get_container
-
-        with patch("app.health.health_checker._check_cert_not_expiring", return_value=True):
-            checks = run_health_checks(db_session, svc, generated_dir, certs_dir)
-
-        assert checks["upstream_container_present"] is True
-        assert checks["upstream_network_connected"] is True
-        assert checks["edge_container_present"] is True
-        assert checks["edge_container_running"] is True
-        assert checks["tailscale_ready"] is True
-        assert checks["tailscale_ip_present"] is True
-        assert checks["cert_present"] is True
-        assert checks["dns_record_present"] is True
-        assert checks["dns_matches_ip"] is True
-        assert checks["caddy_config_present"] is True
-
-    @patch("app.health.health_checker._get_docker_client")
-    def test_missing_upstream(self, mock_docker, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        client = mock_docker.return_value
-        client.containers.get.side_effect = docker.errors.NotFound("not found")
-
-        checks = run_health_checks(
-            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
-        )
-        assert checks["upstream_container_present"] is False
-        assert checks["upstream_network_connected"] is False
-        assert checks["edge_container_present"] is False
-
-    @patch("app.health.health_checker._get_docker_client")
-    def test_edge_not_running(self, mock_docker, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        client = mock_docker.return_value
-
-        upstream = MagicMock()
-        upstream.attrs = {"NetworkSettings": {"Networks": {}}}
-
-        edge = MagicMock()
-        edge.status = "exited"
-
-        def get_container(name):
-            if name == svc.upstream_container_id:
-                return upstream
-            if name == svc.edge_container_name:
-                return edge
-            raise Exception("not found")
-
-        client.containers.get.side_effect = get_container
-
-        checks = run_health_checks(
-            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
-        )
-        assert checks["edge_container_present"] is True
-        assert checks["edge_container_running"] is False
-        assert checks["tailscale_ready"] is False
-        assert checks["tailscale_ip_present"] is False
-
-    def test_docker_unavailable(self, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-
-        with patch("app.health.health_checker._get_docker_client", side_effect=Exception("Docker down")):
-            checks = run_health_checks(
-                db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
-            )
-
-        assert checks["upstream_container_present"] is False
-        assert checks["edge_container_present"] is False
-        assert checks["edge_container_running"] is False
-
-    @patch("app.health.health_checker._get_docker_client")
-    def test_no_dns_record(self, mock_docker, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("nf")
-
-        checks = run_health_checks(
-            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
-        )
-        assert checks["dns_record_present"] is False
-        assert checks["dns_matches_ip"] is False
-
-    @patch("app.health.health_checker._get_docker_client")
-    def test_caddy_config_missing(self, mock_docker, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("nf")
-
-        checks = run_health_checks(
-            db_session, svc, tmp_data_dir / "generated", tmp_data_dir / "certs"
-        )
-        assert checks["caddy_config_present"] is False
-
-
-# ---------------------------------------------------------------------------
-# Cloudflare import fix
-# ---------------------------------------------------------------------------
-
-
-class TestCloudflareImportFix:
-    """Verify the health-check-full endpoint imports from cloudflare_adapter."""
-
-    def test_import_path_is_correct(self):
-        from app.adapters.cloudflare_adapter import find_record
-        assert callable(find_record)
-
-    @patch("app.health.health_checker.run_health_checks")
-    @patch("app.secrets.read_secret", return_value="cf-token-123")
-    @patch("app.adapters.cloudflare_adapter.find_record")
-    def test_health_check_full_calls_cloudflare_adapter(
-        self, mock_find, mock_secret, mock_checks, client, db_session
-    ):
-        from app.settings_store import set_setting
-
-        mock_checks.return_value = {"edge_container_present": True}
-        mock_find.return_value = {"content": "100.64.0.1"}
-
-        set_setting(db_session, "cf_zone_id", "zone123")
-        db_session.commit()
-
-        svc_id = _create_service_via_api(client).json()["id"]
-        resp = client.post(f"/api/services/{svc_id}/health-check-full")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "cf_record_exists" in data["extended"]
-        assert data["extended"]["cf_record_exists"] is True
-
-
-# ---------------------------------------------------------------------------
-# HTTPS probe in health checks
-# ---------------------------------------------------------------------------
-
-
-class TestHttpsProbeHealthCheck:
-    """Health checker should include an https_probe_ok subcheck."""
-
-    def test_https_probe_in_check_keys(self, db_session):
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="test", upstream_scheme="http",
-            upstream_port=80, hostname="test.example.com",
-            base_domain="example.com", edge_container_name="edge_test",
-            network_name="edge_net_test", ts_hostname="edge-test",
-        )
-        db_session.add(svc)
-        db_session.flush()
-        db_session.add(ServiceStatus(service_id=svc.id, phase="healthy"))
-        db_session.commit()
-
-        with patch("app.health.health_checker._get_docker_client") as mock_dc:
-            mock_client = MagicMock()
-            mock_dc.return_value = mock_client
-            mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
-            checks = run_health_checks(db_session, svc, "/tmp/gen", "/tmp/certs")
-
-        assert "https_probe_ok" in checks
-
-    def test_https_probe_false_when_no_ip(self, db_session, caplog):
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="t.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-        assert _check_https_probe(svc, None, "/tmp/certs") is False
-        assert "missing Tailscale IP" in caplog.text
-
-    def test_https_probe_false_when_no_client(self, caplog):
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="t.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=None) is False
-        assert "Docker client unavailable" in caplog.text
-
-    def test_https_probe_success(self):
-        """Probe succeeds when curl exits 0 and returns a 2xx status code."""
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="probe.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "running"
-        # curl exits 0 and writes HTTP status code via -w "%{http_code}"
-        mock_container.exec_run.return_value = (0, b"200")
-        mock_client.containers.get.return_value = mock_container
-
-        result = _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
-        assert result is True
-        mock_client.containers.get.assert_called_once_with("e")
-
-    def test_https_probe_runs_curl_in_edge_container(self):
-        """Probe execs curl inside the edge container with the correct Host header."""
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="tls.example.com",
-            base_domain="example.com", edge_container_name="edge_tls",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "running"
-        mock_container.exec_run.return_value = (0, b"200")
-        mock_client.containers.get.return_value = mock_container
-
-        _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client)
-
-        mock_container.exec_run.assert_called_once()
-        cmd = mock_container.exec_run.call_args[0][0]
-        assert "curl" in cmd
-        assert "https://localhost:443/" in cmd
-        assert "tls.example.com" in " ".join(cmd)
-
-    def test_https_probe_5xx_is_failure(self, caplog):
-        """curl returning a 5xx status code means the upstream is broken."""
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="fail.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "running"
-        mock_container.exec_run.return_value = (0, b"502")
-        mock_client.containers.get.return_value = mock_container
-
-        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
-        assert "upstream returned 5xx" in caplog.text
-        assert "http_code=502" in caplog.text
-
-    def test_https_probe_4xx_is_success(self):
-        """4xx from upstream (e.g. auth required) still means Caddy is serving."""
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="auth.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "running"
-        # curl exits 0 and returns 401 — Caddy is serving, upstream requires auth
-        mock_container.exec_run.return_value = (0, b"401")
-        mock_client.containers.get.return_value = mock_container
-
-        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is True
-
-    def test_https_probe_connection_error_is_failure(self, caplog):
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="err.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "running"
-        mock_container.exec_run.return_value = (7, b"curl: (7) Failed to connect")
-        mock_client.containers.get.return_value = mock_container
-
-        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
-        assert "curl returned non-zero" in caplog.text
-        assert "exit_code=7" in caplog.text
-
-    def test_https_probe_container_not_running(self, caplog):
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="t.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "restarting"
-        mock_client.containers.get.return_value = mock_container
-
-        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
-        assert "edge container not running" in caplog.text
-        assert "container_status=restarting" in caplog.text
-
-    def test_https_probe_no_response_is_failure(self, caplog):
-        """curl returning '000' (no HTTP response received) fails the probe."""
-        from app.health.health_checker import _check_https_probe
-
-        svc = Service(
-            name="Test", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="t.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-
-        mock_client = MagicMock()
-        mock_container = MagicMock()
-        mock_container.status = "running"
-        mock_container.exec_run.return_value = (0, b"000")
-        mock_client.containers.get.return_value = mock_container
-
-        assert _check_https_probe(svc, "100.64.0.1", "/tmp/certs", client=mock_client) is False
-        assert "no HTTP response received" in caplog.text
-        assert "http_code=000" in caplog.text
-
-    def test_https_probe_is_warning_check(self):
-        from app.health.health_checker import CRITICAL_CHECKS, WARNING_CHECKS
-        assert "https_probe_ok" in WARNING_CHECKS
-        assert "https_probe_ok" not in CRITICAL_CHECKS
-
-    def test_docker_unavailable_includes_probe(self, db_session, tmp_path):
-        svc = Service(
-            name="T", upstream_container_id="c1",
-            upstream_container_name="t", upstream_scheme="http",
-            upstream_port=80, hostname="t.example.com",
-            base_domain="example.com", edge_container_name="e",
-            network_name="n", ts_hostname="ts",
-        )
-        db_session.add(svc)
-        db_session.flush()
-        db_session.add(ServiceStatus(service_id=svc.id, phase="pending"))
-        db_session.commit()
-
-        gen_dir = str(tmp_path / "gen")
-        certs_dir = str(tmp_path / "certs")
-
-        with patch(
-            "app.health.health_checker._get_docker_client",
-            side_effect=Exception("no docker"),
-        ):
-            checks = run_health_checks(db_session, svc, gen_dir, certs_dir)
-
-        assert "https_probe_ok" in checks
-        assert checks["https_probe_ok"] is False
-
-
-# ---------------------------------------------------------------------------
-# Full health-check endpoint
-# ---------------------------------------------------------------------------
-
-
-class TestFullHealthCheck:
-    """Test the health-check-full API endpoint."""
-
-    def _create(self, client):
-        body = {
-            "name": "App", "upstream_container_id": "abc123",
-            "upstream_container_name": "app", "upstream_scheme": "http",
-            "upstream_port": 80, "hostname": "app.example.com",
-            "base_domain": "example.com",
-        }
-        return client.post("/api/services", json=body)
-
-    @patch("app.health.health_checker.run_health_checks")
-    @patch("app.secrets.read_secret", return_value=None)
-    def test_full_health_check_without_cloudflare(self, mock_secret, mock_checks, client):
-        mock_checks.return_value = {"edge_container_present": True}
-        svc_id = self._create(client).json()["id"]
-        resp = client.post(f"/api/services/{svc_id}/health-check-full")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "checks" in data
-        assert "extended" in data
-        assert data["extended"]["cf_error"]
-
-    def test_full_health_check_404_for_missing(self, client):
-        resp = client.post("/api/services/svc_nonexistent/health-check-full")
-        assert resp.status_code == 404
+class TestStatusPolicy:
+    def test_phase_rank_orders_health_phases(self):
+        assert phase_rank("healthy") < phase_rank("warning") < phase_rank("error")
+
+    def test_phase_rank_unknown_ranks_worst(self):
+        assert phase_rank("pending") == 3
+        assert phase_rank("error") < phase_rank("pending")
+
+    @pytest.mark.parametrize(
+        ("phase", "expected"),
+        [("healthy", "info"), ("warning", "warning"), ("error", "error")],
+    )
+    def test_phase_level_maps_health_phases(self, phase, expected):
+        assert phase_level(phase) == expected
+
+    def test_phase_level_unknown_defaults_to_error(self):
+        assert phase_level("pending") == "error"
+
+    def test_phase_level_unknown_override(self):
+        assert phase_level("pending", unknown="warning") == "warning"
+
+    def test_phase_level_error_ignores_unknown_override(self):
+        # error is a KNOWN phase and must map to "error" regardless of the
+        # unknown fallback; probe_retry passes unknown="warning". A regression
+        # that returned the fallback before the explicit error branch would break.
+        assert phase_level("error", unknown="warning") == "error"
+
+    def test_transition_verb_improved_degraded_changed(self):
+        assert transition_verb("error", "healthy") == "improved"
+        assert transition_verb("healthy", "error") == "degraded"
+        assert transition_verb("warning", "warning") == "changed"
+
+    def test_transition_across_unknown_phase_uses_worst_rank(self):
+        # non-health phases rank worst, so LEAVING one reads as an improvement and
+        # ENTERING one as a degradation (historical _UNKNOWN_PHASE_RANK behavior).
+        assert transition_verb("pending", "error") == "improved"
+        assert transition_verb("error", "pending") == "degraded"

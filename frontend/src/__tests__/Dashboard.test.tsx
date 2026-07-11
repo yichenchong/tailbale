@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, fireEvent } from "@testing-library/react"
-import { MemoryRouter } from "react-router-dom"
+import { screen, waitFor, fireEvent, act } from "@testing-library/react"
+import { renderRoute, jsonOk } from "./testkit"
 
 const mockSummary = {
   services: { total: 5, healthy: 3, warning: 1, error: 1 },
@@ -45,22 +45,21 @@ beforeEach(() => {
   vi.restoreAllMocks()
 })
 
-function mockFetch(data: unknown) {
-  return vi.fn().mockResolvedValue({
-    ok: true,
-    json: () => Promise.resolve(data),
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
   })
+  return { promise, resolve, reject }
 }
 
 describe("Dashboard page", () => {
   it("shows loading state", async () => {
     vi.stubGlobal("fetch", vi.fn().mockReturnValue(new Promise(() => {})))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     expect(screen.getByText("Loading dashboard...")).toBeInTheDocument()
   })
 
@@ -74,24 +73,16 @@ describe("Dashboard page", () => {
       })
     )
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Internal server error")).toBeInTheDocument()
     })
   })
 
   it("renders summary cards with correct counts", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Total Services")).toBeInTheDocument()
     })
@@ -105,13 +96,9 @@ describe("Dashboard page", () => {
   })
 
   it("renders expiring certificates section", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Upcoming Cert Expiries")).toBeInTheDocument()
     })
@@ -122,28 +109,20 @@ describe("Dashboard page", () => {
 
   it("shows empty certs message when none expiring", async () => {
     const data = { ...mockSummary, expiring_certs: [] }
-    vi.stubGlobal("fetch", mockFetch(data))
+    vi.stubGlobal("fetch", jsonOk(data))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(
-        screen.getByText("No certificates expiring within 30 days.")
+        screen.getByText("No certificates approaching expiry.")
       ).toBeInTheDocument()
     })
   })
 
   it("renders recent errors section", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Recent Errors")).toBeInTheDocument()
     })
@@ -152,26 +131,62 @@ describe("Dashboard page", () => {
 
   it("shows empty errors message when no errors", async () => {
     const data = { ...mockSummary, recent_errors: [] }
-    vi.stubGlobal("fetch", mockFetch(data))
+    vi.stubGlobal("fetch", jsonOk(data))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("No recent errors.")).toBeInTheDocument()
     })
   })
 
-  it("renders recent events timeline", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+  it("links to all events when more than eight recent errors are truncated", async () => {
+    // The backend returns up to 20 recent errors but the panel renders only 8;
+    // without a "View all events" affordance the extra errors vanish silently,
+    // unlike the sibling Recent Events panel. mockSummary keeps recent_events
+    // short (2), so the single "View all events" link must come from this panel.
+    const errors = Array.from({ length: 9 }, (_, i) => ({
+      id: `err_${i}`,
+      service_id: null,
+      kind: "reconcile_failed",
+      message: `Error number ${i}`,
+      created_at: new Date().toISOString(),
+    }))
+    vi.stubGlobal("fetch", jsonOk({ ...mockSummary, recent_errors: errors }))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Recent Errors")).toBeInTheDocument()
+    })
+    // Only eight rows render; the ninth is truncated...
+    expect(screen.getByText("Error number 0")).toBeInTheDocument()
+    expect(screen.getByText("Error number 7")).toBeInTheDocument()
+    expect(screen.queryByText("Error number 8")).not.toBeInTheDocument()
+    // ...so an honest affordance links to the full log.
+    const link = screen.getByRole("link", { name: "View all events" })
+    expect(link).toHaveAttribute("href", "/events")
+  })
+
+  it("omits the truncation link when eight or fewer recent errors fit", async () => {
+    const errors = Array.from({ length: 8 }, (_, i) => ({
+      id: `err_${i}`,
+      service_id: null,
+      kind: "reconcile_failed",
+      message: `Error number ${i}`,
+      created_at: new Date().toISOString(),
+    }))
+    vi.stubGlobal("fetch", jsonOk({ ...mockSummary, recent_errors: errors }))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Error number 7")).toBeInTheDocument()
+    })
+    expect(screen.queryByText("View all events")).not.toBeInTheDocument()
+  })
+
+  it("renders recent events timeline", async () => {
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Recent Events")).toBeInTheDocument()
     })
@@ -183,14 +198,53 @@ describe("Dashboard page", () => {
     ).toBeInTheDocument()
   })
 
-  it("shows level badges on events", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+  it("links to all events when more than ten recent events are truncated", async () => {
+    // The Recent Events panel renders only the first 10 events; the sibling of
+    // the recent-errors truncation. mockSummary keeps recent_errors short (1),
+    // so the single "View all events" link must come from this panel.
+    const events = Array.from({ length: 11 }, (_, i) => ({
+      id: `evt_${i}`,
+      service_id: null,
+      kind: "reconcile_completed",
+      level: "info",
+      message: `Event number ${i}`,
+      created_at: new Date().toISOString(),
+    }))
+    vi.stubGlobal("fetch", jsonOk({ ...mockSummary, recent_events: events }))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Event number 9")).toBeInTheDocument()
+    })
+    // Only the first ten render; the eleventh is truncated behind the link.
+    expect(screen.queryByText("Event number 10")).not.toBeInTheDocument()
+    const link = screen.getByRole("link", { name: "View all events" })
+    expect(link).toHaveAttribute("href", "/events")
+  })
+
+  it("omits the recent-events truncation link when ten or fewer events fit", async () => {
+    const events = Array.from({ length: 10 }, (_, i) => ({
+      id: `evt_${i}`,
+      service_id: null,
+      kind: "reconcile_completed",
+      level: "info",
+      message: `Event number ${i}`,
+      created_at: new Date().toISOString(),
+    }))
+    // recent_errors also short (1) so neither panel shows a truncation link.
+    vi.stubGlobal("fetch", jsonOk({ ...mockSummary, recent_events: events }))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Event number 9")).toBeInTheDocument()
+    })
+    expect(screen.queryByText("View all events")).not.toBeInTheDocument()
+  })
+
+  it("shows level badges on events", async () => {
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("info")).toBeInTheDocument()
     })
@@ -199,26 +253,18 @@ describe("Dashboard page", () => {
 
   it("shows empty events message when no events", async () => {
     const data = { ...mockSummary, recent_events: [] }
-    vi.stubGlobal("fetch", mockFetch(data))
+    vi.stubGlobal("fetch", jsonOk(data))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("No events yet.")).toBeInTheDocument()
     })
   })
 
   it("renders service links for expiring certs", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText(/Nextcloud/)).toBeInTheDocument()
     })
@@ -227,40 +273,28 @@ describe("Dashboard page", () => {
   })
 
   it("shows Refresh button", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Refresh")).toBeInTheDocument()
     })
   })
 
   it("shows last refresh timestamp after load", async () => {
-    vi.stubGlobal("fetch", mockFetch(mockSummary))
+    vi.stubGlobal("fetch", jsonOk(mockSummary))
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText(/Updated/)).toBeInTheDocument()
     })
   })
 
   it("reloads data when Refresh button clicked", async () => {
-    const fetchMock = mockFetch(mockSummary)
+    const fetchMock = jsonOk(mockSummary)
     vi.stubGlobal("fetch", fetchMock)
     const { default: Dashboard } = await import("@/pages/Dashboard")
-    render(
-      <MemoryRouter>
-        <Dashboard />
-      </MemoryRouter>
-    )
+    renderRoute(<Dashboard />)
     await waitFor(() => {
       expect(screen.getByText("Refresh")).toBeInTheDocument()
     })
@@ -271,5 +305,203 @@ describe("Dashboard page", () => {
     await waitFor(() => {
       expect(fetchMock.mock.calls.length).toBeGreaterThan(initialCallCount)
     })
+  })
+
+  it("keeps the newest dashboard refresh when an older request finishes later", async () => {
+    const initialSummary = {
+      ...mockSummary,
+      services: { total: 1, healthy: 0, warning: 0, error: 0 },
+      expiring_certs: [],
+      recent_errors: [],
+      recent_events: [],
+    }
+    const staleSummary = {
+      ...initialSummary,
+      services: { total: 7, healthy: 0, warning: 0, error: 0 },
+    }
+    const newestSummary = {
+      ...initialSummary,
+      services: { total: 42, healthy: 0, warning: 0, error: 0 },
+    }
+    const staleRefresh = deferred<{ ok: boolean; json: () => Promise<unknown> }>()
+    const intervalCallbacks: Array<() => void> = []
+    vi.spyOn(globalThis, "setInterval").mockImplementation((handler: TimerHandler) => {
+      if (typeof handler === "function") intervalCallbacks.push(handler as () => void)
+      return 1 as unknown as ReturnType<typeof setInterval>
+    })
+    vi.spyOn(globalThis, "clearInterval").mockImplementation(() => undefined)
+
+    let dashboardCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ general: { timezone: "UTC" } }) })
+      }
+      dashboardCalls++
+      if (dashboardCalls === 1) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(initialSummary) })
+      }
+      if (dashboardCalls === 2) {
+        return staleRefresh.promise
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(newestSummary) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+
+    await waitFor(() => {
+      expect(screen.getByText("Refresh")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Refresh"))
+    await act(async () => {
+      intervalCallbacks[0]()
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText("42")).toBeInTheDocument()
+    })
+
+    await act(async () => {
+      staleRefresh.resolve({ ok: true, json: () => Promise.resolve(staleSummary) })
+      await staleRefresh.promise
+      await Promise.resolve()
+    })
+
+    expect(screen.getByText("42")).toBeInTheDocument()
+    expect(screen.queryByText("7")).not.toBeInTheDocument()
+  })
+
+  it("computes expiring cert days in UTC for offset-less timestamps", async () => {
+    // Backend expires_at serializes naive (no offset) but means UTC. On a
+    // +09:00 host a raw `new Date()` parse loses ~9h and drops the day count.
+    const originalTz = process.env.TZ
+    process.env.TZ = "Asia/Tokyo"
+    try {
+      const naive = new Date(Date.now() + 10.25 * 86400000).toISOString().replace("Z", "")
+      const data = {
+        ...mockSummary,
+        expiring_certs: [
+          { service_id: "svc_1", service_name: "Nextcloud", hostname: "nextcloud.example.com", expires_at: naive },
+        ],
+      }
+      vi.stubGlobal("fetch", jsonOk(data))
+      const { default: Dashboard } = await import("@/pages/Dashboard")
+      renderRoute(<Dashboard />)
+      await waitFor(() => {
+        expect(screen.getByText("11d left")).toBeInTheDocument()
+      })
+      expect(screen.queryByText("10d left")).not.toBeInTheDocument()
+    } finally {
+      if (originalTz === undefined) delete process.env.TZ
+      else process.env.TZ = originalTz
+    }
+  })
+
+  it("labels a cert that lapsed within the last 24h as Expired", async () => {
+    // diffMs is negative but Math.ceil(diffMs/day) === 0 for the first 24h after
+    // expiry; the label must read "Expired", not "0d left".
+    const justExpired = new Date(Date.now() - 12 * 3600000).toISOString()
+    const data = {
+      ...mockSummary,
+      expiring_certs: [
+        { service_id: "svc_1", service_name: "Nextcloud", hostname: "nextcloud.example.com", expires_at: justExpired },
+      ],
+    }
+    vi.stubGlobal("fetch", jsonOk(data))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("Expired")).toBeInTheDocument()
+    })
+    expect(screen.queryByText("0d left")).not.toBeInTheDocument()
+  })
+
+  it("renders a sentinel instead of NaN for an unparseable cert date", async () => {
+    // Regression: a bad/absent expires_at made Math.ceil(NaN) render "NaNd left".
+    // Mirror lib/certStatus.ts and render the em-dash sentinel instead.
+    const data = {
+      ...mockSummary,
+      expiring_certs: [
+        { service_id: "svc_1", service_name: "Nextcloud", hostname: "nextcloud.example.com", expires_at: "garbage" },
+      ],
+    }
+    vi.stubGlobal("fetch", jsonOk(data))
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText(/Nextcloud/)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/NaN/)).not.toBeInTheDocument()
+    expect(screen.getByText("\u2014")).toBeInTheDocument()
+  })
+
+  it("keeps prior data visible when a refresh fails", async () => {
+    // A transient poll/refresh failure must not blank the dashboard: data is set
+    // only on success, and the full error screen is reserved for !data.
+    const initial = { ...mockSummary, services: { total: 13, healthy: 0, warning: 0, error: 0 } }
+    let dashboardCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ general: { timezone: "UTC" } }) })
+      }
+      dashboardCalls++
+      if (dashboardCalls === 1) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(initial) })
+      }
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ detail: "refresh failed" }) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("13")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Refresh"))
+    await waitFor(() => {
+      expect(dashboardCalls).toBeGreaterThan(1)
+    })
+
+    // Prior data persists; the error never takes over the page.
+    expect(screen.getByText("13")).toBeInTheDocument()
+    expect(screen.queryByText("refresh failed")).not.toBeInTheDocument()
+  })
+
+  it("announces a stale-data warning when a refresh fails while data is on screen", async () => {
+    // A polling page that silently swallows a failed poll presents stale data as
+    // current. Parity with Discover/Services: keep the last-good data AND show a
+    // polite live-region (role="status") notice so the staleness is announced.
+    const initial = { ...mockSummary, services: { total: 13, healthy: 0, warning: 0, error: 0 } }
+    let dashboardCalls = 0
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ general: { timezone: "UTC" } }) })
+      }
+      dashboardCalls++
+      if (dashboardCalls === 1) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(initial) })
+      }
+      return Promise.resolve({ ok: false, status: 500, json: () => Promise.resolve({ detail: "refresh failed" }) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: Dashboard } = await import("@/pages/Dashboard")
+    renderRoute(<Dashboard />)
+    await waitFor(() => {
+      expect(screen.getByText("13")).toBeInTheDocument()
+    })
+    // No warning while the data is fresh.
+    expect(screen.queryByText(/Couldn't refresh/)).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByText("Refresh"))
+
+    // The stale-data warning surfaces in a polite live region; data persists and
+    // the raw error text never leaks into the page.
+    await waitFor(() => {
+      expect(screen.getByRole("status")).toHaveTextContent(/Couldn't refresh/)
+    })
+    expect(screen.getByText("13")).toBeInTheDocument()
+    expect(screen.queryByText("refresh failed")).not.toBeInTheDocument()
   })
 })

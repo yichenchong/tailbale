@@ -1,67 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
-import { render, screen, waitFor, fireEvent } from "@testing-library/react"
+import { render, screen, waitFor, fireEvent, act } from "@testing-library/react"
 import { MemoryRouter } from "react-router-dom"
-
-const mockSettings = {
-  general: {
-    base_domain: "example.com",
-    acme_email: "admin@example.com",
-    reconcile_interval_seconds: 60,
-    cert_renewal_window_days: 30,
-    timezone: "UTC",
-    developer_mode: false,
-  },
-  cloudflare: { zone_id: "zone123", token_configured: true },
-  tailscale: {
-    auth_key_configured: true,
-    api_key_configured: false,
-    control_url: "https://controlplane.tailscale.com",
-    default_ts_hostname_prefix: "edge",
-  },
-  docker: { socket_path: "unix:///var/run/docker.sock" },
-  paths: {
-    generated_root: "data/generated",
-    cert_root: "data/certs",
-    tailscale_state_root: "data/tailscale",
-  },
-  setup_complete: true,
-}
+import { cachedTimezone, _resetTimezoneCache } from "@/lib/useTimezone"
+import { mockSettings, mockFetch } from "./settingsTestUtils"
 
 beforeEach(() => {
   vi.restoreAllMocks()
 })
-
-/** Builds a fetch mock that returns settings for /settings, version for /version, and optional overrides. */
-function mockFetch(data: unknown = mockSettings) {
-  return vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
-    if (String(url).includes("/version")) {
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ version: "1.2.3" }),
-      })
-    }
-    if (String(url).includes("/auth/change-password")) {
-      if (opts?.body) {
-        const body = JSON.parse(String(opts.body))
-        if (body.current_password === "wrongpassword") {
-          return Promise.resolve({
-            ok: false,
-            status: 401,
-            json: () => Promise.resolve({ detail: "Current password is incorrect" }),
-          })
-        }
-      }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({ ok: true }),
-      })
-    }
-    return Promise.resolve({
-      ok: true,
-      json: () => Promise.resolve(data),
-    })
-  })
-}
 
 describe("SettingsPage", () => {
   it("shows loading state", async () => {
@@ -110,87 +55,6 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Settings")).toBeInTheDocument()
     })
     expect(screen.getByText("Developer")).toBeInTheDocument()
-  })
-
-  it("saves developer mode from General tab", async () => {
-    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
-      if (String(url).includes("/version")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ version: "1.2.3" }),
-        })
-      }
-      if (opts?.method === "PUT" && String(url).includes("/settings/general")) {
-        const body = JSON.parse(String(opts.body))
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({
-            ...mockSettings,
-            general: { ...mockSettings.general, developer_mode: body.developer_mode },
-          }),
-        })
-      }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve(mockSettings),
-      })
-    })
-    vi.stubGlobal("fetch", fetchMock)
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Developer Mode")).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByRole("checkbox"))
-    fireEvent.click(screen.getByText("Save"))
-
-    await waitFor(() => {
-      expect(screen.getByText("Developer")).toBeInTheDocument()
-    })
-    const putCall = fetchMock.mock.calls.find(
-      (c: unknown[]) =>
-        typeof c[1] === "object" &&
-        (c[1] as RequestInit).method === "PUT"
-    )
-    expect(putCall).toBeDefined()
-    expect(JSON.parse(String((putCall![1] as RequestInit).body))).toMatchObject({ developer_mode: true })
-
-  })
-
-  it("shows General tab fields by default", async () => {
-    vi.stubGlobal("fetch", mockFetch())
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Base Domain")).toBeInTheDocument()
-    })
-    expect(screen.getByText("ACME Email")).toBeInTheDocument()
-    expect(screen.getByText("Reconcile Interval (seconds)")).toBeInTheDocument()
-    expect(screen.getByText("Cert Renewal Window (days)")).toBeInTheDocument()
-    expect(screen.getByDisplayValue("example.com")).toBeInTheDocument()
-    expect(screen.getByDisplayValue("admin@example.com")).toBeInTheDocument()
-  })
-
-  it("has Save button on General tab", async () => {
-    vi.stubGlobal("fetch", mockFetch())
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Save")).toBeInTheDocument()
-    })
   })
 
   it("switches to Cloudflare tab", async () => {
@@ -274,83 +138,26 @@ describe("SettingsPage", () => {
     expect(screen.getByDisplayValue("data/tailscale")).toBeInTheDocument()
   })
 
-  it("shows Not set when secrets not configured", async () => {
-    const noSecrets = {
-      ...mockSettings,
-      cloudflare: { zone_id: "", token_configured: false },
-      tailscale: {
-        ...mockSettings.tailscale,
-        auth_key_configured: false,
-      },
-    }
-    vi.stubGlobal("fetch", mockFetch(noSecrets))
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Settings")).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByText("Cloudflare"))
-    expect(screen.getByText("Not set")).toBeInTheDocument()
-  })
-
-  it("calls save on General tab Save click", async () => {
-    const fetchMock = mockFetch()
-    vi.stubGlobal("fetch", fetchMock)
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Save")).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByText("Save"))
-
-    await waitFor(() => {
-      // Should have called fetch for initial load + save
-      const calls = fetchMock.mock.calls
-      const putCall = calls.find(
-        (c: unknown[]) =>
-          typeof c[1] === "object" &&
-          (c[1] as RequestInit).method === "PUT"
-      )
-      expect(putCall).toBeDefined()
-      expect(String(putCall![0])).toContain("/settings/general")
-    })
-  })
-
-  it("shows test result on connection test", async () => {
-    let callCount = 0
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation(() => {
-        callCount++
-        if (callCount <= 2) {
-          if (callCount === 2) {
-            return Promise.resolve({
-              ok: true,
-              json: () => Promise.resolve({ version: "1.2.3" }),
-            })
-          }
-          return Promise.resolve({
-            ok: true,
-            json: () => Promise.resolve(mockSettings),
-          })
-        }
+  it("does not show a stale connection test result after switching tabs", async () => {
+    let resolveDockerTest: ((value: { ok: boolean; json: () => Promise<unknown> }) => void) | undefined
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/version")) {
         return Promise.resolve({
           ok: true,
-          json: () =>
-            Promise.resolve({ success: true, message: "Docker is reachable" }),
+          json: () => Promise.resolve({ version: "1.2.3" }),
         })
+      }
+      if (String(url).includes("/settings/test/docker")) {
+        return new Promise((resolve) => {
+          resolveDockerTest = resolve
+        })
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(mockSettings),
       })
-    )
+    })
+    vi.stubGlobal("fetch", fetchMock)
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
     render(
       <MemoryRouter>
@@ -363,31 +170,43 @@ describe("SettingsPage", () => {
 
     fireEvent.click(screen.getByText("Docker"))
     fireEvent.click(screen.getByText("Test Connection"))
+    fireEvent.click(screen.getByText("Cloudflare"))
+    resolveDockerTest?.({
+      ok: true,
+      json: () => Promise.resolve({ success: true, message: "Docker is reachable" }),
+    })
 
     await waitFor(() => {
-      expect(screen.getByText("Docker is reachable")).toBeInTheDocument()
+      expect(screen.getByRole("button", { name: "Test Connection" })).toBeInTheDocument()
     })
+    expect(screen.queryByText("Docker is reachable")).not.toBeInTheDocument()
   })
 
-  it("runs reset setup_complete only after confirmation", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true)
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
+  it("keeps saved settings when a stale load resolves afterwards (last writer wins)", async () => {
+    // Regression for the applySettingsUpdate stale-load guard. A save is the
+    // authoritative latest write: it bumps the load-sequence so any settings
+    // load still in flight (mount / future poll / refresh) is discarded instead
+    // of clobbering the freshly-saved values, and the server response — not the
+    // values typed locally — is what persists. Also verifies the timezone cache
+    // is synced from the saved response.
+    _resetTimezoneCache()
+    const savedSettings = {
+      ...mockSettings,
+      general: {
+        ...mockSettings.general,
+        base_domain: "saved.example.com",
+        timezone: "America/New_York",
+        developer_mode: true,
+      },
+    }
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
       if (String(url).includes("/version")) {
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ version: "1.2.3" }),
-        })
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: "1.0.0" }) })
       }
-      if (String(url).includes("/settings/developer/reset-setup-complete")) {
-        return new Promise(() => {})
+      if (opts?.method === "PUT" && String(url).includes("/settings/general")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(savedSettings) })
       }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          ...mockSettings,
-          general: { ...mockSettings.general, developer_mode: true },
-        }),
-      })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
     })
     vi.stubGlobal("fetch", fetchMock)
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
@@ -397,32 +216,44 @@ describe("SettingsPage", () => {
       </MemoryRouter>
     )
     await waitFor(() => {
-      expect(screen.getByText("Developer")).toBeInTheDocument()
+      expect(screen.getByDisplayValue("example.com")).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByText("Developer"))
-    fireEvent.click(screen.getByRole("button", { name: "Reset setup_complete" }))
+    // Type a local edit, then save: the server's response must win, not the typed value.
+    fireEvent.change(screen.getByDisplayValue("example.com"), { target: { value: "typed.example.com" } })
+    fireEvent.click(screen.getByText("Save"))
 
-    expect(confirm).toHaveBeenCalled()
-    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/settings/developer/reset-setup-complete"))).toBe(true)
+    await waitFor(() => {
+      expect(screen.getByDisplayValue("saved.example.com")).toBeInTheDocument()
+    })
+    expect(screen.queryByDisplayValue("typed.example.com")).not.toBeInTheDocument()
+    expect(screen.getByText("Developer")).toBeInTheDocument()
+    expect(cachedTimezone).toBe("America/New_York")
+
+    // Flush any pending microtasks: the saved values must persist (a stale load,
+    // had one been in flight, is discarded by the bumped load sequence).
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(screen.getByDisplayValue("saved.example.com")).toBeInTheDocument()
+    expect(cachedTimezone).toBe("America/New_York")
+    _resetTimezoneCache()
   })
+})
 
-  it("does not run developer reset when warning is cancelled", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false)
-    const fetchMock = vi.fn().mockImplementation((url: string) => {
+describe("SettingsPage error banner reset on tab change", () => {
+  it("clears a save error banner when switching to another tab", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
       if (String(url).includes("/version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: "1.2.3" }) })
+      }
+      if (opts?.method === "PUT" && String(url).includes("/settings/general")) {
         return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve({ version: "1.2.3" }),
+          ok: false,
+          status: 400,
+          json: () => Promise.resolve({ detail: "Base domain is required" }),
         })
       }
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({
-          ...mockSettings,
-          general: { ...mockSettings.general, developer_mode: true },
-        }),
-      })
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
     })
     vi.stubGlobal("fetch", fetchMock)
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
@@ -432,17 +263,138 @@ describe("SettingsPage", () => {
       </MemoryRouter>
     )
     await waitFor(() => {
-      expect(screen.getByText("Developer")).toBeInTheDocument()
+      expect(screen.getByText("Save")).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByText("Developer"))
-    fireEvent.click(screen.getByRole("button", { name: "Reset all" }))
+    fireEvent.click(screen.getByText("Save"))
+    await waitFor(() => {
+      expect(screen.getByText("Base domain is required")).toBeInTheDocument()
+    })
 
-    expect(confirm).toHaveBeenCalled()
-    expect(fetchMock.mock.calls.some((call) => String(call[0]).includes("/settings/developer/reset-all"))).toBe(false)
+    // Switching tabs must drop the stale banner (it referred to the General tab).
+    fireEvent.click(screen.getByText("Cloudflare"))
+    expect(screen.queryByText("Base domain is required")).not.toBeInTheDocument()
+  })
+})
+
+describe("SettingsPage connection-test scoping", () => {
+  it("keeps another tab's Test button enabled while one tab's test is in flight", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: "1.2.3" }) })
+      }
+      if (String(url).includes("/settings/test/docker")) {
+        return new Promise(() => {}) // Docker test hangs forever.
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Docker"))
+    fireEvent.click(screen.getByText("Test Connection"))
+    expect(screen.getByRole("button", { name: "Testing..." })).toBeDisabled()
+
+    // Switching tabs while Docker's test hangs must not disable Cloudflare's Test
+    // button — the busy flag is scoped per service, not global.
+    fireEvent.click(screen.getByText("Cloudflare"))
+    const cfTest = screen.getByRole("button", { name: "Test Connection" })
+    expect(cfTest).not.toBeDisabled()
+    expect(screen.queryByRole("button", { name: "Testing..." })).not.toBeInTheDocument()
   })
 
-  it("shows Account tab with password change form", async () => {
+  it("discards a late test result so it cannot overwrite a newer one", async () => {
+    let resolveDocker: ((v: { ok: boolean; json: () => Promise<unknown> }) => void) | undefined
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (String(url).includes("/version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: "1.2.3" }) })
+      }
+      if (String(url).includes("/settings/test/docker")) {
+        return new Promise((resolve) => { resolveDocker = resolve })
+      }
+      if (String(url).includes("/settings/test/cloudflare")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, message: "Cloudflare reachable" }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    // Start a slow Docker test, switch to Cloudflare, run a test that resolves first.
+    fireEvent.click(screen.getByText("Docker"))
+    fireEvent.click(screen.getByText("Test Connection"))
+    fireEvent.click(screen.getByText("Cloudflare"))
+    fireEvent.click(screen.getByText("Test Connection"))
+    await waitFor(() => {
+      expect(screen.getByText("Cloudflare reachable")).toBeInTheDocument()
+    })
+
+    // The stale Docker test resolving afterwards must not clobber the Cloudflare banner.
+    await act(async () => {
+      resolveDocker?.({ ok: true, json: () => Promise.resolve({ success: true, message: "Docker reachable" }) })
+      await Promise.resolve()
+    })
+    expect(screen.getByText("Cloudflare reachable")).toBeInTheDocument()
+    expect(screen.queryByText("Docker reachable")).not.toBeInTheDocument()
+  })
+
+  it("clears a prior save error banner when a connection test is run", async () => {
+    const fetchMock = vi.fn().mockImplementation((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ version: "1.2.3" }) })
+      }
+      if (opts?.method === "PUT" && String(url).includes("/settings/cloudflare")) {
+        return Promise.resolve({ ok: false, status: 400, json: () => Promise.resolve({ detail: "Zone rejected" }) })
+      }
+      if (String(url).includes("/settings/test/cloudflare")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ success: true, message: "Cloudflare reachable" }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const { default: SettingsPage } = await import("@/pages/SettingsPage")
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    )
+    await waitFor(() => {
+      expect(screen.getByText("Settings")).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText("Cloudflare"))
+    fireEvent.click(screen.getByText("Save"))
+    await waitFor(() => {
+      expect(screen.getByText("Zone rejected")).toBeInTheDocument()
+    })
+
+    // Running a test must drop the stale save-error banner.
+    fireEvent.click(screen.getByText("Test Connection"))
+    await waitFor(() => {
+      expect(screen.getByText("Cloudflare reachable")).toBeInTheDocument()
+    })
+    expect(screen.queryByText("Zone rejected")).not.toBeInTheDocument()
+  })
+})
+
+describe("SettingsPage tablist keyboard navigation (FB-A11Y1)", () => {
+  it("moves the active tab with Arrow keys, Home, and End", async () => {
     vi.stubGlobal("fetch", mockFetch())
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
     render(
@@ -454,16 +406,37 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Settings")).toBeInTheDocument()
     })
 
-    expect(screen.getByText("Account")).toBeInTheDocument()
-    fireEvent.click(screen.getByText("Account"))
+    const generalTab = screen.getByRole("tab", { name: "General" })
+    expect(generalTab).toHaveAttribute("aria-selected", "true")
 
-    expect(screen.getByRole("button", { name: "Change Password" })).toBeInTheDocument()
-    expect(screen.getByText("Current Password")).toBeInTheDocument()
-    expect(screen.getByText("New Password")).toBeInTheDocument()
-    expect(screen.getByText("Confirm New Password")).toBeInTheDocument()
+    // ArrowRight advances selection + focus to the next tab and swaps panel content.
+    fireEvent.keyDown(generalTab, { key: "ArrowRight" })
+    const cloudflareTab = screen.getByRole("tab", { name: "Cloudflare" })
+    expect(cloudflareTab).toHaveAttribute("aria-selected", "true")
+    expect(generalTab).toHaveAttribute("aria-selected", "false")
+    expect(cloudflareTab).toHaveFocus()
+    expect(screen.getByText("Zone ID")).toBeInTheDocument()
+
+    // ArrowLeft steps back.
+    fireEvent.keyDown(cloudflareTab, { key: "ArrowLeft" })
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true")
+    expect(screen.getByRole("tab", { name: "General" })).toHaveFocus()
+
+    // End jumps to the last visible tab, Home back to the first.
+    fireEvent.keyDown(screen.getByRole("tab", { name: "General" }), { key: "End" })
+    const accountTab = screen.getByRole("tab", { name: "Account" })
+    expect(accountTab).toHaveAttribute("aria-selected", "true")
+    expect(accountTab).toHaveFocus()
+
+    fireEvent.keyDown(accountTab, { key: "Home" })
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("aria-selected", "true")
+
+    // ArrowLeft from the first tab wraps to the last.
+    fireEvent.keyDown(screen.getByRole("tab", { name: "General" }), { key: "ArrowLeft" })
+    expect(screen.getByRole("tab", { name: "Account" })).toHaveAttribute("aria-selected", "true")
   })
 
-  it("shows version in General tab", async () => {
+  it("uses a roving tabindex so only the active tab is tabbable", async () => {
     vi.stubGlobal("fetch", mockFetch())
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
     render(
@@ -475,14 +448,15 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Settings")).toBeInTheDocument()
     })
 
-    // General tab is the default, no click needed
-    await waitFor(() => {
-      expect(screen.getByText("tailBale")).toBeInTheDocument()
-    })
-    expect(screen.getByText("v1.2.3")).toBeInTheDocument()
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("tabindex", "0")
+    expect(screen.getByRole("tab", { name: "Cloudflare" })).toHaveAttribute("tabindex", "-1")
+
+    fireEvent.click(screen.getByRole("tab", { name: "Cloudflare" }))
+    expect(screen.getByRole("tab", { name: "Cloudflare" })).toHaveAttribute("tabindex", "0")
+    expect(screen.getByRole("tab", { name: "General" })).toHaveAttribute("tabindex", "-1")
   })
 
-  it("disables Change Password button when fields are empty", async () => {
+  it("wires aria-controls and aria-labelledby between tabs and the panel", async () => {
     vi.stubGlobal("fetch", mockFetch())
     const { default: SettingsPage } = await import("@/pages/SettingsPage")
     render(
@@ -494,61 +468,22 @@ describe("SettingsPage", () => {
       expect(screen.getByText("Settings")).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByText("Account"))
+    const generalTab = screen.getByRole("tab", { name: "General" })
+    const panel = screen.getByRole("tabpanel")
+    const controls = generalTab.getAttribute("aria-controls")
+    expect(controls).toBeTruthy()
+    expect(generalTab.id).toBeTruthy()
+    expect(panel).toHaveAttribute("id", controls)
+    expect(panel).toHaveAttribute("aria-labelledby", generalTab.id)
 
-    const btn = screen.getByRole("button", { name: "Change Password" })
-    expect(btn).toBeDisabled()
-  })
+    // Every tab points at the one shared panel.
+    for (const t of screen.getAllByRole("tab")) {
+      expect(t).toHaveAttribute("aria-controls", controls as string)
+    }
 
-  it("shows mismatch warning when passwords differ", async () => {
-    vi.stubGlobal("fetch", mockFetch())
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Settings")).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByText("Account"))
-
-    // Fill in new password
-    const newPwInput = screen.getByPlaceholderText("Minimum 8 characters")
-    fireEvent.change(newPwInput, { target: { value: "newpassword1" } })
-
-    // Fill in confirm with different value
-    const confirmInput = screen.getByPlaceholderText("Confirm new password")
-    fireEvent.change(confirmInput, { target: { value: "differentpass" } })
-
-    expect(screen.getByText("Passwords do not match.")).toBeInTheDocument()
-  })
-
-  it("shows version unknown when version endpoint fails", async () => {
-    vi.stubGlobal(
-      "fetch",
-      vi.fn().mockImplementation((url: string) => {
-        if (String(url).includes("/version")) {
-          return Promise.reject(new Error("Not found"))
-        }
-        return Promise.resolve({
-          ok: true,
-          json: () => Promise.resolve(mockSettings),
-        })
-      })
-    )
-    const { default: SettingsPage } = await import("@/pages/SettingsPage")
-    render(
-      <MemoryRouter>
-        <SettingsPage />
-      </MemoryRouter>
-    )
-    await waitFor(() => {
-      expect(screen.getByText("Settings")).toBeInTheDocument()
-    })
-
-    // General tab is the default
-    expect(screen.getByText("version unknown")).toBeInTheDocument()
+    // The panel's label follows the active tab after switching.
+    fireEvent.click(screen.getByRole("tab", { name: "Docker" }))
+    const dockerTab = screen.getByRole("tab", { name: "Docker" })
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("aria-labelledby", dockerTab.id)
   })
 })

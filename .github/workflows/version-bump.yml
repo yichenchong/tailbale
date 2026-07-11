@@ -21,16 +21,20 @@ jobs:
       - name: Determine bump type from commit messages
         id: bump
         run: |
-          # Look at commit messages since last version tag
-          LAST_TAG=$(git tag --sort=-v:refname | head -n1)
+          # Look at full commit messages since last version tag. `--oneline`
+          # prefixes every subject with the SHA, which prevents anchored
+          # conventional-commit patterns like `^feat` from ever matching.
+          # `|| true`: GitHub's bash runs with `set -o pipefail`, so `head`
+          # closing the pipe early could surface `git tag`'s SIGPIPE (141).
+          LAST_TAG=$(git tag --sort=-v:refname | head -n1 || true)
           if [ -z "$LAST_TAG" ]; then
-            COMMITS=$(git log --oneline)
+            COMMITS=$(git log --format=%B)
           else
-            COMMITS=$(git log "$LAST_TAG"..HEAD --oneline)
+            COMMITS=$(git log --format=%B "$LAST_TAG"..HEAD)
           fi
 
           # Determine bump type from conventional commit prefixes
-          if echo "$COMMITS" | grep -qiE '(BREAKING CHANGE|^[a-z]+!:)'; then
+          if echo "$COMMITS" | grep -qiE '(BREAKING CHANGE|^[a-z]+(\([^)]*\))?!:)'; then
             echo "type=major" >> "$GITHUB_OUTPUT"
           elif echo "$COMMITS" | grep -qiE '^feat'; then
             echo "type=minor" >> "$GITHUB_OUTPUT"

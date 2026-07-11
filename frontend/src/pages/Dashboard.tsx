@@ -1,99 +1,71 @@
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback } from "react"
 import { Link } from "react-router-dom"
-import { api } from "@/lib/api"
-import { useTimezone, formatDateTime, formatTime as fmtTime } from "@/lib/useTimezone"
-import { cn } from "@/lib/utils"
+import { api, type DashboardSummary } from "@/lib/api"
+import { useTimezone, formatDateTime } from "@/lib/useTimezone"
+import { cn, errorMessage } from "@/lib/utils"
+import { certStatus } from "@/lib/certStatus"
+import { eventLevelStyle } from "@/lib/statusStyles"
+import { usePolledResource } from "@/lib/usePolledResource"
+import { PolledRefreshControl, StaleDataBanner } from "@/lib/polledFreshness"
+import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
 import {
-  Loader2,
   Activity,
   CheckCircle2,
   AlertTriangle,
   XCircle,
   ShieldAlert,
   Clock,
-  RefreshCw,
 } from "lucide-react"
 
 const POLL_INTERVAL = 30_000
 
-interface DashboardSummary {
-  services: {
-    total: number
-    healthy: number
-    warning: number
-    error: number
-  }
-  expiring_certs: {
-    service_id: string
-    service_name: string
-    hostname: string
-    expires_at: string | null
-  }[]
-  recent_errors: {
-    id: string
-    service_id: string | null
-    kind: string
-    message: string
-    created_at: string | null
-  }[]
-  recent_events: {
-    id: string
-    service_id: string | null
-    kind: string
-    level: string
-    message: string
-    created_at: string | null
-  }[]
-}
-
 export default function Dashboard() {
   const tz = useTimezone()
-  const [data, setData] = useState<DashboardSummary | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState("")
-  const [lastRefresh, setLastRefresh] = useState<Date | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const load = useCallback(async (showSpinner = false) => {
-    if (showSpinner) setLoading(true)
-    try {
-      const result = await api.get<DashboardSummary>("/dashboard/summary")
-      setData(result)
-      setError("")
-      setLastRefresh(new Date())
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load")
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  const fetcher = useCallback(() => api.dashboard.summary(), [])
+  const { data, loading, error, refresh, lastSuccessAt } = usePolledResource(fetcher, {
+    intervalMs: POLL_INTERVAL,
+    mapError: (e) => (errorMessage(e, "Failed to load")),
+  })
 
-  useEffect(() => {
-    load(true)
-  }, [load])
+  return (
+    <ResourceBoundary
+      loading={loading && !data}
+      errored={!!error && !data}
+      empty={!data}
+      loadingSlot={<PageLoading>Loading dashboard...</PageLoading>}
+      errorSlot={<PageError className="rounded-md bg-red-50 p-4 text-red-700">{error}</PageError>}
+    >
+      {data && (
+        <DashboardOverview
+          data={data}
+          tz={tz}
+          loading={loading}
+          error={error}
+          lastSuccessAt={lastSuccessAt}
+          onRefresh={() => { void refresh() }}
+        />
+      )}
+    </ResourceBoundary>
+  )
+}
 
-  // Auto-refresh every 30s
-  useEffect(() => {
-    timerRef.current = setInterval(() => load(false), POLL_INTERVAL)
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }, [load])
-
-  if (loading && !data) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading dashboard...
-      </div>
-    )
-  }
-
-  if (error && !data) {
-    return <div className="rounded-md bg-red-50 p-4 text-red-700">{error}</div>
-  }
-
-  if (!data) return null
-
+function DashboardOverview({
+  data,
+  tz,
+  loading,
+  error,
+  lastSuccessAt,
+  onRefresh,
+}: {
+  data: DashboardSummary
+  tz: string
+  loading: boolean
+  error: string | null
+  lastSuccessAt: Date | null
+  onRefresh: () => void
+}) {
   const s = data.services
 
   return (
@@ -103,26 +75,15 @@ export default function Dashboard() {
           <h1 className="text-2xl font-bold">Dashboard</h1>
           <p className="mt-1 text-zinc-500">Overview of your exposed services.</p>
         </div>
-        <div className="flex items-center gap-3">
-          {lastRefresh && (
-            <span className="text-xs text-zinc-400">
-              Updated {fmtTime(lastRefresh, tz)}
-            </span>
-          )}
-          <button
-            onClick={() => load(true)}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-sm font-medium text-zinc-700 shadow-sm hover:bg-zinc-50 disabled:opacity-50"
-          >
-            {loading ? (
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
-            ) : (
-              <RefreshCw className="h-3.5 w-3.5" />
-            )}
-            Refresh
-          </button>
-        </div>
+        <PolledRefreshControl
+          lastRefresh={lastSuccessAt}
+          timezone={tz}
+          loading={loading}
+          onRefresh={onRefresh}
+        />
       </div>
+
+      <StaleDataBanner error={error} lastRefresh={lastSuccessAt} timezone={tz} />
 
       {/* Summary cards */}
       <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
@@ -139,23 +100,18 @@ export default function Dashboard() {
             <ShieldAlert className="h-4 w-4" /> Upcoming Cert Expiries
           </h2>
           {data.expiring_certs.length === 0 ? (
-            <p className="mt-3 text-sm text-zinc-400">No certificates expiring within 30 days.</p>
+            <p className="mt-3 text-sm text-zinc-400">No certificates approaching expiry.</p>
           ) : (
             <ul className="mt-3 space-y-2">
               {data.expiring_certs.map((c) => {
-                const days = c.expires_at
-                  ? Math.ceil((new Date(c.expires_at).getTime() - Date.now()) / 86400000)
-                  : null
+                const cert = certStatus(c.expires_at)
                 return (
                   <li key={c.service_id} className="flex items-center justify-between text-sm">
-                    <Link to={`/services/${c.service_id}`} className="text-zinc-700 hover:underline">
+                    <Link to={`/services/${encodeURIComponent(c.service_id)}`} className="text-zinc-700 hover:underline">
                       {c.service_name} <span className="text-zinc-400">({c.hostname})</span>
                     </Link>
-                    <span className={cn(
-                      "font-medium",
-                      days !== null && days < 0 ? "text-red-600" : days !== null && days <= 7 ? "text-yellow-600" : "text-zinc-500"
-                    )}>
-                      {days !== null ? (days < 0 ? "Expired" : `${days}d left`) : "\u2014"}
+                    <span className={cn("font-medium", cert.color)}>
+                      {cert.label}
                     </span>
                   </li>
                 )
@@ -183,6 +139,11 @@ export default function Dashboard() {
               ))}
             </ul>
           )}
+          {data.recent_errors.length > 8 && (
+            <Link to="/events" className="mt-3 inline-block text-sm text-zinc-500 hover:text-zinc-700 hover:underline">
+              View all events
+            </Link>
+          )}
         </section>
       </div>
 
@@ -202,7 +163,7 @@ export default function Dashboard() {
                 </span>
                 <span className={cn(
                   "inline-flex items-center rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-                  e.level === "error" ? "bg-red-100 text-red-700" : e.level === "warning" ? "bg-yellow-100 text-yellow-700" : "bg-blue-100 text-blue-700"
+                  eventLevelStyle(e.level)
                 )}>
                   {e.level}
                 </span>

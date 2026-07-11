@@ -1,50 +1,26 @@
-# React + TypeScript + Vite
+# tailBale Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Vite + React + TypeScript single-page app for the tailBale edge orchestrator.
 
-Currently, two official plugins are available:
+## Scripts
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react/README.md) uses [Babel](https://babeljs.io/) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+Run from `frontend/`:
 
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type aware lint rules:
-
-- Configure the top-level `parserOptions` property like this:
-
-```js
-export default tseslint.config({
-  languageOptions: {
-    // other options...
-    parserOptions: {
-      project: ['./tsconfig.node.json', './tsconfig.app.json'],
-      tsconfigRootDir: import.meta.dirname,
-    },
-  },
-})
+```bash
+npm run dev         # start the Vite dev server with HMR
+npm run build       # type-check (tsc -b) and build for production
+npm run lint        # run ESLint over the project
+npm test            # run the Vitest suite once
+npm run test:watch  # run Vitest in watch mode
 ```
 
-- Replace `tseslint.configs.recommended` to `tseslint.configs.recommendedTypeChecked` or `tseslint.configs.strictTypeChecked`
-- Optionally add `...tseslint.configs.stylisticTypeChecked`
-- Install [eslint-plugin-react](https://github.com/jsx-eslint/eslint-plugin-react) and update the config:
+## Dev server
 
-```js
-// eslint.config.js
-import react from 'eslint-plugin-react'
+`npm run dev` serves the app and proxies API calls to the backend: requests to
+`/api` are forwarded to `http://localhost:8080` (see `vite.config.ts`). Start the
+backend on port 8080 alongside the dev server.
 
-export default tseslint.config({
-  // Set the react version
-  settings: { react: { version: '18.3' } },
-  plugins: {
-    // Add the react plugin
-    react,
-  },
-  rules: {
-    // other rules...
-    // Enable its recommended rules
-    ...react.configs.recommended.rules,
-    ...react.configs['jsx-runtime'].rules,
-  },
-})
-```
+## Path alias
+
+`@/` resolves to `src/` (configured in `vite.config.ts` and `tsconfig`), so
+imports can be written as `import { x } from "@/lib/x"`.

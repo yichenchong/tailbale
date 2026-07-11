@@ -7,25 +7,32 @@ services:
     # For dev, override with uvicorn reload
     command: uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
     ports:
-      - "8080:8080"
+      - "${BIND_ADDR:-127.0.0.1}:8080:8080"
     volumes:
       - ./backend/app:/app/app
-      - ./data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}:/data
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       - DATA_DIR=/data
-      - HOST_DATA_DIR=${HOST_DATA_DIR:-${PWD}/data}
+      - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
+    labels:
+      - tailbale.main=true
     restart: unless-stopped
 
   frontend:
-    image: node:22-alpine
+    image: node:24-alpine
     working_dir: /app
-    command: npm run dev -- --host 0.0.0.0
+    command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
     ports:
-      - "5173:5173"
+      - "${BIND_ADDR:-127.0.0.1}:5173:5173"
     volumes:
       - ./frontend:/app
       - /app/node_modules
     environment:
-      - VITE_API_URL=http://localhost:8080
+      # Vite dev-server /api proxy target. Inside this compose network the
+      # backend is the "backend" service, not localhost. Requires vite.config.ts
+      # to read VITE_PROXY_TARGET (it falls back to http://localhost:8080 for a
+      # plain host-side `npm run dev`). The frontend API client uses a relative
+      # /api base, so no VITE_API_URL is needed.
+      - VITE_PROXY_TARGET=http://backend:8080
     restart: unless-stopped

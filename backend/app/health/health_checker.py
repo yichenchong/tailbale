@@ -1,356 +1,60 @@
-"""Per-service health subchecks.
+"""Public facade for per-service health checks (AR18 decomposition).
 
-Runs a battery of checks against the real system state and returns
-a dict of check_name -> bool.  The reconciler calls this at the end
-of each cycle; it can also be invoked standalone.
+Historically a single god-module, this is now split into a registry, a runner,
+and per-domain check modules under ``app.health``:
+
+* :mod:`app.health.registry` — ``ALL_CHECK_NAMES`` / ``CRITICAL_CHECKS`` /
+  ``WARNING_CHECKS`` and :func:`aggregate_status`.
+* :mod:`app.health.runner` — :func:`run_health_checks` orchestration (client
+  lifecycle, Docker-unreachable fallback) and :func:`get_live_tailscale_ip`.
+* :mod:`app.health.checks.docker` / ``.tailscale`` / ``.dns`` / ``.certs`` /
+  ``.config`` — the individual subchecks.
+
+This module preserves the public import surface every consumer (reconciler
+steps / reconcile_loop / probe_retry, services/edge_ops) and test relies on by
+re-exporting those symbols from their new defining modules. Patch a subcheck or
+the Docker client lifecycle at its *defining* module, not here.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
-from typing import TYPE_CHECKING
+from app.health.checks.certs import (
+    _cert_not_expiring_subcheck,
+    _check_cert_not_expiring,
+    _check_cert_present,
+)
+from app.health.checks.config import _check_caddy_config
+from app.health.checks.dns import _check_dns, _check_stored_dns, check_live_dns
+from app.health.checks.docker import (
+    _check_edge,
+    _check_upstream_network,
+    _check_upstream_present,
+)
+from app.health.checks.tailscale import _check_tailscale
+from app.health.registry import (
+    ALL_CHECK_NAMES,
+    CRITICAL_CHECKS,
+    WARNING_CHECKS,
+    aggregate_status,
+)
+from app.health.runner import get_live_tailscale_ip, run_health_checks
 
-import docker
-
-from app.models.dns_record import DnsRecord
-from app.models.service_status import ServiceStatus
-
-if TYPE_CHECKING:
-    from sqlalchemy.orm import Session
-
-    from app.models.service import Service
-
-logger = logging.getLogger(__name__)
-
-# Checks whose failure means "error" status
-CRITICAL_CHECKS = frozenset({
-    "edge_container_present",
-    "edge_container_running",
-    "tailscale_ip_present",
-    "cert_present",
-})
-
-# Checks whose failure means "warning" (unless a critical already failed)
-WARNING_CHECKS = frozenset({
-    "cert_not_expiring",
-    "dns_matches_ip",
-    "https_probe_ok",
-})
-
-
-def _get_docker_client(socket_path: str | None = None) -> docker.DockerClient:
-    if socket_path:
-        return docker.DockerClient(base_url=socket_path)
-    return docker.DockerClient.from_env()
-
-
-def run_health_checks(
-    db: Session,
-    service: Service,
-    generated_dir: str | Path,
-    certs_dir: str | Path,
-    socket_path: str | None = None,
-) -> dict[str, bool]:
-    """Run all health subchecks for *service*.  Returns {name: bool}."""
-    checks: dict[str, bool] = {}
-
-    try:
-        client = _get_docker_client(socket_path)
-    except Exception:
-        logger.warning("Cannot connect to Docker for health checks", exc_info=True)
-        return {
-            "upstream_container_present": False,
-            "upstream_network_connected": False,
-            "edge_container_present": False,
-            "edge_container_running": False,
-            "tailscale_ready": False,
-            "tailscale_ip_present": False,
-            "cert_present": _check_cert_present(service, certs_dir),
-            "cert_not_expiring": False,
-            "dns_record_present": False,
-            "dns_matches_ip": False,
-            "caddy_config_present": _check_caddy_config(service, generated_dir),
-            "https_probe_ok": False,
-        }
-
-    # --- Upstream container ---
-    checks["upstream_container_present"] = _check_upstream_present(client, service)
-    checks["upstream_network_connected"] = _check_upstream_network(client, service)
-
-    # --- Edge container ---
-    edge_present, edge_running = _check_edge(client, service)
-    checks["edge_container_present"] = edge_present
-    checks["edge_container_running"] = edge_running
-
-    # --- Tailscale ---
-    ts_ready, ts_ip_present = _check_tailscale(client, service, edge_running)
-    checks["tailscale_ready"] = ts_ready
-    checks["tailscale_ip_present"] = ts_ip_present
-
-    # --- Certs ---
-    checks["cert_present"] = _check_cert_present(service, certs_dir)
-    checks["cert_not_expiring"] = _check_cert_not_expiring(service, certs_dir)
-
-    # --- DNS ---
-    status = db.get(ServiceStatus, service.id)
-    current_ip = status.tailscale_ip if status else None
-    dns_record = db.get(DnsRecord, service.id)
-
-    checks["dns_record_present"] = (
-        dns_record is not None and dns_record.record_id is not None
-    )
-    checks["dns_matches_ip"] = bool(
-        dns_record
-        and dns_record.value
-        and current_ip
-        and dns_record.value == current_ip
-    )
-
-    # --- Caddy config ---
-    checks["caddy_config_present"] = _check_caddy_config(service, generated_dir)
-
-    # --- HTTPS probe (spec §18.1) ---
-    checks["https_probe_ok"] = _check_https_probe(service, current_ip, certs_dir, client)
-
-    return checks
-
-
-# ---- Individual check helpers ----
-
-
-def _check_upstream_present(client: docker.DockerClient, service: Service) -> bool:
-    try:
-        client.containers.get(service.upstream_container_id)
-        return True
-    except Exception:
-        return False
-
-
-def _check_upstream_network(client: docker.DockerClient, service: Service) -> bool:
-    try:
-        container = client.containers.get(service.upstream_container_id)
-        networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
-        return service.network_name in networks
-    except Exception:
-        return False
-
-
-def _check_edge(client: docker.DockerClient, service: Service) -> tuple[bool, bool]:
-    try:
-        container = client.containers.get(service.edge_container_name)
-        return True, container.status == "running"
-    except Exception:
-        return False, False
-
-
-def _check_tailscale(
-    client: docker.DockerClient, service: Service, edge_running: bool
-) -> tuple[bool, bool]:
-    if not edge_running:
-        return False, False
-    try:
-        container = client.containers.get(service.edge_container_name)
-        result = container.exec_run(
-            "tailscale status --json",
-            environment={"TS_SOCKET": "/var/run/tailscale/tailscaled.sock"},
-        )
-        if result.exit_code != 0:
-            return False, False
-        data = json.loads(result.output)
-        ready = data.get("BackendState") == "Running"
-        ts_ips = data.get("Self", {}).get("TailscaleIPs", [])
-        ip_present = any(str(ip).startswith("100.") for ip in ts_ips)
-        return ready, ip_present
-    except Exception:
-        return False, False
-
-
-def _check_cert_present(service: Service, certs_dir: str | Path) -> bool:
-    d = Path(certs_dir) / service.hostname
-    return (d / "fullchain.pem").exists() and (d / "privkey.pem").exists()
-
-
-def _check_cert_not_expiring(service: Service, certs_dir: str | Path) -> bool:
-    cert_path = Path(certs_dir) / service.hostname / "fullchain.pem"
-    if not cert_path.exists():
-        return False
-    try:
-        from app.certs.cert_manager import get_cert_expiry
-
-        expiry = get_cert_expiry(cert_path)
-        if expiry is None:
-            return False
-        return expiry > datetime.now(timezone.utc) + timedelta(days=14)
-    except Exception:
-        return False
-
-
-def _check_caddy_config(service: Service, generated_dir: str | Path) -> bool:
-    return (Path(generated_dir) / service.id / "Caddyfile").exists()
-
-
-def _summarize_probe_output(output: bytes | str | None, limit: int = 200) -> str:
-    if output is None:
-        return ""
-    if isinstance(output, bytes):
-        text = output.decode("utf-8", errors="replace")
-    else:
-        text = output
-    text = " ".join(text.split())
-    if len(text) <= limit:
-        return text
-    return text[: limit - 3] + "..."
-
-
-def _log_https_probe_failure(
-    service: "Service",
-    reason: str,
-    *,
-    tailscale_ip: str | None,
-    container_status: str | None = None,
-    exit_code: int | None = None,
-    http_code: str | None = None,
-    output: bytes | str | None = None,
-) -> None:
-    details: list[str] = []
-    if tailscale_ip:
-        details.append(f"tailscale_ip={tailscale_ip}")
-    if container_status:
-        details.append(f"container_status={container_status}")
-    if exit_code is not None:
-        details.append(f"exit_code={exit_code}")
-    if http_code:
-        details.append(f"http_code={http_code}")
-    rendered_output = _summarize_probe_output(output)
-    if rendered_output:
-        details.append(f"output={rendered_output!r}")
-
-    detail_str = f" ({', '.join(details)})" if details else ""
-    logger.warning(
-        "HTTPS probe failed for %s (%s): %s%s",
-        service.hostname,
-        service.edge_container_name,
-        reason,
-        detail_str,
-    )
-
-
-
-
-def _check_https_probe(
-    service: "Service",
-    tailscale_ip: str | None,
-    certs_dir: str | Path,
-    client: "docker.DockerClient | None" = None,
-) -> bool:
-    """Verify that Caddy inside the edge container is serving HTTPS.
-
-    The probe runs ``curl`` **inside the edge container** rather than
-    connecting from the orchestrator.  This avoids the problem where the
-    orchestrator container can't reach Tailscale IPs (only edge containers
-    are on the tailnet).
-
-    curl is used instead of wget because the edge container's Alpine-based
-    BusyBox wget does not use exit code 8 for HTTP errors (it returns 1 for
-    all failures), making it impossible to distinguish 4xx (acceptable —
-    upstream may require auth) from connection failures. curl exits 0 for
-    any HTTP response and non-zero only for network/TLS failures.
-
-    A ``Host`` header matching the configured hostname is sent so Caddy
-    routes the request through its reverse_proxy rather than returning 421
-    for the unmatched ``localhost`` default.
-    """
-    if not tailscale_ip:
-        _log_https_probe_failure(service, "missing Tailscale IP", tailscale_ip=None)
-        return False
-
-    if not client:
-        _log_https_probe_failure(service, "Docker client unavailable", tailscale_ip=tailscale_ip)
-        return False
-
-    try:
-        container = client.containers.get(service.edge_container_name)
-        if container.status != "running":
-            _log_https_probe_failure(
-                service,
-                "edge container not running",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-            )
-            return False
-
-        exit_code, output = container.exec_run(
-            [
-                "curl", "--silent", "--insecure", "--max-time", "5",
-                "-o", "/dev/null",
-                "-w", "%{http_code}",
-                "-H", f"Host: {service.hostname}",
-                "https://localhost:443/",
-            ],
-            environment={"HOME": "/tmp"},
-        )
-
-        if exit_code != 0:
-            _log_https_probe_failure(
-                service,
-                "curl returned non-zero",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                exit_code=exit_code,
-                output=output,
-            )
-            return False
-
-        raw = (output or b"").decode("utf-8", errors="replace").strip()
-        http_code = raw[-3:] if len(raw) >= 3 else raw
-        if not http_code.isdigit():
-            _log_https_probe_failure(
-                service,
-                "curl did not return a valid HTTP status",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                output=output,
-            )
-            return False
-        if http_code == "000":
-            _log_https_probe_failure(
-                service,
-                "no HTTP response received",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                http_code=http_code,
-                output=output,
-            )
-            return False
-        if http_code.startswith("5"):
-            _log_https_probe_failure(
-                service,
-                "upstream returned 5xx",
-                tailscale_ip=tailscale_ip,
-                container_status=container.status,
-                http_code=http_code,
-                output=output,
-            )
-            return False
-        return True
-
-    except Exception:
-        logger.warning("HTTPS probe exec failed for %s", service.edge_container_name, exc_info=True)
-        return False
-
-
-def aggregate_status(checks: dict[str, bool]) -> str:
-    """Determine overall status from health subchecks.
-
-    Returns ``"healthy"``, ``"warning"``, or ``"error"``.
-    """
-    for name in CRITICAL_CHECKS:
-        if name in checks and not checks[name]:
-            return "error"
-    for name in WARNING_CHECKS:
-        if name in checks and not checks[name]:
-            return "warning"
-    return "healthy"
+__all__ = [
+    "ALL_CHECK_NAMES",
+    "CRITICAL_CHECKS",
+    "WARNING_CHECKS",
+    "_cert_not_expiring_subcheck",
+    "_check_caddy_config",
+    "_check_cert_not_expiring",
+    "_check_cert_present",
+    "_check_dns",
+    "_check_edge",
+    "_check_stored_dns",
+    "_check_tailscale",
+    "_check_upstream_network",
+    "_check_upstream_present",
+    "aggregate_status",
+    "check_live_dns",
+    "get_live_tailscale_ip",
+    "run_health_checks",
+]

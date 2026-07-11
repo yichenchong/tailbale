@@ -1,8 +1,10 @@
 """Background reconciliation loop and trigger helpers.
 
 Provides:
-- ``reconcile_all()`` — sweep all enabled services
-- ``reconcile_loop()`` — async background loop (periodic sweep)
+- ``reconcile_all()`` — full sweep of all enabled services (14-step reconcile)
+- ``reconcile_loop()`` — slow async background loop (hourly full sweep)
+- ``health_check_all()`` — lightweight health sweep, escalates unhealthy services
+- ``health_check_loop()`` — fast async background loop (per-minute health sweep)
 - ``reconcile_one()`` — reconcile a single service by ID (for manual trigger)
 """
 
@@ -10,29 +12,40 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
+from datetime import UTC, datetime
+from pathlib import Path
 
 from sqlalchemy.orm import Session
 
+from app import settings_store
+from app.backoff import capped_exponential, run_periodic
+from app.database import rollback_with_lock, session_scope
+from app.edge import docker_client
+from app.health import health_checker
+from app.locks import forget_reconcile_lock, try_service_reconcile_lock
 from app.models.service import Service
+from app.reconciler import probe_retry
 from app.reconciler.reconciler import reconcile_service
+from app.reconciler.status import _persist_status
+from app.services.sweeps import run_id_sweep, snapshot_enabled_service_ids
 
 logger = logging.getLogger(__name__)
+
+# Fixed backoff after a sweep error. A degenerate capped exponential
+# (``base == cap`` — no growth); the loop carries no cross-iteration attempt
+# counter, so it is computed at attempt 0. See app.backoff.
+ERROR_BACKOFF_SECONDS = 30
 
 
 def reconcile_all(db: Session, *, socket_path: str | None = None) -> int:
     """Reconcile every enabled service. Returns the count processed."""
-    services = db.query(Service).filter(Service.enabled.is_(True)).all()
-    count = 0
-    for svc in services:
-        service_id = svc.id
-        try:
-            reconcile_service(db, svc, socket_path=socket_path)
-            count += 1
-        except Exception:
-            db.rollback()
-            logger.error("Failed to reconcile service %s", service_id, exc_info=True)
-            count += 1  # still counts as processed
-    return count
+    return run_id_sweep(
+        db,
+        snapshot_enabled_service_ids(db),
+        lambda db, svc: reconcile_service(db, svc, socket_path=socket_path),
+        log_label="reconcile",
+    )
 
 
 def reconcile_one(db: Session, service_id: str, *, socket_path: str | None = None) -> dict:
@@ -46,34 +59,183 @@ def reconcile_one(db: Session, service_id: str, *, socket_path: str | None = Non
     return reconcile_service(db, svc, socket_path=socket_path)
 
 
+def spawn_reconcile(service_id: str, socket_path: str | None) -> dict:
+    """Reconcile a single service in a fresh, self-contained session.
+
+    The single body behind every "reconcile off the request" trigger: the
+    manual ``/reconcile`` endpoint (run via ``asyncio.to_thread``) and the
+    fire-and-forget post-create/enable background tasks. Callers own the
+    threading strategy and error handling; fire-and-forget callers discard the
+    returned result and swallow exceptions, the manual endpoint forwards both.
+    """
+    with session_scope() as db:
+        return reconcile_one(db, service_id, socket_path=socket_path)
+
+
+def health_check_all(db: Session, *, socket_path: str | None = None) -> int:
+    """Lightweight health sweep over every enabled service.
+
+    For each enabled service: run the health subchecks, aggregate, and persist
+    the result WITHOUT emitting an event — a passing check just shows healthy in
+    status, so the steady state stays cheap and silent. A service that aggregates
+    to anything other than ``healthy`` is escalated to a full reconcile via
+    :func:`reconcile_one`, which logs its own ``reconcile_completed`` event and
+    repairs the drift. Returns the count of services processed.
+
+    This is the fast counterpart to :func:`reconcile_all`: it runs often (default
+    60s) so detection + repair latency for an unhealthy service stays ~1 min,
+    while the full 14-step reconcile only runs hourly or on escalation.
+    """
+    paths = settings_store.get_runtime_paths(db)
+    generated_dir = Path(paths["generated_dir"])
+    certs_dir = Path(paths["certs_dir"])
+
+    # Snapshot ids up front (see app.services.sweeps): a per-service commit
+    # expires the session, so re-fetch each id inside the loop and skip deletes.
+    service_ids = snapshot_enabled_service_ids(db)
+    count = 0
+    for service_id in service_ids:
+        try:
+            with try_service_reconcile_lock(service_id) as acquired:
+                if not acquired:
+                    # A reconcile / operation already holds this service's lock
+                    # (e.g. a minutes-long lego DNS-01 issuance). Acquiring it
+                    # would stall the whole sweep behind that one service — the
+                    # head-of-line blocking this skip-if-contended path fixes. Its
+                    # status is being actively managed by the in-progress op, so it
+                    # is fresh: skip it this round (don't block, don't count) and
+                    # retry on the next sweep.
+                    logger.debug(
+                        "Health sweep: skipping service %s — reconcile lock held",
+                        service_id,
+                    )
+                    continue
+                svc = db.get(Service, service_id, populate_existing=True)
+                if svc is None:
+                    # Deleted since the snapshot — nothing to check. The
+                    # try-acquire above re-created this id's registry entry via
+                    # reconcile_lock_for(); drop it (mirroring reconcile_service's
+                    # 'service gone' branch) so _RECONCILE_LOCKS stays bounded by
+                    # live + in-flight ids. Done while still holding the lock,
+                    # exactly as the reconcile path does.
+                    forget_reconcile_lock(service_id)
+                    continue
+                if not svc.enabled:
+                    # Disabled since the snapshot. disable_service commits the
+                    # "disabled" status (cleared message / checks / probe retry)
+                    # and releases the reconcile lock BEFORE this sweep acquires
+                    # it, so persisting a health-derived phase here would clobber
+                    # that status — and since neither loop sweeps disabled
+                    # services, the wrong phase (even "healthy" if the edge has
+                    # not stopped yet) would stick indefinitely. Re-read inside
+                    # the lock and skip, mirroring reconcile_service's disable
+                    # guard.
+                    continue
+                checks = health_checker.run_health_checks(db, svc, generated_dir, certs_dir, socket_path)
+                phase = health_checker.aggregate_status(checks)
+                # A recovery to healthy retires any in-flight background
+                # probe-retry: clear the scheduled next-retry fields so the UI
+                # never shows a pending "next retry at ..." on a healthy service
+                # (the sleeping probe-retry thread would otherwise not clear them
+                # until it next wakes — up to an hour on later attempts). Scoped to
+                # the healthy transition: a still-degraded phase keeps its retry.
+                clear_retry = (
+                    {"probe_retry_at": None, "probe_retry_attempt": None}
+                    if phase == "healthy"
+                    else {}
+                )
+                _persist_status(
+                    db,
+                    service_id,
+                    phase=phase,
+                    # Clear any stale message: a non-failure phase always carries a
+                    # null message (the full reconcile's health persist sets it to
+                    # None). Without this a recovered service would keep showing the
+                    # last failure message — e.g. "healthy" alongside "Caddy reload
+                    # failed" — until the next hourly full reconcile finally cleared it.
+                    message=None,
+                    health_checks=checks,
+                    last_probe_at=datetime.now(UTC),
+                    event=None,
+                    **clear_retry,
+                )
+                if phase == "healthy":
+                    # Retire any lingering post-create probe-retry thread promptly:
+                    # it would otherwise sleep out its current backoff (up to an
+                    # hour) before noticing the service already recovered here.
+                    probe_retry.cancel_probe_retry(service_id)
+                if phase != "healthy":
+                    # Drift detected — escalate to a full reconcile, which emits the
+                    # reconcile_completed event and repairs.
+                    reconcile_one(db, service_id, socket_path=socket_path)
+                count += 1
+        except Exception:
+            rollback_with_lock(db)
+            logger.error("Health check failed for service %s", service_id, exc_info=True)
+            count += 1  # still counts as processed
+    return count
+
+
+async def _sweep_loop(
+    *,
+    name: str,
+    startup_delay: int,
+    interval_setting: str,
+    sweep: Callable[..., int],
+    log_message: str,
+) -> None:
+    """Run a dynamic-interval background sweep with shared error backoff."""
+    # Holds the interval read inside the most recent successful sweep so the loop
+    # keeps honoring dynamic settings without opening a second session just to
+    # re-read them. Seeded with the setting's own default (not the error backoff)
+    # so the value is correct if ever read before the first sweep overwrites it.
+    interval = {"value": int(settings_store.DEFAULTS[interval_setting])}
+
+    async def _work() -> None:
+        def _run_sweep() -> tuple[int, int]:
+            with session_scope() as db:
+                iv = settings_store.get_positive_int_setting(db, interval_setting)
+                cnt = sweep(db, socket_path=docker_client.resolve_socket(db))
+                return cnt, iv
+
+        count, iv = await asyncio.to_thread(_run_sweep)
+        interval["value"] = iv
+        logger.info(log_message, count)
+
+    await run_periodic(
+        name=name,
+        startup_delay=startup_delay,
+        interval_fn=lambda: interval["value"],
+        work=_work,
+        on_error=lambda _exc: capped_exponential(
+            0, base=ERROR_BACKOFF_SECONDS, cap=ERROR_BACKOFF_SECONDS
+        ),
+        logger=logger,
+    )
+
+
 async def reconcile_loop() -> None:
     """Async background loop that periodically reconciles all enabled services."""
-    # Brief delay at startup so the app is fully ready
-    await asyncio.sleep(5)
-    logger.info("Reconcile loop started")
+    await _sweep_loop(
+        name="Reconcile loop",
+        startup_delay=5,
+        interval_setting="reconcile_interval_seconds",
+        sweep=reconcile_all,
+        log_message="Reconcile sweep complete — %d services processed",
+    )
 
-    while True:
-        try:
-            from app.database import SessionLocal
-            from app.settings_store import get_setting
 
-            def _run_sweep() -> tuple[int, int]:
-                db = SessionLocal()
-                try:
-                    iv = int(get_setting(db, "reconcile_interval_seconds") or "60")
-                    docker_socket = get_setting(db, "docker_socket_path") or None
-                    cnt = reconcile_all(db, socket_path=docker_socket)
-                    return cnt, iv
-                finally:
-                    db.close()
+async def health_check_loop() -> None:
+    """Async background loop: lightweight health sweep over enabled services.
 
-            count, interval = await asyncio.to_thread(_run_sweep)
-            logger.info("Reconcile sweep complete — %d services processed", count)
-
-            await asyncio.sleep(interval)
-        except asyncio.CancelledError:
-            logger.info("Reconcile loop cancelled")
-            raise
-        except Exception:
-            logger.error("Error in reconcile loop", exc_info=True)
-            await asyncio.sleep(30)  # back off on error
+    Runs far more often than the full reconcile loop (default 60s vs hourly) so
+    an unhealthy service is detected and escalated to a full reconcile within
+    ~1 min, while the healthy steady state stays cheap and silent.
+    """
+    await _sweep_loop(
+        name="Health check loop",
+        startup_delay=5,
+        interval_setting="health_check_interval_seconds",
+        sweep=health_check_all,
+        log_message="Health sweep complete — %d services processed",
+    )

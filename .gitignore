@@ -4,6 +4,11 @@ __pycache__/
 *.pyo
 .venv/
 *.egg-info/
+.ruff_cache/
+.pytest_cache/
+.ruff-venv/
+.coverage
+coverage/
 
 # Node
 node_modules/
@@ -18,6 +23,10 @@ data/
 .idea/
 *.swp
 *.swo
+
+# Agent tooling (machine-local, not for public repo)
+.claude/
+.omp/
 
 # OS
 .DS_Store

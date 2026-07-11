@@ -1,0 +1,349 @@
+"""Tests for app wiring in main.py: the SPA catch-all and the CORS option builder.
+
+The SPA catch-all is registered only when a built ``static/`` dir exists, so its
+decision logic lives in the pure helper ``_spa_response`` which we exercise
+directly. The load-bearing invariant: an unmatched ``/api/*`` path must 404, never
+fall through to the HTML index shell (which would hand API clients a 200 + HTML
+body that fails to parse as JSON), and ``..`` must never escape the static root.
+"""
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from fastapi import FastAPI, HTTPException
+from fastapi.testclient import TestClient
+from sqlalchemy.orm import sessionmaker
+
+import app.certs.renewal_task as renewal_mod
+import app.database as database_module
+import app.edge.image_builder as image_builder_mod
+import app.events.retention_task as retention_mod
+import app.main as main_module
+import app.reconciler.reconcile_loop as loop_mod
+import app.routers.jobs as jobs_mod
+from app.main import _cors_middleware_options, _service_error_handler, _spa_response
+from app.services.errors import (
+    HostnameChangeError,
+    HostnameInUse,
+    HostnameSuffixInvalid,
+    ServiceDisabled,
+    ServiceError,
+    ServiceNotFound,
+    TailscaleAuthKeyMissing,
+)
+
+
+@pytest.fixture()
+def static_dir(tmp_path):
+    sd = tmp_path / "static"
+    (sd / "assets").mkdir(parents=True)
+    (sd / "index.html").write_text("<!doctype html><title>app</title>")
+    (sd / "favicon.ico").write_text("icon-bytes")
+    (sd / "assets" / "app.js").write_text("console.log(1)")
+    # A sensitive file OUTSIDE the static root, used by the traversal test.
+    (tmp_path / "secret.txt").write_text("top secret")
+    return sd
+
+
+def _served(resp) -> Path:
+    return Path(resp.path)
+
+
+class TestSpaResponse:
+    @pytest.mark.parametrize("api_path", ["api", "api/", "api/unknown", "api/services/x"])
+    def test_api_namespace_404s_instead_of_serving_shell(self, static_dir, api_path):
+        with pytest.raises(HTTPException) as exc:
+            _spa_response(static_dir, api_path)
+        assert exc.value.status_code == 404
+
+    def test_non_api_path_named_apiclient_is_served_as_spa(self, static_dir):
+        # Only the exact "api" segment / "api/" prefix is special — a path that
+        # merely starts with "api" (no slash) is a normal SPA route.
+        assert _served(_spa_response(static_dir, "apidocs")) == static_dir / "index.html"
+
+    def test_serves_real_top_level_file(self, static_dir):
+        assert _served(_spa_response(static_dir, "favicon.ico")) == (static_dir / "favicon.ico").resolve()
+
+    def test_serves_real_nested_asset(self, static_dir):
+        assert _served(_spa_response(static_dir, "assets/app.js")) == (static_dir / "assets" / "app.js").resolve()
+
+    def test_unknown_client_route_falls_back_to_index(self, static_dir):
+        assert _served(_spa_response(static_dir, "dashboard/services")) == static_dir / "index.html"
+
+    def test_root_path_serves_index(self, static_dir):
+        assert _served(_spa_response(static_dir, "")) == static_dir / "index.html"
+
+    def test_directory_request_serves_index_not_a_listing(self, static_dir):
+        # "assets" exists but is a directory, not a file -> index fallback.
+        assert _served(_spa_response(static_dir, "assets")) == static_dir / "index.html"
+
+    def test_dotdot_traversal_cannot_escape_static_root(self, static_dir):
+        # The sibling secret.txt exists and is a file, but resolves outside the
+        # static root, so it must NOT be served — index shell instead.
+        assert _served(_spa_response(static_dir, "../secret.txt")) == static_dir / "index.html"
+
+
+class TestCorsMiddlewareOptions:
+    def test_blank_disables_cors(self):
+        assert _cors_middleware_options("") is None
+
+    def test_whitespace_only_disables_cors(self):
+        assert _cors_middleware_options("   ,  ,") is None
+
+    def test_lone_wildcard_disables_credentials(self):
+        opts = _cors_middleware_options("*")
+        assert opts is not None
+        assert opts["allow_origins"] == ["*"]
+        assert opts["allow_credentials"] is False
+
+    def test_explicit_origins_enable_credentials(self):
+        opts = _cors_middleware_options("https://ui.example")
+        assert opts is not None
+        assert opts["allow_origins"] == ["https://ui.example"]
+        assert opts["allow_credentials"] is True
+
+    def test_wildcard_mixed_with_explicit_origins_collapses_to_wildcard(self):
+        # A '*' ANYWHERE in the list wins: the result must collapse to ["*"] and
+        # disable credentials (the CORS spec forbids wildcard + credentials, so a
+        # credentialed wildcard would be silently dropped by browsers). The
+        # explicit origin must not survive alongside the wildcard.
+        opts = _cors_middleware_options("https://ui.example, *")
+        assert opts is not None
+        assert opts["allow_origins"] == ["*"]
+        assert opts["allow_credentials"] is False
+
+
+class TestLifespanBackgroundTasks:
+    """The lifespan must launch every background loop: cert renewal, the slow
+    full reconcile, the fast health sweep, and event retention."""
+
+    def test_starts_reconcile_health_renewal_and_retention_loops(
+        self, db_engine, tmp_data_dir, monkeypatch
+    ):
+
+
+        # Point lifespan table creation, migrations, and startup sessions at the
+        # test engine and neutralize heavy/external startup steps.
+        monkeypatch.setattr(database_module, "engine", db_engine)
+        monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
+        monkeypatch.setattr(database_module, "run_migrations", lambda *a, **k: None)
+        monkeypatch.setattr(jobs_mod, "reset_stale_running_jobs", lambda *a, **k: None)
+        monkeypatch.setattr(image_builder_mod, "ensure_edge_image", lambda *a, **k: None)
+
+        started: list[str] = []
+
+        def _make(name):
+            def factory():
+                started.append(name)
+
+                async def _idle():
+                    await asyncio.Event().wait()
+
+                return _idle()
+
+            return factory
+
+        monkeypatch.setattr(renewal_mod, "cert_renewal_loop", _make("renewal"))
+        monkeypatch.setattr(retention_mod, "retention_loop", _make("retention"))
+        monkeypatch.setattr(loop_mod, "reconcile_loop", _make("reconcile"))
+        monkeypatch.setattr(loop_mod, "health_check_loop", _make("health"))
+
+        async def _drive():
+            async with main_module.lifespan(main_module.app):
+                pass
+
+        asyncio.run(_drive())
+
+        assert sorted(started) == ["health", "reconcile", "renewal", "retention"]
+
+    def test_shutdown_cancels_all_tasks_even_if_one_loop_already_failed(
+        self, db_engine, tmp_data_dir, monkeypatch
+    ):
+        """Shutdown must cancel/await EVERY background task, even when one loop has
+        already exited with an exception. Pre-fix the sequential ``await task``
+        re-raised that exception, short-circuiting the loop so the remaining tasks
+        were never cancelled (a leak) and the shutdown itself raised."""
+
+
+        monkeypatch.setattr(database_module, "engine", db_engine)
+        monkeypatch.setattr(database_module, "SessionLocal", sessionmaker(bind=db_engine))
+        monkeypatch.setattr(database_module, "run_migrations", lambda *a, **k: None)
+        monkeypatch.setattr(jobs_mod, "reset_stale_running_jobs", lambda *a, **k: None)
+        monkeypatch.setattr(image_builder_mod, "ensure_edge_image", lambda *a, **k: None)
+
+        cancelled: list[str] = []
+
+        def _make_idle(name):
+            def factory():
+                async def _idle():
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        cancelled.append(name)
+                        raise
+
+                return _idle()
+
+            return factory
+
+        def _make_failing():
+            def factory():
+                async def _boom():
+                    raise RuntimeError("loop crashed")
+
+                return _boom()
+
+            return factory
+
+        # cert_renewal_loop exits with an exception almost immediately; the rest idle.
+        monkeypatch.setattr(renewal_mod, "cert_renewal_loop", _make_failing())
+        monkeypatch.setattr(retention_mod, "retention_loop", _make_idle("retention"))
+        monkeypatch.setattr(loop_mod, "reconcile_loop", _make_idle("reconcile"))
+        monkeypatch.setattr(loop_mod, "health_check_loop", _make_idle("health"))
+
+        async def _drive():
+            async with main_module.lifespan(main_module.app):
+                # Let the failing loop run to its exception before shutdown begins.
+                await asyncio.sleep(0.05)
+
+        # Must NOT raise: shutdown has to survive a task that already errored...
+        asyncio.run(_drive())
+        # ...and every still-running loop must have been cancelled (no leak).
+        assert sorted(cancelled) == ["health", "reconcile", "retention"]
+
+    def test_shutdown_cancels_tasks_when_lifespan_body_raises(self, monkeypatch):
+        """The cleanup path must live in a finally block.
+
+        If the ASGI lifespan context exits with an exception while background
+        tasks are running, those tasks still need the same cancel+await cleanup
+        as an ordinary shutdown. Otherwise the event loop owns leaked tasks until
+        it forcibly cancels them at teardown, which skips the app's deterministic
+        shutdown path.
+        """
+        cancelled: list[str] = []
+        tasks: list[asyncio.Task[object]] = []
+
+        def _prepare_database():
+            return None
+
+        def _recover_stale_running_jobs():
+            return None
+
+        async def _idle():
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.append("idle")
+                raise
+
+        def _create_background_tasks():
+            task = asyncio.create_task(_idle(), name="idle")
+            tasks.append(task)
+            return (task,)
+
+        monkeypatch.setattr(main_module.startup_module, "prepare_database", _prepare_database)
+        monkeypatch.setattr(
+            main_module.startup_module,
+            "recover_stale_running_jobs",
+            _recover_stale_running_jobs,
+        )
+        monkeypatch.setattr(
+            main_module.startup_module,
+            "create_background_tasks",
+            _create_background_tasks,
+        )
+
+        async def _drive():
+            with pytest.raises(RuntimeError, match="lifespan body failed"):
+                async with main_module.lifespan(main_module.app):
+                    await asyncio.sleep(0)
+                    raise RuntimeError("lifespan body failed")
+            await asyncio.sleep(0)
+            observed_cancelled = list(cancelled)
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            return observed_cancelled
+
+        assert asyncio.run(_drive()) == ["idle"]
+
+
+class TestServiceErrorHandler:
+    """The single central @app.exception_handler(ServiceError) (AR7) must map
+    EVERY service-layer domain exception to its canonical status + {"detail": ...}
+    the routers used to raise inline, and must NOT intercept a plain HTTPException
+    (whose own status/detail must still flow through Starlette's default handler).
+
+    The per-endpoint status codes are exercised indirectly by the router API
+    suites; these pin the generic handler itself (bare-base default, subclass
+    fan-out via MRO, and the HTTPException-passthrough invariant) so a future
+    edit that re-registers it for the wrong type — or accidentally widens it to
+    Exception — fails here.
+    """
+
+    @staticmethod
+    def _client():
+
+
+        app = FastAPI()
+        app.add_exception_handler(ServiceError, _service_error_handler)
+
+        @app.get("/notfound")
+        def _nf():
+            raise ServiceNotFound()
+
+        @app.get("/disabled")
+        def _d():
+            raise ServiceDisabled()
+
+        @app.get("/inuse")
+        def _i():
+            raise HostnameInUse("a.example.com")
+
+        @app.get("/suffix")
+        def _s():
+            raise HostnameSuffixInvalid("a.foo", "example.com")
+
+        @app.get("/tskey")
+        def _t():
+            raise TailscaleAuthKeyMissing()
+
+        @app.get("/hc502")
+        def _h():
+            raise HostnameChangeError("boom502", status_code=502)
+
+        @app.get("/base")
+        def _b():
+            raise ServiceError()
+
+        @app.get("/http418")
+        def _http():
+            raise HTTPException(status_code=418, detail="teapot")
+
+        return TestClient(app, raise_server_exceptions=False)
+
+    @pytest.mark.parametrize(
+        ("path", "code", "detail"),
+        [
+            ("/notfound", 404, "Service not found"),
+            ("/disabled", 409, "Service is disabled"),
+            ("/inuse", 409, "Hostname 'a.example.com' is already in use"),
+            ("/suffix", 422, "Hostname 'a.foo' must end with '.example.com'"),
+            ("/tskey", 400, "Tailscale auth key not configured"),
+            ("/hc502", 502, "boom502"),
+            ("/base", 400, "Service operation failed"),
+        ],
+    )
+    def test_maps_each_service_error_to_canonical_response(self, path, code, detail):
+        resp = self._client().get(path)
+        assert resp.status_code == code
+        assert resp.json() == {"detail": detail}
+
+    def test_plain_httpexception_is_not_swallowed(self):
+        """A non-ServiceError HTTPException must keep its own status/detail — the
+        ServiceError handler must not intercept it (they are disjoint hierarchies)."""
+        resp = self._client().get("/http418")
+        assert resp.status_code == 418
+        assert resp.json() == {"detail": "teapot"}

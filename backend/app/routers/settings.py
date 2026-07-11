@@ -1,15 +1,21 @@
-import docker
-import httpx
+from collections.abc import Callable
+from typing import Any, NamedTuple
+
+# Preserve the historical ``app.routers.settings.docker`` monkeypatch target
+# used by diagnostics tests/callers after AR-N22 moves those endpoints out.
+import docker as docker
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app import settings_store
 from app.auth import get_current_user
-from app.database import get_db
+from app.database import commit_with_lock, db_write_section, get_db
+from app.models.service import Service
 from app.schemas.settings import (
     AllSettingsResponse,
     CloudflareSettingsResponse,
     CloudflareSettingsUpdate,
-    ConnectionTestResult,
     DockerSettingsResponse,
     DockerSettingsUpdate,
     GeneralSettingsResponse,
@@ -20,16 +26,17 @@ from app.schemas.settings import (
     TailscaleSettingsUpdate,
 )
 from app.secrets import (
-    ALL_SECRETS,
     CLOUDFLARE_TOKEN,
     TAILSCALE_API_KEY,
     TAILSCALE_AUTH_KEY,
-    delete_secret,
+    TS_APIKEY_PREFIX,
+    TS_AUTHKEY_PREFIX,
+    is_valid_ts_api_key,
+    is_valid_ts_auth_key,
     read_secret,
-    secret_exists,
     write_secret,
 )
-from app.settings_store import get_all_settings, get_setting, set_setting
+from app.setup_state import missing_setup_requirements
 
 router = APIRouter(
     prefix="/api/settings",
@@ -38,57 +45,128 @@ router = APIRouter(
 )
 
 
-def _is_valid_tailscale_auth_key(value: str) -> bool:
-    return value.startswith("tskey-auth-") or value.startswith("tskey-reusable-")
+def _secret_configured(name: str) -> bool:
+    return bool(read_secret(name))
 
 
-def _is_valid_tailscale_api_key(value: str) -> bool:
-    return value.startswith("tskey-api-")
+class _Field(NamedTuple):
+    """One declarative settings field.
+
+    ``key`` is the settings-store key; ``serialize`` turns the validated schema
+    attribute into its stored string form (write path); ``read`` reconstructs
+    the response value from the settings dict / db (read path). Holding both
+    directions in one descriptor removes the mirror-drift between the update
+    handlers and ``_build_response`` that AR10 targets.
+    """
+
+    key: str
+    serialize: Callable[[Any], str]
+    read: Callable[[Session, dict[str, str]], Any]
 
 
-def _require_developer_mode(db: Session) -> None:
-    if get_setting(db, "developer_mode") != "true":
-        raise HTTPException(status_code=403, detail="Developer Mode must be enabled first")
+def _str_field(key: str) -> _Field:
+    return _Field(key, lambda v: v, lambda db, s: s[key])
+
+
+def _int_field(key: str) -> _Field:
+    return _Field(key, str, lambda db, s: settings_store.get_positive_int_setting(db, key))
+
+
+def _bool_field(key: str) -> _Field:
+    return _Field(
+        key,
+        lambda v: "true" if v else "false",
+        lambda db, s: s[key] == "true",
+    )
+
+
+# Per-section declarative field maps: schema attribute -> stored setting field.
+# Single source driving both apply_section (write) and _build_response (read).
+_GENERAL_FIELDS: dict[str, _Field] = {
+    "base_domain": _str_field("base_domain"),
+    "acme_email": _str_field("acme_email"),
+    "reconcile_interval_seconds": _int_field("reconcile_interval_seconds"),
+    "health_check_interval_seconds": _int_field("health_check_interval_seconds"),
+    "cert_renewal_window_days": _int_field("cert_renewal_window_days"),
+    "event_retention_days": _int_field("event_retention_days"),
+    "timezone": _str_field("timezone"),
+    "developer_mode": _bool_field("developer_mode"),
+}
+_CLOUDFLARE_FIELDS: dict[str, _Field] = {
+    "zone_id": _str_field("cf_zone_id"),
+}
+_TAILSCALE_FIELDS: dict[str, _Field] = {
+    "control_url": _str_field("ts_control_url"),
+    "default_ts_hostname_prefix": _str_field("ts_default_hostname_prefix"),
+}
+_DOCKER_FIELDS: dict[str, _Field] = {
+    "socket_path": _str_field("docker_socket_path"),
+}
+_PATH_FIELDS: dict[str, _Field] = {
+    "generated_root": _str_field("generated_root"),
+    "cert_root": _str_field("cert_root"),
+    "tailscale_state_root": _str_field("tailscale_state_root"),
+}
+
+
+def apply_section(db: Session, body: BaseModel, fieldmap: dict[str, _Field]) -> None:
+    """Persist each mapped field the request actually set.
+
+    Iterates the field map in declaration order and, preserving the historical
+    None-skip semantics exactly, calls ``set_setting`` only for attributes whose
+    value is not None. Special-cases (base-domain guard, Tailscale key
+    validation, post-commit secret writes) stay in the handlers as explicit
+    hooks — this helper only owns the mechanical field copy.
+    """
+    for attr, field in fieldmap.items():
+        value = getattr(body, attr)
+        if value is not None:
+            settings_store.set_setting(db, field.key, field.serialize(value))
 
 
 def _build_response(db: Session) -> AllSettingsResponse:
-    s = get_all_settings(db)
+    s = settings_store.get_all_settings(db)
+
+    def read_section(fieldmap: dict[str, _Field]) -> dict[str, Any]:
+        return {attr: field.read(db, s) for attr, field in fieldmap.items()}
+
     return AllSettingsResponse(
-        general=GeneralSettingsResponse(
-            base_domain=s["base_domain"],
-            acme_email=s["acme_email"],
-            reconcile_interval_seconds=int(s["reconcile_interval_seconds"]),
-            cert_renewal_window_days=int(s["cert_renewal_window_days"]),
-            timezone=s["timezone"],
-            developer_mode=s["developer_mode"] == "true",
-        ),
+        general=GeneralSettingsResponse(**read_section(_GENERAL_FIELDS)),
         cloudflare=CloudflareSettingsResponse(
-            zone_id=s["cf_zone_id"],
-            token_configured=secret_exists(CLOUDFLARE_TOKEN),
+            token_configured=_secret_configured(CLOUDFLARE_TOKEN),
+            **read_section(_CLOUDFLARE_FIELDS),
         ),
         tailscale=TailscaleSettingsResponse(
-            auth_key_configured=secret_exists(TAILSCALE_AUTH_KEY),
-            api_key_configured=secret_exists(TAILSCALE_API_KEY),
-            control_url=s["ts_control_url"],
-            default_ts_hostname_prefix=s["ts_default_hostname_prefix"],
+            auth_key_configured=_secret_configured(TAILSCALE_AUTH_KEY),
+            api_key_configured=_secret_configured(TAILSCALE_API_KEY),
+            **read_section(_TAILSCALE_FIELDS),
         ),
-        docker=DockerSettingsResponse(
-            socket_path=s["docker_socket_path"],
-        ),
-        paths=PathSettingsResponse(
-            generated_root=s["generated_root"],
-            cert_root=s["cert_root"],
-            tailscale_state_root=s["tailscale_state_root"],
-        ),
+        docker=DockerSettingsResponse(**read_section(_DOCKER_FIELDS)),
+        paths=PathSettingsResponse(**read_section(_PATH_FIELDS)),
         setup_complete=s["setup_complete"] == "true",
     )
 
+
+def _reject_base_domain_change_with_services(db: Session, new_domain: str) -> None:
+    # Compare case-insensitively: DNS names are case-insensitive, the incoming
+    # value is already lowercased by GeneralSettingsUpdate.normalize_base_domain,
+    # and a legacy deployment predating that validator can hold a mixed-case
+    # stored value. Comparing raw would flag an unchanged domain as a change and
+    # 409-lock the whole /general section on upgrade.
+    if new_domain.lower() == settings_store.get_setting(db, "base_domain").lower():
+        return
+
+    if db.query(Service.id).first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot change base domain while services exist",
+        )
 
 # --- GET all settings ---
 
 
 @router.get("", response_model=AllSettingsResponse)
-async def get_settings(db: Session = Depends(get_db)):
+def get_settings(db: Session = Depends(get_db)):
     return _build_response(db)
 
 
@@ -96,188 +174,84 @@ async def get_settings(db: Session = Depends(get_db)):
 
 
 @router.put("/general", response_model=AllSettingsResponse)
-async def update_general(body: GeneralSettingsUpdate, db: Session = Depends(get_db)):
-    if body.base_domain is not None:
-        set_setting(db, "base_domain", body.base_domain)
-    if body.acme_email is not None:
-        set_setting(db, "acme_email", body.acme_email)
-    if body.reconcile_interval_seconds is not None:
-        set_setting(db, "reconcile_interval_seconds", str(body.reconcile_interval_seconds))
-    if body.cert_renewal_window_days is not None:
-        set_setting(db, "cert_renewal_window_days", str(body.cert_renewal_window_days))
-    if body.timezone is not None:
-        set_setting(db, "timezone", body.timezone)
-    if body.developer_mode is not None:
-        set_setting(db, "developer_mode", "true" if body.developer_mode else "false")
-    db.commit()
+def update_general(body: GeneralSettingsUpdate, db: Session = Depends(get_db)):
+    with db_write_section(db):
+        # Special-case hook: reject a base-domain change while services exist.
+        # Runs before apply_section writes base_domain (same order as before).
+        if body.base_domain is not None:
+            _reject_base_domain_change_with_services(db, body.base_domain)
+        apply_section(db, body, _GENERAL_FIELDS)
+        commit_with_lock(db)
     return _build_response(db)
 
 
 @router.put("/cloudflare", response_model=AllSettingsResponse)
-async def update_cloudflare(body: CloudflareSettingsUpdate, db: Session = Depends(get_db)):
-    if body.zone_id is not None:
-        set_setting(db, "cf_zone_id", body.zone_id)
+def update_cloudflare(body: CloudflareSettingsUpdate, db: Session = Depends(get_db)):
+    with db_write_section(db):
+        apply_section(db, body, _CLOUDFLARE_FIELDS)
+        commit_with_lock(db)
+    # Special-case hook: persist the secret only after the DB write commits, so
+    # a failed DB write leaves no orphaned secret on disk (a retry re-applies
+    # both).
     if body.token is not None:
-        write_secret(CLOUDFLARE_TOKEN, body.token)
-    db.commit()
+        write_secret(CLOUDFLARE_TOKEN, body.token.strip())
     return _build_response(db)
 
 
 @router.put("/tailscale", response_model=AllSettingsResponse)
-async def update_tailscale(body: TailscaleSettingsUpdate, db: Session = Depends(get_db)):
-    if body.auth_key is not None and not _is_valid_tailscale_auth_key(body.auth_key):
+def update_tailscale(body: TailscaleSettingsUpdate, db: Session = Depends(get_db)):
+    # Special-case hook: validate the Tailscale key prefixes before any write.
+    auth_key = body.auth_key.strip() if body.auth_key is not None else None
+    api_key = body.api_key.strip() if body.api_key is not None else None
+    if auth_key is not None and not is_valid_ts_auth_key(auth_key):
         raise HTTPException(
             status_code=400,
-            detail="Tailscale auth key must start with 'tskey-auth-' or 'tskey-reusable-'",
+            detail=f"Tailscale auth key must start with '{TS_AUTHKEY_PREFIX}'",
         )
-    if body.api_key is not None and not _is_valid_tailscale_api_key(body.api_key):
+    if api_key is not None and not is_valid_ts_api_key(api_key):
         raise HTTPException(
             status_code=400,
-            detail="Tailscale API key must start with 'tskey-api-'",
+            detail=f"Tailscale API key must start with '{TS_APIKEY_PREFIX}'",
         )
 
-    if body.auth_key is not None:
-        write_secret(TAILSCALE_AUTH_KEY, body.auth_key)
-    if body.api_key is not None:
-        write_secret(TAILSCALE_API_KEY, body.api_key)
-    if body.control_url is not None:
-        set_setting(db, "ts_control_url", body.control_url)
-    if body.default_ts_hostname_prefix is not None:
-        set_setting(db, "ts_default_hostname_prefix", body.default_ts_hostname_prefix)
-    db.commit()
+    with db_write_section(db):
+        apply_section(db, body, _TAILSCALE_FIELDS)
+        commit_with_lock(db)
+    # Special-case hook: persist secrets only after the DB write commits, so a
+    # failed DB write leaves no orphaned secret on disk (a retry re-applies
+    # both).
+    if auth_key is not None:
+        write_secret(TAILSCALE_AUTH_KEY, auth_key)
+    if api_key is not None:
+        write_secret(TAILSCALE_API_KEY, api_key)
     return _build_response(db)
 
 
 @router.put("/docker", response_model=AllSettingsResponse)
-async def update_docker(body: DockerSettingsUpdate, db: Session = Depends(get_db)):
-    if body.socket_path is not None:
-        set_setting(db, "docker_socket_path", body.socket_path)
-    db.commit()
+def update_docker(body: DockerSettingsUpdate, db: Session = Depends(get_db)):
+    with db_write_section(db):
+        apply_section(db, body, _DOCKER_FIELDS)
+        commit_with_lock(db)
     return _build_response(db)
 
 
 @router.put("/paths", response_model=AllSettingsResponse)
-async def update_paths(body: PathSettingsUpdate, db: Session = Depends(get_db)):
-    if body.generated_root is not None:
-        set_setting(db, "generated_root", body.generated_root)
-    if body.cert_root is not None:
-        set_setting(db, "cert_root", body.cert_root)
-    if body.tailscale_state_root is not None:
-        set_setting(db, "tailscale_state_root", body.tailscale_state_root)
-    db.commit()
+def update_paths(body: PathSettingsUpdate, db: Session = Depends(get_db)):
+    with db_write_section(db):
+        apply_section(db, body, _PATH_FIELDS)
+        commit_with_lock(db)
     return _build_response(db)
 
 
 @router.put("/setup-complete", response_model=AllSettingsResponse)
-async def mark_setup_complete(db: Session = Depends(get_db)):
-    if not secret_exists(TAILSCALE_AUTH_KEY) or not secret_exists(TAILSCALE_API_KEY):
+def mark_setup_complete(db: Session = Depends(get_db)):
+    missing = missing_setup_requirements(db)
+    if missing:
         raise HTTPException(
             status_code=400,
-            detail="Setup incomplete: configure both the Tailscale auth key and API key first",
+            detail="Setup incomplete: configure " + ", ".join(missing) + " first",
         )
-    set_setting(db, "setup_complete", "true")
-    db.commit()
+    with db_write_section(db):
+        settings_store.set_setting(db, "setup_complete", "true")
+        commit_with_lock(db)
     return _build_response(db)
-
-
-@router.post("/developer/reset-setup-complete")
-async def reset_setup_complete(db: Session = Depends(get_db)):
-    _require_developer_mode(db)
-    set_setting(db, "setup_complete", "false")
-    db.commit()
-    return {"success": True, "message": "setup_complete reset"}
-
-
-@router.post("/developer/reset-all")
-async def reset_all(db: Session = Depends(get_db)):
-    _require_developer_mode(db)
-
-    from app.models.event import Event
-    from app.models.job import Job
-    from app.models.service import Service
-    from app.models.setting import Setting
-    from app.models.user import User
-    from app.routers.services import _delete_service_record
-
-    service_ids = [service_id for (service_id,) in db.query(Service.id).all()]
-    for service_id in service_ids:
-        service = db.get(Service, service_id)
-        if service is not None:
-            _delete_service_record(db, service, cleanup_dns=True)
-
-    for secret_name in ALL_SECRETS:
-        delete_secret(secret_name)
-
-    db.query(Job).delete()
-    db.query(Event).delete()
-    db.query(User).delete()
-    db.query(Setting).delete()
-    db.commit()
-
-    return {"success": True, "message": "All setup state reset"}
-
-
-# --- Connection tests ---
-
-
-@router.post("/test/docker", response_model=ConnectionTestResult)
-async def test_docker(db: Session = Depends(get_db)):
-    socket_path = get_setting(db, "docker_socket_path")
-    try:
-        client = docker.DockerClient(base_url=socket_path)
-        client.ping()
-        info = client.info()
-        return ConnectionTestResult(
-            success=True,
-            message=f"Connected to Docker {info.get('ServerVersion', 'unknown')}",
-        )
-    except Exception as e:
-        return ConnectionTestResult(success=False, message=str(e))
-
-
-@router.post("/test/cloudflare", response_model=ConnectionTestResult)
-async def test_cloudflare(db: Session = Depends(get_db)):
-    token = read_secret(CLOUDFLARE_TOKEN)
-    if not token:
-        return ConnectionTestResult(success=False, message="Cloudflare token not configured")
-
-    zone_id = get_setting(db, "cf_zone_id")
-    if not zone_id:
-        return ConnectionTestResult(success=False, message="Cloudflare zone ID not configured")
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"https://api.cloudflare.com/client/v4/zones/{zone_id}",
-                headers={"Authorization": f"Bearer {token}"},
-                timeout=10,
-            )
-            data = resp.json()
-            if data.get("success"):
-                zone_name = data["result"]["name"]
-                return ConnectionTestResult(
-                    success=True, message=f"Connected to zone: {zone_name}"
-                )
-            errors = data.get("errors", [])
-            msg = errors[0]["message"] if errors else "Unknown error"
-            return ConnectionTestResult(success=False, message=msg)
-    except Exception as e:
-        return ConnectionTestResult(success=False, message=str(e))
-
-
-@router.post("/test/tailscale", response_model=ConnectionTestResult)
-async def test_tailscale():
-    token = read_secret(TAILSCALE_AUTH_KEY)
-    if not token:
-        return ConnectionTestResult(success=False, message="Tailscale auth key not configured")
-
-    # Basic format validation — full validation happens when creating an edge
-    if token.startswith("tskey-auth-") or token.startswith("tskey-reusable-"):
-        return ConnectionTestResult(
-            success=True,
-            message="Auth key format looks valid (full test on edge creation)",
-        )
-    return ConnectionTestResult(
-        success=False,
-        message="Auth key should start with 'tskey-auth-' or 'tskey-reusable-'",
-    )

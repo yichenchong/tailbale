@@ -1,6 +1,6 @@
 # tailBale
 
-Self-hosted orchestrator for Unraid that exposes Docker containers as individually shareable HTTPS services via per-service Tailscale edge containers.
+Self-hosted orchestrator that exposes Docker containers as individually shareable HTTPS services via per-service Tailscale edge containers.
 
 Each exposed service gets its own Tailscale identity, Let's Encrypt certificate, and Cloudflare DNS record under `<service>.yourdomain.com` — no public inbound ports, no Cloudflare Tunnel, no reverse-proxy dashboard click-ops.
 
@@ -13,18 +13,25 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
                                          DNS A record → Tailscale IP
 ```
 
-1. **Discover** running Docker containers on your Unraid server
-2. **Expose** a container through the wizard — tailBale creates:
-   - A dedicated edge container with Tailscale + Caddy
-   - A Let's Encrypt certificate via DNS-01 challenge (Cloudflare)
-   - A DNS A record pointing `service.yourdomain.com` to the edge's Tailscale IP
-3. **Access** your service from any device on your tailnet at `https://service.yourdomain.com`
+1. **Discover** running Docker containers on your server
+2. **Complete the setup wizard** — tailBale stores and validates:
+   - base domain
+   - Cloudflare zone ID + API token
+   - ACME email
+   - Tailscale reusable auth key
+   - Tailscale API key
+   - Docker socket path
+3. **Expose** a container through the UI — tailBale creates:
+   - a dedicated edge container with Tailscale + Caddy
+   - a Let's Encrypt certificate via DNS-01 challenge (Cloudflare)
+   - a DNS A record pointing `service.yourdomain.com` to the edge's Tailscale IP
+4. **Access** your service from any device on your tailnet at `https://service.yourdomain.com`
 
 ## Prerequisites
 
-- **Unraid 6.12+** with Docker enabled
+- **A Linux host** with Docker installed
 - **Domain** managed in Cloudflare
-- **Cloudflare API token** with DNS:Edit permission
+- **Cloudflare API token** scoped to your zone with Zone:Read and DNS:Edit permissions
 - **Tailscale account** with both:
   - a reusable auth key for edge login
   - an API key for device cleanup and management
@@ -32,24 +39,37 @@ Each exposed service gets its own Tailscale identity, Let's Encrypt certificate,
 ## Quick Start
 
 ```bash
-# Clone and configure
-git clone https://github.com/yichenchong/tailbale.git /mnt/user/appdata/tailbale
-cd /mnt/user/appdata/tailbale
-cp backend/.env.example .env
+# Clone
+git clone https://github.com/yichenchong/tailbale.git /opt/tailbale
+cd /opt/tailbale
 
-# Build and run
-docker compose -f docker-compose.prod.yml up -d --build
+# Build and run (safe for first-time deploys, upgrades, and non-executable checkouts)
+bash ./deploy.sh
 
-# Open http://<unraid-ip>:8080 and complete the setup wizard
+# Optional host port, host data path, or runtime override:
+# HOST_PORT=6790 HOST_DATA_DIR=/opt/tailbale/data COOKIE_SECURE=true bash ./deploy.sh
+
+# Open http://localhost:6780 on the server (or your HOST_PORT override) and complete the setup wizard
 ```
 
 See [DEPLOY.md](DEPLOY.md) for detailed deployment instructions, environment variables, and troubleshooting.
+
+## Notable Behavior
+
+- **Edge container per service** — each exposure gets its own Docker network, edge container, Tailscale identity, and certificate material.
+- **Developer Mode** — in **Settings → General**, enable Developer Mode to reveal the **Developer** tab with:
+  - `Reset setup_complete`
+  - `Reset all`
+- **Tailscale keys are different**:
+  - **Auth key**: used by the edge container to run `tailscale up`
+  - **API key**: used by tailBale to clean up tailnet devices on recreate/delete
+- **HTTPS probe failures are logged explicitly** — probe failures now log whether the cause was missing Tailscale IP, non-running edge container, curl failure, no HTTP response, or upstream 5xx.
 
 ## Stack
 
 | Layer | Technology |
 |---|---|
-| Backend | Python 3.12, FastAPI, SQLAlchemy 2.0, SQLite |
+| Backend | Python 3.14, FastAPI, SQLAlchemy 2.0, SQLite |
 | Frontend | React 18, TypeScript, Vite 8, Tailwind CSS 4 |
 | Edge proxy | Caddy (per-service, with file-based TLS) |
 | Networking | Tailscale (per-service identity) |
@@ -79,9 +99,8 @@ npm run dev
 ### Tests
 
 ```bash
-# Backend (from repo root or backend/)
-py -3.12 -m pytest
-
+# Backend (from repo root)
+backend/.venv/bin/python -m pytest
 # Frontend (from frontend/)
 npx vitest run
 ```
@@ -94,13 +113,14 @@ npx vitest run
 │       ├── main.py              # FastAPI app + lifespan
 │       ├── config.py            # Environment-based settings
 │       ├── auth.py              # Password hashing, JWT, auth dependency
-│       ├── models/              # SQLAlchemy models (7 tables + users)
+│       ├── models/              # SQLAlchemy models (services, status, certs, DNS, events, jobs, settings, users)
 │       ├── routers/             # API endpoints
+│       ├── services/            # Service lifecycle layer (create/update/delete/edge_ops/cert_ops/errors)
 │       ├── edge/                # Edge container + network management
 │       ├── certs/               # Certificate issuance + renewal
 │       ├── adapters/            # Cloudflare DNS adapter
 │       ├── reconciler/          # Idempotent service reconciliation
-│       ├── health/              # Health check system (11 subchecks)
+│       ├── health/              # Health check system (12 subchecks)
 │       └── events/              # Event emission
 ├── edge/
 │   ├── Dockerfile               # Tailscale + Caddy edge image

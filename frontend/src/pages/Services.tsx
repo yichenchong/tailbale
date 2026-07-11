@@ -1,83 +1,57 @@
-import { useEffect, useState } from "react"
+import { useCallback } from "react"
 import { Link, useNavigate } from "react-router-dom"
-import { api, type ServiceItem, type ServiceListResponse } from "@/lib/api"
-import { useTimezone, formatDate } from "@/lib/useTimezone"
-import { cn } from "@/lib/utils"
-import { Loader2, Plus, ExternalLink, MoreVertical } from "lucide-react"
-
-const PHASE_STYLES: Record<string, string> = {
-  healthy: "bg-green-100 text-green-700",
-  pending: "bg-yellow-100 text-yellow-700",
-  warning: "bg-yellow-100 text-yellow-700",
-  error: "bg-red-100 text-red-700",
-  failed: "bg-red-100 text-red-700",
-}
-
-function formatCertExpiry(iso: string | null | undefined, tz: string): { text: string; style: string } {
-  if (!iso) return { text: "—", style: "text-zinc-400" }
-  const expiry = new Date(iso)
-  const now = new Date()
-  const daysLeft = Math.ceil((expiry.getTime() - now.getTime()) / (1000 * 60 * 60 * 24))
-  const text = formatDate(iso, tz)
-  if (daysLeft < 0) return { text, style: "text-red-600 font-medium" }
-  if (daysLeft <= 14) return { text, style: "text-yellow-600 font-medium" }
-  return { text, style: "text-zinc-500" }
-}
+import { api, type ServiceItem } from "@/lib/api"
+import { useTimezone } from "@/lib/useTimezone"
+import { cn, errorMessage } from "@/lib/utils"
+import { formatCertExpiry } from "@/lib/certStatus"
+import { phaseStyle, phaseLabel } from "@/lib/statusStyles"
+import { useResource } from "@/lib/useResource"
+import { useTransientMessage } from "@/lib/useTransientMessage"
+import { PageError, PageLoading } from "@/components/PageState"
+import { ResourceBoundary } from "@/components/ResourceBoundary"
+import { Plus, ExternalLink } from "lucide-react"
+import { RowActionsMenu } from "@/components/service/RowActionsMenu"
+import { useRowActionMenu, type RowActionMenuItem } from "@/components/service/useRowActionMenu"
+import { serviceLifecycleActions } from "@/components/service/lifecycleActions"
 
 export default function Services() {
   const navigate = useNavigate()
   const tz = useTimezone()
-  const [services, setServices] = useState<ServiceItem[]>([])
-  const [loading, setLoading] = useState(true)
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null)
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null)
-  const [actionMsg, setActionMsg] = useState<string | null>(null)
+  const menu = useRowActionMenu()
+  const { message, show } = useTransientMessage(3000)
 
-  const load = () => {
-    setLoading(true)
-    api.get<ServiceListResponse>("/services")
-      .then((data) => setServices(data.services))
-      .finally(() => setLoading(false))
-  }
+  const fetcher = useCallback(() => api.services.list(), [])
+  const { data, loading, error, refresh } = useResource(fetcher)
+  const services = data?.services ?? []
 
-  useEffect(() => { load() }, [])
-
-  const doAction = async (svcId: string, path: string, method: "post" | "put" = "post", body?: unknown) => {
-    setOpenMenuId(null)
-    setMenuPos(null)
+  const runAction = async (action: () => Promise<unknown>) => {
+    // Return focus to the row's trigger (WAI-ARIA menu-button pattern / WCAG
+    // 2.4.3), matching the Escape path — activating an item must not strand
+    // keyboard focus on <body> once the menuitem unmounts.
+    menu.close(true)
     try {
-      if (method === "put") {
-        await api.put(`/services/${svcId}${path}`, body)
-      } else {
-        await api.post(`/services/${svcId}${path}`)
-      }
-      load()
+      await action()
+      void refresh()
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      setActionMsg(msg)
-      setTimeout(() => setActionMsg(null), 3000)
+      show(errorMessage(e))
     }
   }
 
   const handleDelete = async (svc: ServiceItem) => {
-    setOpenMenuId(null)
-    setMenuPos(null)
-    if (!window.confirm(`Delete service "${svc.name}"? This cannot be undone.`)) return
+    menu.close(true)
+    if (!window.confirm(`Delete service "${svc.name}"? This also removes its DNS record and cannot be undone.`)) return
     try {
-      await api.delete(`/services/${svc.id}`)
-      load()
+      // Match the detail page's default: clean up the Cloudflare DNS record so a
+      // list-delete doesn't silently orphan a record pointing at a now-dead IP.
+      await api.services.remove(svc.id, { cleanupDns: true })
+      void refresh()
     } catch (e) {
-      setActionMsg(e instanceof Error ? e.message : String(e))
-      setTimeout(() => setActionMsg(null), 3000)
+      show(errorMessage(e))
     }
   }
 
-  if (loading) {
-    return (
-      <div className="flex items-center gap-2 p-8 text-zinc-500">
-        <Loader2 className="h-4 w-4 animate-spin" /> Loading services...
-      </div>
-    )
+  if (loading && services.length === 0) {
+    return <PageLoading>Loading services...</PageLoading>
   }
 
   return (
@@ -96,43 +70,74 @@ export default function Services() {
         </button>
       </div>
 
-      {actionMsg && (
-        <div className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{actionMsg}</div>
+      {message && (
+        <div role="status" className="mt-4 rounded-md bg-yellow-50 px-4 py-2 text-sm text-yellow-800">{message}</div>
       )}
 
-      {services.length === 0 ? (
-        <div className="mt-8 rounded-md bg-zinc-50 px-4 py-12 text-center">
-          <p className="text-sm text-zinc-500">No services exposed yet.</p>
-          <button
-            onClick={() => navigate("/discover")}
-            className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800"
-          >
-            <Plus className="h-4 w-4" />
-            Discover Containers
-          </button>
-        </div>
-      ) : (
+      <ResourceBoundary
+        errored={!!error && services.length === 0}
+        empty={services.length === 0}
+        errorSlot={
+          <PageError className="mt-8 rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+            Unable to load services: {error}
+          </PageError>
+        }
+        emptySlot={
+          <div className="mt-8 rounded-md bg-zinc-50 px-4 py-12 text-center">
+            <p className="text-sm text-zinc-500">No services exposed yet.</p>
+            <button
+              onClick={() => navigate("/discover")}
+              className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-zinc-900 px-3 py-2 text-sm font-medium text-white hover:bg-zinc-800"
+            >
+              <Plus className="h-4 w-4" />
+              Discover Containers
+            </button>
+          </div>
+        }
+        refreshErrorSlot={
+          error && services.length > 0 ? (
+            <div role="alert" className="mt-4 rounded-md bg-red-50 px-4 py-2 text-sm text-red-800">
+              Unable to refresh services: {error}
+            </div>
+          ) : null
+        }
+      >
         <div className="mt-6 overflow-x-auto rounded-md border border-zinc-200">
           <table className="min-w-full divide-y divide-zinc-200">
             <thead className="bg-zinc-50">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Service</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Hostname</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Upstream</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Edge IP</th>
-                <th className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Cert Expiry</th>
-                <th className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Actions</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Service</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Hostname</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Upstream</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Status</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Edge IP</th>
+                <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-zinc-500">Cert Expiry</th>
+                <th scope="col" className="px-4 py-3 text-right text-xs font-medium uppercase text-zinc-500">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-100 bg-white">
               {services.map((svc) => {
                 const phase = svc.status?.phase || "pending"
                 const cert = formatCertExpiry(svc.status?.cert_expires_at, tz)
+                const actions = serviceLifecycleActions(svc.id)
+                const menuItems: RowActionMenuItem[] = [
+                  { key: "view", label: "View Details", to: `/services/${encodeURIComponent(svc.id)}` },
+                  ...(svc.enabled
+                    ? [
+                        { key: actions.reload.key, label: actions.reload.label, onSelect: () => runAction(actions.reload.run) },
+                        { key: actions.restart.key, label: actions.restart.label, onSelect: () => runAction(actions.restart.run) },
+                        { key: actions.recreate.key, label: actions.recreate.label, onSelect: () => runAction(actions.recreate.run) },
+                      ]
+                    : []),
+                  svc.enabled
+                    ? { key: actions.disable.key, label: actions.disable.label, onSelect: () => runAction(actions.disable.run) }
+                    : { key: actions.enable.key, label: actions.enable.label, onSelect: () => runAction(actions.enable.run) },
+                  { key: "delete", label: "Delete", onSelect: () => handleDelete(svc), danger: true },
+                ]
                 return (
                   <tr key={svc.id} className="hover:bg-zinc-50">
                     <td className="whitespace-nowrap px-4 py-3">
-                      <Link to={`/services/${svc.id}`} className="text-sm font-medium text-zinc-900 hover:underline">
+                      <Link to={`/services/${encodeURIComponent(svc.id)}`} className="text-sm font-medium text-zinc-900 hover:underline">
                         {svc.name}
                       </Link>
                     </td>
@@ -148,9 +153,9 @@ export default function Services() {
                     <td className="px-4 py-3">
                       <span className={cn(
                         "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
-                        PHASE_STYLES[phase] || "bg-zinc-100 text-zinc-600"
+                        phaseStyle(phase)
                       )}>
-                        {phase}
+                        {phaseLabel(phase)}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-sm text-zinc-500 font-mono">
@@ -160,58 +165,7 @@ export default function Services() {
                       {cert.text}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      <div className="inline-block">
-                        <button
-                          onClick={(e) => {
-                            if (openMenuId === svc.id) {
-                              setOpenMenuId(null)
-                              setMenuPos(null)
-                            } else {
-                              const rect = e.currentTarget.getBoundingClientRect()
-                              setMenuPos({ top: rect.bottom + 4, left: rect.right - 176 })
-                              setOpenMenuId(svc.id)
-                            }
-                          }}
-                          className="rounded p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
-                          aria-label="Actions"
-                        >
-                          <MoreVertical className="h-4 w-4" />
-                        </button>
-                        {openMenuId === svc.id && menuPos && (
-                          <>
-                            <div className="fixed inset-0 z-10" onClick={() => { setOpenMenuId(null); setMenuPos(null) }} />
-                            <div
-                              className="fixed z-50 w-44 rounded-md border border-zinc-200 bg-white py-1 shadow-lg"
-                              style={{ top: menuPos.top, left: menuPos.left }}
-                            >
-                              <Link to={`/services/${svc.id}`} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                View Details
-                              </Link>
-                              <button onClick={() => doAction(svc.id, "/reload")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                Reload Caddy
-                              </button>
-                              <button onClick={() => doAction(svc.id, "/restart-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                Restart Edge
-                              </button>
-                              <button onClick={() => doAction(svc.id, "/recreate-edge")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                Recreate Edge
-                              </button>
-                              {svc.enabled ? (
-                                <button onClick={() => doAction(svc.id, "/disable")} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                  Disable
-                                </button>
-                              ) : (
-                                <button onClick={() => doAction(svc.id, "", "put", { enabled: true })} className="block w-full px-3 py-1.5 text-left text-sm text-zinc-700 hover:bg-zinc-50">
-                                  Enable
-                                </button>
-                              )}
-                              <button onClick={() => handleDelete(svc)} className="block w-full px-3 py-1.5 text-left text-sm text-red-600 hover:bg-red-50">
-                                Delete
-                              </button>
-                            </div>
-                          </>
-                        )}
-                      </div>
+                      <RowActionsMenu rowId={svc.id} items={menuItems} menu={menu} />
                     </td>
                   </tr>
                 )
@@ -219,7 +173,7 @@ export default function Services() {
             </tbody>
           </table>
         </div>
-      )}
+      </ResourceBoundary>
     </div>
   )
 }

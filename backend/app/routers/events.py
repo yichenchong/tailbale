@@ -1,13 +1,13 @@
 """Events API endpoints — query the structured event log."""
 
-import json
-
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
 from app.database import get_db
-from app.models.event import Event
+from app.events.event_emitter import EVENT_KINDS
+from app.events.querying import query_events
+from app.events.serialization import event_to_dict
 from app.models.service import Service
 
 router = APIRouter(
@@ -17,61 +17,50 @@ router = APIRouter(
 )
 
 
-def _event_to_dict(evt: Event) -> dict:
-    return {
-        "id": evt.id,
-        "service_id": evt.service_id,
-        "kind": evt.kind,
-        "level": evt.level,
-        "message": evt.message,
-        "details": json.loads(evt.details) if evt.details else None,
-        "created_at": evt.created_at.isoformat() if evt.created_at else None,
-    }
-
-
 @router.get("")
-async def list_events(
+def list_events(
     service_id: str | None = None,
     kind: str | None = None,
     level: str | None = None,
     search: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """List events with optional filters."""
-    query = db.query(Event)
-
-    if service_id:
-        query = query.filter(Event.service_id == service_id)
-    if kind:
-        query = query.filter(Event.kind == kind)
-    if level:
-        query = query.filter(Event.level == level)
-    if search:
-        query = query.filter(Event.message.ilike(f"%{search}%"))
-
-    total = query.count()
-    events = (
-        query.order_by(Event.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+    rows, total = query_events(
+        db,
+        service_id=service_id,
+        kind=kind,
+        level=level,
+        search=search,
+        limit=limit,
+        offset=offset,
     )
-
     return {
-        "events": [_event_to_dict(e) for e in events],
+        "events": [event_to_dict(e) for e in rows],
         "total": total,
     }
 
 
+@router.get("/kinds")
+def event_kinds():
+    """Return the canonical registry of event kinds.
+
+    The single source the frontend's kind filter is built from, so the dropdown
+    never drifts from what the backend actually emits.
+    """
+    return {"kinds": sorted(EVENT_KINDS)}
+
+
 @router.get("/services/{service_id}")
-async def service_events(
+def service_events(
     service_id: str,
     kind: str | None = None,
     level: str | None = None,
-    limit: int = 100,
-    offset: int = 0,
+    search: str | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ):
     """Get events for a specific service."""
@@ -79,21 +68,16 @@ async def service_events(
     if not svc:
         raise HTTPException(status_code=404, detail="Service not found")
 
-    query = db.query(Event).filter(Event.service_id == service_id)
-    if kind:
-        query = query.filter(Event.kind == kind)
-    if level:
-        query = query.filter(Event.level == level)
-
-    total = query.count()
-    events = (
-        query.order_by(Event.created_at.desc())
-        .offset(offset)
-        .limit(limit)
-        .all()
+    rows, total = query_events(
+        db,
+        service_id=service_id,
+        kind=kind,
+        level=level,
+        search=search,
+        limit=limit,
+        offset=offset,
     )
-
     return {
-        "events": [_event_to_dict(e) for e in events],
+        "events": [event_to_dict(e) for e in rows],
         "total": total,
     }

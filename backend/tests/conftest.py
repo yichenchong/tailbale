@@ -1,20 +1,61 @@
+import os
+
+# Bcrypt's cost is deliberately exponential in `rounds` (production default:
+# 12, see app.config.Settings.bcrypt_rounds). The suite exercises real bcrypt
+# hashing/verification on every setup-user/login/password-change call and
+# gains no security benefit from paying the production cost per test. Force
+# (not setdefault) so a BCRYPT_ROUNDS already set in the ambient shell/CI env
+# can never silently defeat the speedup. This MUST run before any `app.*`
+# import: app.config.settings is built at import time, and
+# app.auth._DUMMY_BCRYPT_HASH is computed at import time by design (see
+# auth.py) — both need the fast value from the start. No test asserts on
+# real-bcrypt wall-clock timing, so forcing this is behavior-preserving.
+os.environ["BCRYPT_ROUNDS"] = "4"
+
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
+import docker
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+import app.database as database_module
+from app import config as config_module
+from app import secrets as secrets_module
+from app import settings_store as settings_store_module
 from app.auth import get_current_user
 from app.database import Base, get_db
+from app.main import app
 from app.models.user import User
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _ensure_jwt_secret_bootstrapped():
+    """AR12: importing app.config no longer creates the JWT secret; bootstrap it
+    once for the whole test session (mirrors the app-startup call) so every test
+    that signs/verifies a token has a stable secret regardless of which fixtures
+    it uses."""
+    config_module.ensure_jwt_secret()
+    yield
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _init_db_engine():
+    """AR12: importing app.database no longer builds the SQLAlchemy engine; run
+    the explicit bootstrap once for the whole test session (mirrors the
+    app-startup call) so database_module.engine / SessionLocal are non-None
+    before _client_for_engine captures them and before any other fixture."""
+    database_module.init_engine()
+    yield
 
 
 @pytest.fixture()
 def tmp_data_dir(tmp_path):
     """Provide a temporary data directory and patch app.config.settings."""
-    from app import config
+    config = config_module
 
     original = config.settings.data_dir
     config.settings.data_dir = tmp_path
@@ -42,7 +83,8 @@ def db_engine():
         cursor.close()
 
     Base.metadata.create_all(bind=engine)
-    return engine
+    yield engine
+    engine.dispose()
 
 
 @pytest.fixture()
@@ -54,11 +96,9 @@ def db_session(tmp_data_dir, db_engine):
     session.close()
 
 
-@pytest.fixture()
-def client(tmp_data_dir, db_engine):
-    """FastAPI TestClient with overridden DB dependency and temp data dir."""
-    import app.database as database_module
-
+@contextmanager
+def _client_for_engine(db_engine, *, bypass_auth: bool):
+    database_module.init_engine()
     original_engine = database_module.engine
     original_session_local = database_module.SessionLocal
     database_module.engine = db_engine
@@ -73,23 +113,42 @@ def client(tmp_data_dir, db_engine):
         finally:
             session.close()
 
-    from app.main import app
-
-    # Bypass auth for all existing tests — they aren't testing authentication
-    dummy_user = User(
-        id="usr_testuser0001",
-        username="testadmin",
-        password_hash="not-a-real-hash",
-        role="admin",
-    )
 
     app.dependency_overrides[get_db] = _override_get_db
-    app.dependency_overrides[get_current_user] = lambda: dummy_user
-    with TestClient(app) as c:
+    if bypass_auth:
+        # Bypass auth for tests that are not exercising authentication itself.
+        dummy_user = User(
+            id="usr_testuser0001",
+            username="testadmin",
+            password_hash="not-a-real-hash",
+            role="admin",
+        )
+        app.dependency_overrides[get_current_user] = lambda: dummy_user
+
+    try:
+        # The lifespan starts a best-effort edge-image build; stub it so tests never
+        # open a real Docker socket (no daemon under test — the SDK leaks its probe
+        # socket on a refused connection).
+        with patch("app.edge.image_builder.ensure_edge_image"), TestClient(app) as c:
+            yield c
+    finally:
+        app.dependency_overrides.clear()
+        database_module.engine = original_engine
+        database_module.SessionLocal = original_session_local
+
+
+@pytest.fixture()
+def client(tmp_data_dir, db_engine):
+    """FastAPI TestClient with overridden DB dependency, temp data dir, and auth bypass."""
+    with _client_for_engine(db_engine, bypass_auth=True) as c:
         yield c
-    app.dependency_overrides.clear()
-    database_module.engine = original_engine
-    database_module.SessionLocal = original_session_local
+
+
+@pytest.fixture()
+def auth_client(tmp_data_dir, db_engine):
+    """FastAPI TestClient with the test DB/temp data dir but no auth bypass."""
+    with _client_for_engine(db_engine, bypass_auth=False) as c:
+        yield c
 
 
 def _make_fake_container(name: str = "fakecontainer", exposed_ports=None, **attrs_overrides):
@@ -113,6 +172,35 @@ def _make_fake_container(name: str = "fakecontainer", exposed_ports=None, **attr
     return c
 
 
+def make_fake_docker_client(*, containers=None, networks=None, images=None):
+    """Build a lightweight MagicMock Docker client graph."""
+    client = MagicMock()
+    client.containers = containers if containers is not None else MagicMock()
+    client.networks = networks if networks is not None else MagicMock()
+    client.images = images if images is not None else MagicMock()
+    return client
+
+
+@pytest.fixture()
+def fake_docker_client_factory():
+    """Factory for opt-in Docker client mocks."""
+    return make_fake_docker_client
+
+
+@pytest.fixture()
+def configured_cloudflare(tmp_data_dir):
+    """Helper to store Cloudflare test settings and token in the temp data dir."""
+    def _configure(db, *, zone_id="zone123", token="cf-token", commit=True):
+        settings_store_module.set_setting(db, "cf_zone_id", zone_id)
+        if token is not None:
+            secrets_module.write_secret(secrets_module.CLOUDFLARE_TOKEN, token)
+        if commit:
+            db.commit()
+        return {"zone_id": zone_id, "token": token}
+
+    return _configure
+
+
 @pytest.fixture(autouse=True)
 def _mock_upstream_validation():
     """Auto-mock upstream container/port validation in create_service.
@@ -134,4 +222,23 @@ def _mock_background_reconcile():
     reconcile_one() call that tries to connect to Docker/Tailscale.
     """
     with patch("app.reconciler.reconcile_loop.reconcile_one"):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _no_real_docker():
+    """Guarantee no test ever opens a real Docker connection.
+
+    Without a local mock, ``docker.DockerClient(...)`` / ``.from_env()`` would try
+    to reach the daemon and — with none present under test — leak the SDK's probe
+    socket. Raising DockerException matches the no-daemon outcome tests already
+    rely on, but opens nothing. Tests needing a working client patch it themselves,
+    which overrides this default for their scope.
+    """
+
+    def _refuse(*_args, **_kwargs):
+        raise docker.errors.DockerException("Docker access is disabled under test")
+
+    with patch("docker.DockerClient", side_effect=_refuse) as mock_cls:
+        mock_cls.from_env = MagicMock(side_effect=_refuse)
         yield

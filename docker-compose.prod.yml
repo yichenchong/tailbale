@@ -3,19 +3,26 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # Publish on loopback only by default: the admin UI controls Docker (host-root),
+    # so it must not be reachable in cleartext on the LAN. Reach it over your tailnet
+    # via `tailscale serve` (HTTPS), or set BIND_ADDR to your tailnet IP for ip:port.
     ports:
-      - "6780:${PORT:-8080}"
+      - "${BIND_ADDR:-127.0.0.1}:${HOST_PORT:-6780}:${PORT:-8080}"
     volumes:
-      - ./data:/data
-      - /var/run/docker.sock:/var/run/docker.sock
+      - ${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}:/data
+      - ${DOCKER_SOCKET_PATH:-/var/run/docker.sock}:/var/run/docker.sock
     environment:
       - DATA_DIR=/data
-      - HOST_DATA_DIR=${HOST_DATA_DIR:-${PWD}/data}
+      - HOST_DATA_DIR=${HOST_DATA_DIR:?Set HOST_DATA_DIR to the absolute host data directory}
       - JWT_EXPIRY_HOURS=${JWT_EXPIRY_HOURS:-24}
       - COOKIE_SECURE=${COOKIE_SECURE:-false}
-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - LOGIN_MAX_FAILURES=${LOGIN_MAX_FAILURES:-5}
+      - LOGIN_LOCKOUT_SECONDS=${LOGIN_LOCKOUT_SECONDS:-60}
+      - CORS_ORIGINS=${CORS_ORIGINS-}
       - PORT=${PORT:-8080}
-      - DOCKER_SOCKET=unix:///var/run/docker.sock
+      - HOST=${HOST:-0.0.0.0}
+    labels:
+      - tailbale.main=true
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:${PORT:-8080}/api/health')"]

@@ -1,9 +1,23 @@
-node_modules
-frontend/node_modules
+# Node
+**/node_modules
 frontend/dist
-__pycache__
-*.pyc
-.env
-data/
+
+# Python
+**/__pycache__
+**/*.py[cod]
+**/.venv
+.ruff-venv
+**/.ruff_cache
+**/.pytest_cache
+**/.coverage
+**/coverage
+
+# Data, secrets, local env — never ship these to the build context
+**/data/
+**/.env
+
+# VCS, agent tooling, docs — not needed in the image
 .git
-*.md
+.claude
+.omp
+**/*.md

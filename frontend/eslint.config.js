@@ -23,6 +23,18 @@ export default tseslint.config(
         'warn',
         { allowConstantExport: true },
       ],
+      // Align with tsc's noUnusedLocals/noUnusedParameters, which exempt a
+      // leading underscore: a `_`-prefixed name marks an intentionally-unused
+      // binding (e.g. a fetch-stub that must accept but ignore its args). Keeps
+      // the rule an error otherwise so real dead bindings are still caught.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+        },
+      ],
     },
   },
 )

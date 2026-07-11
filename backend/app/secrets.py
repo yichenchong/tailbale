@@ -4,11 +4,17 @@ Secrets are stored as individual files under data/secrets/.
 The API never returns secret values — only whether they are configured.
 """
 
-import os
+import logging
 import stat
 from pathlib import Path
 
+from sqlalchemy.orm import Session
+
+from app import settings_store
 from app.config import settings
+from app.fsutil import atomic_write_text
+
+logger = logging.getLogger(__name__)
 
 # Known secret names
 CLOUDFLARE_TOKEN = "cloudflare_token"
@@ -18,50 +24,99 @@ TAILSCALE_API_KEY = "tailscale_api_key"
 ALL_SECRETS = [CLOUDFLARE_TOKEN, TAILSCALE_AUTH_KEY, TAILSCALE_API_KEY]
 
 
+# Tailscale key prefixes — single source of truth for validation and messages.
+TS_AUTHKEY_PREFIX = "tskey-auth-"
+TS_APIKEY_PREFIX = "tskey-api-"
+
+
+def is_valid_ts_auth_key(value: str | None) -> bool:
+    """True if ``value`` is a non-empty Tailscale auth key (``tskey-auth-…``)."""
+    return bool(value and value.startswith(TS_AUTHKEY_PREFIX))
+
+
+def is_valid_ts_api_key(value: str | None) -> bool:
+    """True if ``value`` is a non-empty Tailscale API key (``tskey-api-…``)."""
+    return bool(value and value.startswith(TS_APIKEY_PREFIX))
+
+
 def _secret_path(name: str) -> Path:
-    return settings.secrets_dir / name
+    if not name or name.startswith(".") or "/" in name or "\\" in name:
+        raise ValueError("Secret name must be a single, non-hidden path component")
+    path = settings.secrets_dir / name
+    try:
+        path.resolve().relative_to(settings.secrets_dir.resolve())
+    except ValueError as exc:
+        raise ValueError("Secret path must stay inside the secrets directory") from exc
+    return path
+
+
+def _write_private_atomic(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, value, mode=stat.S_IRUSR | stat.S_IWUSR)
 
 
 def write_secret(name: str, value: str) -> None:
     """Write a secret value to a file with restricted permissions."""
-    path = _secret_path(name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Write to temp file, then rename for atomicity
-    tmp_path = path.with_suffix(".tmp")
-    tmp_path.write_text(value, encoding="utf-8")
-
-    # Restrict permissions (owner read/write only) — best-effort on Windows
-    try:
-        os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
-    except OSError:
-        pass
-
-    tmp_path.replace(path)
+    _write_private_atomic(_secret_path(name), value)
 
 
 def read_secret(name: str) -> str | None:
-    """Read a secret value from file. Returns None if not set."""
+    """Read a secret value from file. Returns None if not set.
+
+    Reads directly and catches the not-a-readable-file errors rather than doing
+    an ``is_file()`` pre-check. This closes the TOCTOU window a concurrent /
+    multi-process delete would open (``FileNotFoundError``) while preserving the
+    old ``is_file()``-guard's graceful "not configured" result for *every*
+    filesystem state that guard swallowed: ``is_file()`` returns False on any
+    ``os.stat`` ``OSError`` (a directory ``IsADirectoryError``, a symlink loop
+    ``ELOOP``, a non-directory path component ``ENOTDIR``, an unreadable parent
+    ``EACCES``), so we catch ``OSError`` for parity. These are all real
+    deployment states — a Docker bind-mount whose host source is missing
+    materializes as an empty directory at the secret's path; a wrong-owner /
+    wrong-mode mount denies traversal — and each must read as "unset" (False in
+    :func:`app.routers.settings._secret_configured`), never crash the settings page or the
+    reconcile/renewal loops with an uncaught ``OSError``.
+    """
     path = _secret_path(name)
-    if not path.is_file():
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
         return None
-    return path.read_text(encoding="utf-8").strip()
-
-
-def secret_exists(name: str) -> bool:
-    """Check if a secret file exists (without reading it)."""
-    return _secret_path(name).is_file()
+    except OSError as exc:
+        logger.warning("Secret %s is not a readable file (%s); treating as unset", name, exc)
+        return None
 
 
 def delete_secret(name: str) -> bool:
-    """Delete a secret file. Returns True if it existed."""
+    """Delete a secret file. Returns True if it existed.
+
+    unlink() is itself atomic, so the prior is_file() pre-check only added a
+    TOCTOU window against a concurrent (or multi-process) delete. A vanished
+    file simply yields False. Any other filesystem state the old is_file() guard
+    swallowed (a *directory* from a missing Docker bind-mount source
+    ``IsADirectoryError``, a symlink loop ``ELOOP``, a non-directory component
+    ``ENOTDIR``, an unreadable parent ``EACCES``) is likewise treated as "no
+    secret file to delete" -> False, matching that guard rather than raising an
+    uncaught OSError. The directory / offending path itself is left untouched.
+    """
     path = _secret_path(name)
-    if path.is_file():
+    try:
         path.unlink()
         return True
-    return False
+    except FileNotFoundError:
+        logger.debug("Secret %s already absent on delete", name)
+        return False
+    except OSError as exc:
+        logger.warning("Secret path %s is not a deletable file (%s); not deleting", name, exc)
+        return False
 
 
-def get_secret_presence() -> dict[str, bool]:
-    """Return a dict of secret name -> whether it's configured."""
-    return {name: secret_exists(name) for name in ALL_SECRETS}
+def cloudflare_credentials(db: Session) -> tuple[str | None, str | None]:
+    """Return the ``(token, zone_id)`` Cloudflare credential pair.
+
+    The API token is a stored secret (:data:`CLOUDFLARE_TOKEN`); the zone id is
+    its non-secret companion setting (``cf_zone_id``). Both are required for any
+    Cloudflare DNS operation, so this is the single place that answers "are CF
+    credentials configured?" — callers guard on ``token and zone_id`` (AR1).
+    """
+    return read_secret(CLOUDFLARE_TOKEN), settings_store.get_setting(db, "cf_zone_id")

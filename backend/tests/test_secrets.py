@@ -1,14 +1,20 @@
 """Tests for file-based secret storage."""
+import os
+import stat
 
+import pytest
+
+from app.config import settings
 from app.secrets import (
     CLOUDFLARE_TOKEN,
-    TAILSCALE_AUTH_KEY,
+    cloudflare_credentials,
     delete_secret,
-    get_secret_presence,
+    is_valid_ts_api_key,
+    is_valid_ts_auth_key,
     read_secret,
-    secret_exists,
     write_secret,
 )
+from app.settings_store import set_setting
 
 
 class TestSecretStorage:
@@ -19,19 +25,37 @@ class TestSecretStorage:
     def test_read_nonexistent(self, tmp_data_dir):
         assert read_secret("nonexistent") is None
 
-    def test_secret_exists(self, tmp_data_dir):
-        assert not secret_exists("test_key")
-        write_secret("test_key", "value")
-        assert secret_exists("test_key")
-
     def test_delete_secret(self, tmp_data_dir):
         write_secret("test_key", "value")
         assert delete_secret("test_key") is True
-        assert not secret_exists("test_key")
         assert read_secret("test_key") is None
 
     def test_delete_nonexistent(self, tmp_data_dir):
         assert delete_secret("nonexistent") is False
+
+    def test_delete_secret_race_returns_false(self, tmp_data_dir, monkeypatch):
+        """If the file vanishes between callers (TOCTOU / multi-process delete),
+        unlink raises FileNotFoundError; delete_secret must swallow it and
+        return False rather than propagate the exception."""
+        write_secret("test_key", "value")
+
+        def _raise_gone(self, *args, **kwargs):
+            raise FileNotFoundError
+
+        monkeypatch.setattr("pathlib.Path.unlink", _raise_gone)
+        assert delete_secret("test_key") is False
+
+    def test_read_secret_race_returns_none(self, tmp_data_dir, monkeypatch):
+        """If the file vanishes after the existence check (TOCTOU / concurrent
+        delete), read_secret must swallow FileNotFoundError and return None
+        rather than propagate it to the caller (mirrors delete_secret)."""
+        write_secret("test_key", "value")
+
+        def _raise_gone(self, *args, **kwargs):
+            raise FileNotFoundError
+
+        monkeypatch.setattr("pathlib.Path.read_text", _raise_gone)
+        assert read_secret("test_key") is None
 
     def test_overwrite_secret(self, tmp_data_dir):
         write_secret("test_key", "old_value")
@@ -43,20 +67,167 @@ class TestSecretStorage:
         # read_secret strips
         assert read_secret("test_key") == "value_with_spaces"
 
-    def test_get_secret_presence(self, tmp_data_dir):
-        presence = get_secret_presence()
-        assert CLOUDFLARE_TOKEN in presence
-        assert TAILSCALE_AUTH_KEY in presence
-        assert all(v is False for v in presence.values())
-
-        write_secret(CLOUDFLARE_TOKEN, "cf_token_123")
-        presence = get_secret_presence()
-        assert presence[CLOUDFLARE_TOKEN] is True
-        assert presence[TAILSCALE_AUTH_KEY] is False
-
     def test_atomic_write(self, tmp_data_dir):
         """Verify no .tmp files are left behind after write."""
         write_secret("test_key", "value")
-        from app.config import settings
         tmp_files = list(settings.secrets_dir.glob("*.tmp"))
         assert len(tmp_files) == 0
+
+    def test_write_fsyncs_parent_directory(self, tmp_data_dir, monkeypatch):
+        """A durable atomic write must fsync the parent directory, not just the
+        temp file — otherwise the publishing rename can be lost on a crash."""
+        synced_inodes: list[int] = []
+
+        def _spy_fsync(fd):
+            synced_inodes.append(os.fstat(fd).st_ino)
+
+        # write_secret now delegates the atomic swap to fsutil, which calls the
+        # same os.fsync singleton; patch it directly.
+        monkeypatch.setattr(os, "fsync", _spy_fsync)
+        write_secret("test_key", "value")
+
+        parent_inode = settings.secrets_dir.stat().st_ino
+        assert parent_inode in synced_inodes, (
+            "parent directory must be fsynced so the atomic rename is durable"
+        )
+
+    def test_write_uses_owner_only_permissions_even_with_permissive_umask(self, tmp_data_dir):
+        old_umask = os.umask(0)
+        try:
+            write_secret("test_key", "value")
+        finally:
+            os.umask(old_umask)
+
+
+        secret_path = settings.secrets_dir / "test_key"
+        assert stat.S_IMODE(secret_path.stat().st_mode) == stat.S_IRUSR | stat.S_IWUSR
+
+    def test_rejects_secret_names_that_escape_secrets_dir(self, tmp_data_dir):
+        for bad_name in ("../escape", "..", "/tmp/escape", "nested/secret", r"nested\secret"):
+            with pytest.raises(ValueError):
+                write_secret(bad_name, "value")
+            with pytest.raises(ValueError):
+                read_secret(bad_name)
+            with pytest.raises(ValueError):
+                delete_secret(bad_name)
+
+        assert not (tmp_data_dir / "escape").exists()
+
+    def test_rejects_hidden_dotfile_names(self, tmp_data_dir):
+        """Hidden/dotfile names must be rejected so the secrets API can never
+        read co-located private files such as the JWT signing key (.jwt_secret)
+        or the atomic-write .tmp scratch files."""
+        for bad_name in (".jwt_secret", ".hidden", ".tmp"):
+            with pytest.raises(ValueError):
+                read_secret(bad_name)
+            with pytest.raises(ValueError):
+                write_secret(bad_name, "value")
+            with pytest.raises(ValueError):
+                delete_secret(bad_name)
+
+    def test_read_secret_treats_directory_path_as_unset(self, tmp_data_dir):
+        """A Docker bind-mount whose host source path is missing is materialized
+        as an empty DIRECTORY at the secret's path. The old is_file() guard read
+        that as "not configured" (None); the direct-read refactor must preserve
+        that — a directory must NOT surface as an uncaught IsADirectoryError that
+        500s the GET /settings dashboard (via _secret_configured)."""
+        (tmp_data_dir / "secrets" / "cloudflare_token").mkdir()
+        assert read_secret("cloudflare_token") is None
+
+    def test_delete_secret_treats_directory_path_as_absent(self, tmp_data_dir):
+        """delete_secret on a path that is a directory (missing bind-mount source)
+        must return False like the old is_file() guard, not raise
+        IsADirectoryError. The directory itself is left untouched."""
+        secret_dir = tmp_data_dir / "secrets" / "cloudflare_token"
+        secret_dir.mkdir()
+        assert delete_secret("cloudflare_token") is False
+        assert secret_dir.is_dir()
+
+    def test_read_secret_treats_symlink_loop_as_unset(self, tmp_data_dir):
+        """A self-referential symlink at the secret path (broken mount / operator
+        error) makes read_text raise OSError(ELOOP=40) — NOT FileNotFoundError or
+        IsADirectoryError. The old is_file() guard swallowed every os.stat OSError
+        and read it as "not configured"; the direct-read path must match, or the
+        settings page + reconcile/renewal loops 500 on an uncaught OSError."""
+        loop = tmp_data_dir / "secrets" / "cloudflare_token"
+        os.symlink(loop, loop)
+        assert read_secret("cloudflare_token") is None
+
+    def test_delete_secret_treats_symlink_loop_as_absent(self, tmp_data_dir):
+        """delete_secret on a self-referential symlink: unlink() removes the link
+        itself and returns True (the link existed). What must NOT happen is an
+        uncaught OSError. Assert the graceful outcome rather than crashing."""
+        loop = tmp_data_dir / "secrets" / "tailscale_authkey"
+        os.symlink(loop, loop)
+        # unlink() on the dangling self-symlink succeeds (removes the link).
+        assert delete_secret("tailscale_authkey") is True
+        assert not loop.is_symlink()
+
+    def test_read_secret_treats_unreadable_path_as_unset(self, tmp_data_dir, monkeypatch):
+        """A wrong-owner/wrong-mode bind-mount denies traversal: read_text raises
+        PermissionError (an OSError, not FileNotFoundError/IsADirectoryError).
+        The old is_file() guard read that as "not configured"; read_secret must
+        swallow it and return None rather than 500 the GET /settings dashboard.
+        Monkeypatched so the result is deterministic regardless of test-runner uid
+        (root would otherwise bypass a real chmod-0 parent)."""
+        write_secret("cloudflare_token", "value")
+
+        def _raise_eacces(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("pathlib.Path.read_text", _raise_eacces)
+        assert read_secret("cloudflare_token") is None
+
+    def test_delete_secret_treats_unreadable_path_as_absent(self, tmp_data_dir, monkeypatch):
+        """delete_secret must swallow a PermissionError (OSError family) from
+        unlink() — same graceful contract as read_secret — returning False rather
+        than propagating an uncaught OSError to the caller."""
+        write_secret("cloudflare_token", "value")
+
+        def _raise_eacces(self, *args, **kwargs):
+            raise PermissionError(13, "Permission denied")
+
+        monkeypatch.setattr("pathlib.Path.unlink", _raise_eacces)
+        assert delete_secret("cloudflare_token") is False
+
+
+class TestKeyPrefixValidators:
+    """The Tailscale key-prefix validators are the single source of truth for
+    key-shape checks in setup_state and the settings router; pin their contract."""
+
+    def test_auth_key_accepts_valid_prefix(self):
+        assert is_valid_ts_auth_key("tskey-auth-abc123") is True
+
+    def test_auth_key_rejects_api_prefix(self):
+        # An API key must not satisfy the auth-key check (distinct key types).
+        assert is_valid_ts_auth_key("tskey-api-abc123") is False
+
+    def test_auth_key_rejects_none_and_empty(self):
+        assert is_valid_ts_auth_key(None) is False
+        assert is_valid_ts_auth_key("") is False
+
+    def test_api_key_accepts_valid_prefix(self):
+        assert is_valid_ts_api_key("tskey-api-abc123") is True
+
+    def test_api_key_rejects_auth_prefix(self):
+        assert is_valid_ts_api_key("tskey-auth-abc123") is False
+
+    def test_api_key_rejects_none_and_empty(self):
+        assert is_valid_ts_api_key(None) is False
+        assert is_valid_ts_api_key("") is False
+
+
+class TestCloudflareCredentials:
+    """cloudflare_credentials is the single place answering "are CF creds set?"."""
+
+    def test_returns_none_and_default_when_unset(self, db_session):
+        token, zone_id = cloudflare_credentials(db_session)
+        assert token is None
+        assert zone_id == ""  # cf_zone_id default
+
+    def test_returns_token_and_zone_when_configured(self, db_session):
+        write_secret(CLOUDFLARE_TOKEN, "cf-secret-token")
+        set_setting(db_session, "cf_zone_id", "zone-123")
+        token, zone_id = cloudflare_credentials(db_session)
+        assert token == "cf-secret-token"
+        assert zone_id == "zone-123"

@@ -1,52 +1,30 @@
-"""Tests for the reconciler engine."""
+"""Orchestration tests for the reconciler engine."""
 
-import threading
-import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from sqlalchemy import create_engine, event
-from sqlalchemy.exc import OperationalError
-from sqlalchemy.orm import sessionmaker
-
+from app.locks import _RECONCILE_LOCKS
 from app.models.event import Event
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.reconciler.reconciler import reconcile_service
-from app.database import Base
-
-
-def _create_service(db, **overrides):
-    defaults = {
-        "name": "TestApp", "upstream_container_id": "abc123",
-        "upstream_container_name": "testapp", "upstream_scheme": "http",
-        "upstream_port": 80, "hostname": "testapp.example.com",
-        "base_domain": "example.com", "edge_container_name": "edge_testapp",
-        "network_name": "edge_net_testapp", "ts_hostname": "edge-testapp",
-    }
-    defaults.update(overrides)
-    svc = Service(**defaults)
-    db.add(svc)
-    db.flush()
-    db.add(ServiceStatus(service_id=svc.id, phase="pending"))
-    db.commit()
-    return svc
-
-
-# Patch at source modules since reconciler uses lazy imports
-_P_SECRET = "app.secrets.read_secret"
-_P_RENDER = "app.edge.config_renderer.render_caddyfile"
-_P_WRITE = "app.edge.config_renderer.write_caddyfile"
-_P_CERT = "app.certs.renewal_task.process_service_cert"
-_P_NETWORK = "app.edge.network_manager.ensure_network"
-_P_CREATE_EDGE = "app.edge.container_manager.create_edge_container"
-_P_FIND_EDGE = "app.edge.container_manager._find_edge_container"
-_P_START = "app.edge.container_manager.start_edge"
-_P_TS_IP = "app.edge.container_manager.detect_tailscale_ip"
-_P_RELOAD = "app.edge.container_manager.reload_caddy"
-_P_HEALTH = "app.health.health_checker.run_health_checks"
-_P_AGGREGATE = "app.health.health_checker.aggregate_status"
-_P_DNS = "app.adapters.dns_reconciler.reconcile_dns"
+from tests._reconciler_helpers import (
+    _P_AGGREGATE,
+    _P_CERT,
+    _P_CREATE_EDGE,
+    _P_DNS,
+    _P_FIND_EDGE,
+    _P_HEALTH,
+    _P_NETWORK,
+    _P_RELOAD,
+    _P_RENDER,
+    _P_SECRET,
+    _P_START,
+    _P_TS_IP,
+    _P_WRITE,
+)
+from tests._services_helpers import _create_service_in_db as _create_service
 
 
 class TestReconcileService:
@@ -57,7 +35,7 @@ class TestReconcileService:
     @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)
@@ -96,21 +74,58 @@ class TestReconcileService:
         events = db_session.query(Event).filter(Event.kind == "reconcile_completed").all()
         assert len(events) == 1
 
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_DNS)
     @patch(_P_SECRET)
-    def test_fails_without_ts_authkey(self, mock_secret, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        mock_secret.return_value = None  # no auth key
+    def test_disabled_service_is_not_converged(
+        self, mock_secret, mock_dns, mock_create_edge, mock_network,
+        db_session, tmp_data_dir,
+    ):
+        """A disabled service must never be brought back online by reconcile
+        (manual trigger or sweep TOCTOU): no edge/network/DNS work, phase stays
+        disabled."""
+        mock_secret.return_value = "ts-key"
+        svc = _create_service(db_session, enabled=False)
 
         result = reconcile_service(db_session, svc)
 
-        assert result["phase"] == "failed"
-        assert "auth key" in result["error"].lower()
-
+        assert result["phase"] == "disabled"
+        mock_network.assert_not_called()
+        mock_create_edge.assert_not_called()
+        mock_dns.assert_not_called()
         status = db_session.get(ServiceStatus, svc.id)
-        assert status.phase == "failed"
+        assert status.phase == "disabled"
 
-        events = db_session.query(Event).filter(Event.kind == "reconcile_failed").all()
-        assert len(events) == 1
+    @patch(_P_SECRET)
+    def test_deleted_service_while_locked_reports_deleted_and_forgets_lock(
+        self, mock_secret, db_session, tmp_data_dir
+    ):
+        """A service deleted after this reconcile acquired (or while it waited
+        for) its per-service reconcile lock resolves to None on the in-lock fresh
+        read: reconcile_service must report phase='deleted' AND drop the
+        registry entry that acquiring the lock re-created, so _RECONCILE_LOCKS
+        stays bounded by live + in-flight ids. Sibling of the disabled-branch
+        guard (above) and the health sweep's deleted-mid-sweep test, for the
+        reconcile path itself."""
+        mock_secret.return_value = "ts-key"
+        svc = _create_service(db_session)
+        service_id = svc.id
+        # Drop the row (and its cascaded status) so the in-lock fresh read
+        # resolves to None. Hand reconcile_service the pre-delete snapshot it
+        # would have loaded before the delete landed — only its .id is read
+        # before that fresh read fires.
+        db_session.delete(svc)
+        db_session.flush()
+        stale = Service(id=service_id)
+        assert service_id not in _RECONCILE_LOCKS  # clean precondition
+
+        result = reconcile_service(db_session, stale)
+
+        assert result["phase"] == "deleted"
+        assert result["error"] is None
+        # The registry entry that acquiring the lock re-created must be forgotten.
+        assert service_id not in _RECONCILE_LOCKS
 
     @patch(_P_HEALTH)
     @patch(_P_AGGREGATE)
@@ -119,7 +134,42 @@ class TestReconcileService:
     @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_updates_stale_upstream_container_id_after_restart(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        svc = _create_service(db_session, upstream_container_id="stale123", upstream_container_name="testapp")
+
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "caddyfile content"
+        mock_find_edge.return_value = None
+        mock_create_edge.return_value = "container123"
+        mock_network.return_value = ("net123", "fresh456")
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {"edge_container_running": True}
+        mock_aggregate.return_value = "healthy"
+
+        reconcile_service(db_session, svc)
+
+        updated = db_session.get(Service, svc.id)
+        assert updated is not None
+        assert updated.upstream_container_id == "fresh456"
+
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)
@@ -158,7 +208,7 @@ class TestReconcileService:
     @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)
@@ -189,58 +239,47 @@ class TestReconcileService:
 
     @patch(_P_HEALTH)
     @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
     @patch(_P_TS_IP)
+    @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)
     @patch(_P_SECRET)
-    def test_skips_caddy_reload_when_config_unchanged(
+    def test_naive_expiring_cert_timestamp_triggers_renewal(
         self, mock_secret, mock_render, mock_write, mock_cert,
-        mock_network, mock_create_edge, mock_find_edge,
-        mock_ts_ip, mock_aggregate, mock_health,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
         db_session, tmp_data_dir,
     ):
+
         svc = _create_service(db_session)
         mock_secret.return_value = "ts-key"
-
-        config_content = "existing config"
-        mock_render.return_value = config_content
-
-        # Write existing Caddyfile with same content
-        generated_dir = Path(tmp_data_dir) / "generated" / svc.id
-        generated_dir.mkdir(parents=True, exist_ok=True)
-        (generated_dir / "Caddyfile").write_text(config_content)
-
+        mock_render.return_value = "config"
         edge = MagicMock()
         edge.id = "edge_id"
         edge.status = "running"
         mock_find_edge.return_value = edge
-
         mock_ts_ip.return_value = "100.64.0.1"
         mock_health.return_value = {}
         mock_aggregate.return_value = "healthy"
 
-        with patch(_P_RELOAD) as mock_reload:
+        cert_dir = Path(tmp_data_dir) / "certs" / svc.hostname / "current"
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_text("cert")
+
+        with patch(
+            "app.certs.cert_manager.get_cert_expiry",
+            return_value=datetime.now() + timedelta(days=10),
+        ):
             result = reconcile_service(db_session, svc)
-            mock_reload.assert_not_called()
-            assert result["caddy_reloaded"] is False
 
-    @patch(_P_NETWORK)
-    @patch(_P_SECRET)
-    def test_handles_network_failure(self, mock_secret, mock_network, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        mock_secret.return_value = "ts-key"
-        mock_network.side_effect = RuntimeError("Docker not available")
+        assert result["phase"] == "healthy"
+        mock_cert.assert_called_once()
 
-        result = reconcile_service(db_session, svc)
-
-        assert result["phase"] == "failed"
-        assert result["error"] is not None
-
-    @patch(_P_DNS)
     @patch(_P_HEALTH)
     @patch(_P_AGGREGATE)
     @patch(_P_RELOAD)
@@ -248,169 +287,77 @@ class TestReconcileService:
     @patch(_P_START)
     @patch(_P_FIND_EDGE)
     @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
     @patch(_P_CERT)
     @patch(_P_WRITE)
     @patch(_P_RENDER)
     @patch(_P_SECRET)
-    def test_dns_failure_does_not_block(
+    def test_unparseable_existing_cert_triggers_renewal(
         self, mock_secret, mock_render, mock_write, mock_cert,
         mock_network, mock_create_edge, mock_find_edge, mock_start,
-        mock_ts_ip, mock_reload, mock_aggregate, mock_health, mock_dns,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
         db_session, tmp_data_dir,
     ):
-        from app.settings_store import set_setting
-
         svc = _create_service(db_session)
+        mock_secret.return_value = "ts-key"
+        mock_render.return_value = "config"
+        edge = MagicMock()
+        edge.id = "edge_id"
+        edge.status = "running"
+        mock_find_edge.return_value = edge
+        mock_ts_ip.return_value = "100.64.0.1"
+        mock_health.return_value = {}
+        mock_aggregate.return_value = "healthy"
 
-        mock_secret.side_effect = lambda name: {"tailscale_authkey": "ts-key", "cloudflare_token": "cf-tok"}.get(name)
-        set_setting(db_session, "cf_zone_id", "zone1")
+        cert_dir = Path(tmp_data_dir) / "certs" / svc.hostname / "current"
+        cert_dir.mkdir(parents=True)
+        (cert_dir / "fullchain.pem").write_text("not a cert")
 
+        with patch("app.certs.cert_manager.get_cert_expiry", return_value=None):
+            result = reconcile_service(db_session, svc)
+
+        assert result["phase"] == "healthy"
+        mock_cert.assert_called_once()
+
+    @patch(_P_HEALTH)
+    @patch(_P_AGGREGATE)
+    @patch(_P_RELOAD)
+    @patch(_P_TS_IP)
+    @patch(_P_START)
+    @patch(_P_FIND_EDGE)
+    @patch(_P_CREATE_EDGE)
+    @patch(_P_NETWORK, return_value=("net123", "upstream123"))
+    @patch(_P_CERT)
+    @patch(_P_WRITE)
+    @patch(_P_RENDER)
+    @patch(_P_SECRET)
+    def test_tailscale_ip_acquired_event_emitted_once(
+        self, mock_secret, mock_render, mock_write, mock_cert,
+        mock_network, mock_create_edge, mock_find_edge, mock_start,
+        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
+        db_session, tmp_data_dir,
+    ):
+        # The tailscale_ip_acquired event fires on a real IP CHANGE only. A second
+        # reconcile that detects the SAME IP must NOT re-emit it (the persisted IP
+        # already equals the detected one), or every sweep would spam the event log.
+        svc = _create_service(db_session)
+        mock_secret.return_value = "ts-key"
         mock_render.return_value = "config"
         edge = MagicMock()
         edge.id = "e1"
         edge.status = "running"
         mock_find_edge.return_value = edge
         mock_ts_ip.return_value = "100.64.0.1"
-        mock_dns.side_effect = RuntimeError("CF API down")
         mock_health.return_value = {}
         mock_aggregate.return_value = "healthy"
 
-        result = reconcile_service(db_session, svc)
+        reconcile_service(db_session, svc)
+        reconcile_service(db_session, svc)
 
-        # Should still complete despite DNS failure
-        assert result["phase"] == "healthy"
-
-    @patch(_P_SECRET)
-    def test_marks_service_failed_after_locked_status_update(self, mock_secret, db_session, tmp_data_dir):
-        svc = _create_service(db_session)
-        service_id = svc.id
-        mock_secret.return_value = "ts-key"
-
-        original_flush = db_session.flush
-        raised = False
-
-        def flush_with_lock(*args, **kwargs):
-            nonlocal raised
-            if not raised and (db_session.dirty or db_session.new):
-                raised = True
-                raise OperationalError(
-                    "UPDATE service_status SET phase=? WHERE service_id=?",
-                    ("validating", service_id),
-                    Exception("database is locked"),
-                )
-            return original_flush(*args, **kwargs)
-
-        db_session.flush = flush_with_lock
-        try:
-            result = reconcile_service(db_session, svc)
-        finally:
-            db_session.flush = original_flush
-
-        assert result["phase"] == "failed"
-        assert "database is locked" in result["error"]
-
-        status = db_session.get(ServiceStatus, service_id)
-        assert status is not None
-        assert status.phase == "failed"
-        assert "database is locked" in (status.message or "")
-
-        events = db_session.query(Event).filter(Event.kind == "reconcile_failed").all()
-        assert len(events) == 1
-
-    @patch(_P_HEALTH)
-    @patch(_P_AGGREGATE)
-    @patch(_P_RELOAD)
-    @patch(_P_TS_IP)
-    @patch(_P_START)
-    @patch(_P_FIND_EDGE)
-    @patch(_P_CREATE_EDGE)
-    @patch(_P_NETWORK)
-    @patch(_P_CERT)
-    @patch(_P_WRITE)
-    @patch(_P_RENDER)
-    @patch(_P_SECRET)
-    def test_serializes_overlapping_reconciles(
-        self, mock_secret, mock_render, mock_write, mock_cert,
-        mock_network, mock_create_edge, mock_find_edge, mock_start,
-        mock_ts_ip, mock_reload, mock_aggregate, mock_health,
-        tmp_data_dir,
-    ):
-        db_path = tmp_data_dir / "reconcile-overlap.sqlite"
-        engine = create_engine(
-            f"sqlite:///{db_path}",
-            connect_args={"check_same_thread": False},
+        events = (
+            db_session.query(Event)
+            .filter(Event.kind == "tailscale_ip_acquired")
+            .all()
         )
-
-        @event.listens_for(engine, "connect")
-        def set_sqlite_pragma(dbapi_connection, connection_record):
-            cursor = dbapi_connection.cursor()
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-            cursor.close()
-
-        Base.metadata.create_all(bind=engine)
-        TestSession = sessionmaker(bind=engine)
-
-        seed_db = TestSession()
-        try:
-            svc = _create_service(seed_db)
-            service_id = svc.id
-        finally:
-            seed_db.close()
-
-        mock_secret.return_value = "ts-key"
-        mock_render.return_value = "config"
-        edge = MagicMock()
-        edge.id = "edge_id"
-        edge.status = "running"
-        mock_find_edge.return_value = edge
-        mock_ts_ip.return_value = "100.64.0.1"
-        mock_health.return_value = {}
-        mock_aggregate.return_value = "healthy"
-
-        active_calls = 0
-        max_active_calls = 0
-        call_lock = threading.Lock()
-
-        def slow_network(*args, **kwargs):
-            nonlocal active_calls, max_active_calls
-            with call_lock:
-                active_calls += 1
-                max_active_calls = max(max_active_calls, active_calls)
-            try:
-                time.sleep(0.1)
-            finally:
-                with call_lock:
-                    active_calls -= 1
-
-        mock_network.side_effect = slow_network
-
-        errors: list[Exception] = []
-        results: list[dict] = []
-
-        def run_reconcile():
-            db = TestSession()
-            try:
-                svc = db.get(Service, service_id)
-                assert svc is not None
-                results.append(reconcile_service(db, svc))
-            except Exception as exc:
-                errors.append(exc)
-            finally:
-                db.close()
-
-        first = threading.Thread(target=run_reconcile)
-        second = threading.Thread(target=run_reconcile)
-        first.start()
-        second.start()
-        first.join()
-        second.join()
-
-        engine.dispose()
-
-        assert errors == []
-        assert len(results) == 2
-        assert max_active_calls == 1
-        assert all(result["phase"] == "healthy" for result in results)
+        assert len(events) == 1
+        assert events[0].details == {"ip": "100.64.0.1"}

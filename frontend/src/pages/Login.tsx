@@ -1,34 +1,47 @@
-import { useState } from "react"
+import { useRef, useState } from "react"
 import { useNavigate } from "react-router-dom"
-import { api, type LoginResponse } from "@/lib/api"
+import { api } from "@/lib/api"
 import { useStaticFavicon } from "@/lib/useFavicon"
+import { errorMessage } from "@/lib/utils"
 import { Loader2, LogIn } from "lucide-react"
 
 export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
-  useStaticFavicon("/favicon.svg")
+  useStaticFavicon("/favicon-healthy.svg")
   const navigate = useNavigate()
   const [username, setUsername] = useState("")
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
+  // Synchronous in-flight guard for the login POST. A ref (not the `loading`
+  // state) because two submit events can fire within one React batch (a
+  // same-batch double-Enter / programmatic double submit) before the
+  // `loading=true` re-render commits; both would then close over the stale
+  // `loading=false` and slip past a state check, POSTing twice — on wrong
+  // credentials that burns two of the rate limiter's attempts per user action.
+  // The ref flips immediately, so the second handler bails. `loading` still
+  // drives the button/label UI.
+  const submittingRef = useRef(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    if (submittingRef.current) return
+    submittingRef.current = true
     setLoading(true)
     setError("")
     try {
-      await api.post<LoginResponse>("/auth/login", { username, password })
+      await api.auth.login({ username, password })
       onLogin?.()
       navigate("/")
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed")
+      setError(errorMessage(err, "Login failed"))
     } finally {
+      submittingRef.current = false
       setLoading(false)
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 px-4">
+    <main className="flex min-h-screen items-center justify-center bg-zinc-50 px-4">
       <div className="w-full max-w-sm">
         <h1 className="text-2xl font-bold text-center">tailBale</h1>
         <p className="mt-1 text-center text-sm text-zinc-500">
@@ -61,7 +74,7 @@ export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
           </label>
 
           {error && (
-            <div className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
+            <div role="alert" className="rounded-md bg-red-50 px-4 py-3 text-sm text-red-800">
               {error}
             </div>
           )}
@@ -69,6 +82,7 @@ export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
           <button
             type="submit"
             disabled={loading || !username || !password}
+            aria-busy={loading}
             className="flex w-full items-center justify-center gap-2 rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-white hover:bg-zinc-800 disabled:opacity-50"
           >
             {loading ? (
@@ -79,6 +93,6 @@ export default function Login({ onLogin }: { onLogin?: () => void } = {}) {
           </button>
         </form>
       </div>
-    </div>
+    </main>
   )
 }

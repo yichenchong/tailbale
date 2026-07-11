@@ -2,26 +2,16 @@
 
 from unittest.mock import patch
 
+import docker
 
-def _create_service(client, **overrides):
-    """Helper to create a service with defaults."""
-    body = {
-        "name": "Nextcloud",
-        "upstream_container_id": "abc123def456",
-        "upstream_container_name": "nextcloud",
-        "upstream_scheme": "http",
-        "upstream_port": 80,
-        "hostname": "nextcloud.example.com",
-        "base_domain": "example.com",
-    }
-    body.update(overrides)
-    return client.post("/api/services", json=body)
+from app.models.event import Event
+from tests._services_helpers import create_service_api
 
 
 class TestReloadEndpoint:
-    @patch("app.edge.container_manager.reload_caddy")
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_success(self, mock_reload, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_reload.return_value = "config reloaded"
 
         resp = client.post(f"/api/services/{svc_id}/reload")
@@ -30,9 +20,9 @@ class TestReloadEndpoint:
         assert data["success"] is True
         assert "reloaded" in data["message"].lower()
 
-    @patch("app.edge.container_manager.reload_caddy")
+    @patch("app.edge.caddy_admin.reload_caddy")
     def test_reload_failure(self, mock_reload, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_reload.side_effect = RuntimeError("Edge container not found")
 
         resp = client.post(f"/api/services/{svc_id}/reload")
@@ -42,11 +32,19 @@ class TestReloadEndpoint:
         resp = client.post("/api/services/svc_nonexistent/reload")
         assert resp.status_code == 404
 
-    @patch("app.edge.container_manager.reload_caddy")
-    def test_reload_emits_event(self, mock_reload, client, db_session):
-        from app.models.event import Event
+    @patch("app.edge.caddy_admin.reload_caddy")
+    def test_reload_disabled_service_rejected(self, mock_reload, client):
+        svc_id = create_service_api(client, enabled=False).json()["id"]
 
-        svc_id = _create_service(client).json()["id"]
+        resp = client.post(f"/api/services/{svc_id}/reload")
+
+        assert resp.status_code == 409
+        mock_reload.assert_not_called()
+
+    @patch("app.edge.caddy_admin.reload_caddy")
+    def test_reload_emits_event(self, mock_reload, client, db_session):
+
+        svc_id = create_service_api(client).json()["id"]
         mock_reload.return_value = "ok"
 
         client.post(f"/api/services/{svc_id}/reload")
@@ -57,7 +55,7 @@ class TestReloadEndpoint:
 class TestRestartEdgeEndpoint:
     @patch("app.edge.container_manager.restart_edge")
     def test_restart_success(self, mock_restart, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
 
         resp = client.post(f"/api/services/{svc_id}/restart-edge")
         assert resp.status_code == 200
@@ -67,7 +65,7 @@ class TestRestartEdgeEndpoint:
 
     @patch("app.edge.container_manager.restart_edge")
     def test_restart_failure(self, mock_restart, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_restart.side_effect = RuntimeError("Edge container not found")
 
         resp = client.post(f"/api/services/{svc_id}/restart-edge")
@@ -79,9 +77,8 @@ class TestRestartEdgeEndpoint:
 
     @patch("app.edge.container_manager.restart_edge")
     def test_restart_emits_event(self, mock_restart, client, db_session):
-        from app.models.event import Event
 
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         client.post(f"/api/services/{svc_id}/restart-edge")
         events = db_session.query(Event).filter(Event.kind == "edge_restarted").all()
         assert len(events) == 1
@@ -91,7 +88,7 @@ class TestRecreateEdgeEndpoint:
     @patch("app.secrets.read_secret")
     @patch("app.edge.container_manager.recreate_edge")
     def test_recreate_success(self, mock_recreate, mock_secret, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_secret.return_value = "tskey-auth-test"
         mock_recreate.return_value = "new_container_id"
 
@@ -103,7 +100,7 @@ class TestRecreateEdgeEndpoint:
 
     @patch("app.secrets.read_secret")
     def test_recreate_no_authkey(self, mock_secret, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_secret.return_value = None
 
         resp = client.post(f"/api/services/{svc_id}/recreate-edge")
@@ -117,9 +114,8 @@ class TestRecreateEdgeEndpoint:
     @patch("app.secrets.read_secret")
     @patch("app.edge.container_manager.recreate_edge")
     def test_recreate_emits_event(self, mock_recreate, mock_secret, client, db_session):
-        from app.models.event import Event
 
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_secret.return_value = "tskey-auth-test"
         mock_recreate.return_value = "new_id"
 
@@ -130,7 +126,7 @@ class TestRecreateEdgeEndpoint:
     @patch("app.secrets.read_secret")
     @patch("app.edge.container_manager.recreate_edge")
     def test_recreate_updates_status(self, mock_recreate, mock_secret, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_secret.return_value = "tskey-auth-test"
         mock_recreate.return_value = "new_container_id"
 
@@ -144,7 +140,7 @@ class TestRecreateEdgeEndpoint:
 class TestEdgeLogsEndpoint:
     @patch("app.edge.container_manager.get_edge_logs")
     def test_logs_success(self, mock_logs, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_logs.return_value = "2026-04-05T00:00:00 [edge] Starting..."
 
         resp = client.get(f"/api/services/{svc_id}/logs/edge")
@@ -153,12 +149,23 @@ class TestEdgeLogsEndpoint:
 
     @patch("app.edge.container_manager.get_edge_logs")
     def test_logs_empty(self, mock_logs, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_logs.return_value = ""
 
         resp = client.get(f"/api/services/{svc_id}/logs/edge")
         assert resp.status_code == 200
         assert resp.json()["logs"] == ""
+
+    @patch("app.edge.container_manager.get_edge_logs")
+    def test_logs_disabled_service_allowed(self, mock_logs, client):
+        svc_id = create_service_api(client, enabled=False).json()["id"]
+        mock_logs.return_value = "disabled service logs"
+
+        resp = client.get(f"/api/services/{svc_id}/logs/edge")
+
+        assert resp.status_code == 200
+        assert resp.json()["logs"] == "disabled service logs"
+        mock_logs.assert_called_once()
 
     def test_logs_nonexistent_service(self, client):
         resp = client.get("/api/services/svc_nonexistent/logs/edge")
@@ -166,10 +173,39 @@ class TestEdgeLogsEndpoint:
 
     @patch("app.edge.container_manager.get_edge_logs")
     def test_logs_tail_parameter(self, mock_logs, client):
-        svc_id = _create_service(client).json()["id"]
+        svc_id = create_service_api(client).json()["id"]
         mock_logs.return_value = "line"
 
         client.get(f"/api/services/{svc_id}/logs/edge?tail=50")
         mock_logs.assert_called_once()
-        call_args = mock_logs.call_args
-        assert call_args.kwargs.get("tail") == 50 or (len(call_args) > 1 and call_args[1].get("tail") == 50)
+        # The router forwards tail as a keyword argument to get_edge_logs.
+        assert mock_logs.call_args.kwargs["tail"] == 50
+
+    def test_logs_rejects_invalid_tail(self, client):
+        resp = client.get("/api/services/svc_nonexistent/logs/edge?tail=0")
+        assert resp.status_code == 422
+
+        resp = client.get("/api/services/svc_nonexistent/logs/edge?tail=1001")
+        assert resp.status_code == 422
+
+    @patch("app.edge.container_manager.get_edge_logs")
+    def test_logs_docker_unavailable_returns_503(self, mock_logs, client):
+
+        svc_id = create_service_api(client).json()["id"]
+        mock_logs.side_effect = docker.errors.DockerException("daemon down")
+        resp = client.get(f"/api/services/{svc_id}/logs/edge")
+        assert resp.status_code == 503
+        assert resp.json()["detail"] == "Docker is unavailable"
+
+
+class TestEdgeVersionEndpoint:
+    @patch("app.edge.container_manager.get_edge_version")
+    def test_edge_version_disabled_service_allowed(self, mock_version, client):
+        svc_id = create_service_api(client, enabled=False).json()["id"]
+        mock_version.return_value = "edge-test-version"
+
+        resp = client.get(f"/api/services/{svc_id}/edge-version")
+
+        assert resp.status_code == 200
+        assert resp.json()["edge_version"] == "edge-test-version"
+        assert resp.json()["up_to_date"] is False

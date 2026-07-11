@@ -1,6 +1,6 @@
 """Tests for the app profiles API endpoints."""
 
-from app.routers.profiles import detect_profile
+from app.profiles import detect_profile
 
 
 class TestDetectProfile:
@@ -22,11 +22,27 @@ class TestDetectProfile:
     def test_detect_vaultwarden(self):
         assert detect_profile("vaultwarden/server:latest") == "vaultwarden"
 
+    def test_detection_ignores_registry_host(self):
+        assert detect_profile("registry.nextcloud.example.com/team/nginx:latest") is None
+
+    def test_detection_does_not_substring_match_unrelated_component(self):
+        assert detect_profile("ghcr.io/notnextcloud/postgres:latest") is None
+
+    def test_detection_handles_digest_reference(self):
+        assert detect_profile("ghcr.io/immich-app/immich-server@sha256:abc123") == "immich"
+
     def test_no_match(self):
         assert detect_profile("nginx:latest") is None
 
     def test_no_match_empty(self):
         assert detect_profile("") is None
+
+    def test_detection_matches_hyphenated_suffix_component(self):
+        # A '-<pattern>' suffix component matches (e.g. a forked/customized
+        # image like "<vendor>/custom-nextcloud"). This exercises the
+        # endswith("-<pattern>") arm of _repository_component_matches, distinct
+        # from the exact-match and startswith("<pattern>-") arms above.
+        assert detect_profile("myorg/custom-nextcloud:latest") == "nextcloud"
 
 
 class TestProfilesAPI:
@@ -37,6 +53,7 @@ class TestProfilesAPI:
         assert "nextcloud" in profiles
         assert "generic" in profiles
         assert profiles["nextcloud"]["recommended_port"] == 80
+        assert profiles["nextcloud"]["image_patterns"] == ["nextcloud"]
 
     def test_detect_endpoint_match(self, client):
         resp = client.get("/api/profiles/detect?image=linuxserver/nextcloud:28")
