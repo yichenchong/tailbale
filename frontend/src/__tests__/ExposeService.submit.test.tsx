@@ -50,13 +50,19 @@ describe("ExposeService page - submit", () => {
 
     fireEvent.click(screen.getByText("Create Service"))
 
-    // Verify the POST was made
+    // Verify the POST was made, and that an empty additional-networks form sends
+    // null (feature not configured) rather than [] (which would opt the service
+    // into managed edge-network convergence / disconnects).
     await waitFor(() => {
       const postCalls = fetchMock.mock.calls.filter(
         (c: unknown[]) => typeof c[1] === "object" && (c[1] as RequestInit).method === "POST"
       )
       expect(postCalls.length).toBeGreaterThanOrEqual(1)
     })
+    const createCall = fetchMock.mock.calls.find(
+      (c: unknown[]) => typeof c[1] === "object" && (c[1] as RequestInit).method === "POST"
+    )
+    expect(JSON.parse(String((createCall?.[1] as RequestInit).body)).additional_networks).toBeNull()
   })
 
   it("submits the service form when Enter is pressed in a field", async () => {
@@ -367,6 +373,54 @@ describe("ExposeService page - submit", () => {
           { name: "opencloud_opencloud-net", aliases: ["cloud.example.com"] },
         ],
       })
+    })
+  })
+
+  it("supports typing multiple aliases without swallowing the separator", async () => {
+    // Regression: the aliases input reconstructs its value from the parsed
+    // array, so filtering empty tokens on each keystroke stripped the space/
+    // comma the user typed, merging two aliases into one invalid string.
+    const fetchMock = vi.fn((url: string, opts?: RequestInit) => {
+      if (String(url).includes("/settings")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockSettings) })
+      }
+      if (String(url).includes("/profiles/detect")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ detected_profile: null, profile: null }) })
+      }
+      if (opts?.method === "POST") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(mockCreatedService) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    const user = userEvent.setup()
+
+    render(
+      <MemoryRouter initialEntries={["/expose?container_id=c1&container_name=nginx&image=nginx:latest&ports=[]"]}>
+        <ExposeService />
+      </MemoryRouter>
+    )
+    await waitFor(() => expect(screen.getByText("Create Service")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByRole("button", { name: "Add network" }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Additional Docker network 1" }), { target: { value: "opencloud_net" } })
+    await user.type(
+      screen.getByRole("textbox", { name: "Aliases for additional network 1" }),
+      "a.example.com b.example.com",
+    )
+    fireEvent.click(screen.getByText("Create Service"))
+
+    await waitFor(() => {
+      const createCall = fetchMock.mock.calls.find(
+        (c: unknown[]) =>
+          String(c[0]).includes("/api/services") &&
+          typeof c[1] === "object" &&
+          (c[1] as RequestInit).method === "POST"
+      )
+      expect(createCall).toBeTruthy()
+      expect(JSON.parse(String((createCall?.[1] as RequestInit).body)).additional_networks).toEqual([
+        { name: "opencloud_net", aliases: ["a.example.com", "b.example.com"] },
+      ])
     })
   })
 })

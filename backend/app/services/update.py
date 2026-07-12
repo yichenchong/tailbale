@@ -31,7 +31,7 @@ from app.services.lifecycle import (
     reconcile_in_background,
     teardown_hostname_resources,
 )
-from app.services.mapping import to_response
+from app.services.mapping import reject_primary_additional_network, to_response
 from app.services.service_fields import CONFIG_AFFECTING_FIELDS, UPDATABLE_FIELDS
 
 
@@ -371,6 +371,8 @@ def update_service(
         if changing_hostname:
             changes.update(_apply_hostname_change(db, svc, body, service_id))
         changes.update(_apply_field_changes(body))
+        if "additional_networks" in changes:
+            reject_primary_additional_network(svc.network_name, changes["additional_networks"])
 
         disabling_service = "enabled" in changes and changes["enabled"] is False and was_enabled
         enabling_service = "enabled" in changes and changes["enabled"] is True and not was_enabled

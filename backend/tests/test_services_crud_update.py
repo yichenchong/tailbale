@@ -186,6 +186,46 @@ class TestUpdateService:
         assert resp.status_code == 200
         mock_reconcile.assert_not_called()
 
+    def test_update_omitting_additional_networks_preserves_existing(self, client):
+        # An unrelated edit (no additional_networks key) must leave the stored
+        # value untouched — never silently rewrite it to [] and opt the service
+        # into edge-network convergence.
+        networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
+        svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "Renamed"})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] == networks
+
+    def test_update_omitting_preserves_null(self, client):
+        # A legacy/NULL service edited on an unrelated field stays NULL.
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"upstream_port": 8080})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] is None
+
+    def test_update_null_clears_additional_networks_to_none(self, client):
+        networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
+        svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] is None
+
+    def test_update_empty_list_clears_additional_networks_to_empty(self, client):
+        networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
+        svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": []})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] == []
+
+    def test_update_additional_network_primary_name_rejected(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={
+            "additional_networks": [
+                {"name": "edge_net_nextcloud", "aliases": ["cloud.example.com"]},
+            ],
+        })
+        assert resp.status_code == 422
+
     def test_update_nonexistent(self, client):
         resp = client.put("/api/services/svc_nonexistent", json={"name": "X"})
         assert resp.status_code == 404

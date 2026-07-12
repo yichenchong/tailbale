@@ -199,6 +199,10 @@ export function useExposeForm() {
     setSaving(true)
     setError(null)
     try {
+      // Empty means "no additional networks configured" -> null, so the
+      // reconciler leaves the edge's network attachments untouched. A non-empty
+      // list opts the service into managed edge-network convergence.
+      const normalizedNetworks = normalizeAdditionalNetworks(additionalNetworks)
       const svc = await api.services.create({
         name: normalizedName,
         upstream_container_id: containerId,
@@ -211,7 +215,7 @@ export function useExposeForm() {
         preserve_host_header: preserveHost,
         custom_caddy_snippet: customSnippet || null,
         app_profile: appProfile,
-        additional_networks: normalizeAdditionalNetworks(additionalNetworks),
+        additional_networks: normalizedNetworks.length > 0 ? normalizedNetworks : null,
       })
       // Redirect straight to the service detail page
       navigate(`/services/${encodeURIComponent(svc.id)}`)

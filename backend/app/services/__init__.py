@@ -29,6 +29,7 @@ from app.services.edge_ops import (
     update_edge_job,
 )
 from app.services.errors import (
+    AdditionalNetworkInvalid,
     DockerUnavailable,
     HostnameChangeError,
     HostnameInUse,
@@ -43,6 +44,7 @@ from app.services.mapping import to_response
 from app.services.update import update_service
 
 __all__ = [
+    "AdditionalNetworkInvalid",
     "DockerUnavailable",
     "HostnameChangeError",
     "HostnameInUse",

@@ -101,7 +101,7 @@ class AdditionalNetwork(BaseModel):
 def _validate_additional_networks(v: Any) -> list[dict] | None:
     """Normalize additional edge network attachments to JSON-serializable dicts."""
     if v is None:
-        return []
+        return None
     if not isinstance(v, list):
         raise ValueError("Additional networks must be a list")
     seen: set[str] = set()

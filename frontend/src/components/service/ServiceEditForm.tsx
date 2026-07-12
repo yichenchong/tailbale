@@ -58,6 +58,7 @@ export function ServiceEditForm({
     setSaving(true)
     setError(null)
     try {
+      const normalizedNetworks = normalizeAdditionalNetworks(edit.additionalNetworks)
       const body: ServiceUpdateRequest = {
         name: edit.normalizedName,
         upstream_port: Number(edit.port),
@@ -65,7 +66,16 @@ export function ServiceEditForm({
         healthcheck_path: edit.healthcheck.trim() || null,
         preserve_host_header: edit.preserveHost,
         custom_caddy_snippet: edit.snippet || null,
-        additional_networks: normalizeAdditionalNetworks(edit.additionalNetworks),
+      }
+      // Preserve the null-vs-[] distinction the backend relies on. A non-empty
+      // list is sent as-is (managed convergence). An empty editor is only sent
+      // when it *clears* a previously-configured list (send [] to disconnect the
+      // now-unmanaged networks); when the service had none, the field is omitted
+      // so an unrelated edit never opts a service into edge-network management.
+      if (normalizedNetworks.length > 0) {
+        body.additional_networks = normalizedNetworks
+      } else if ((service.additional_networks?.length ?? 0) > 0) {
+        body.additional_networks = []
       }
       const svc = await api.services.update(id ?? "", body)
       applyServiceUpdate(svc)

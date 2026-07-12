@@ -89,6 +89,38 @@ class TestEnsureNetworkStep:
         assert db_session.get(ServiceStatus, svc.id).phase == "creating_network"
 
 
+class TestEnsureAdditionalNetworksStep:
+    _P_RECONCILE = "app.edge.network_manager.reconcile_additional_edge_networks"
+
+    def test_null_short_circuits_without_touching_docker(self, db_session, tmp_data_dir):
+        # NULL means "feature not configured": the step must not touch edge
+        # network attachments (the safety valve for legacy/unmanaged services).
+        svc = create_service_db(db_session)
+        assert svc.additional_networks is None
+        with patch(self._P_RECONCILE) as mock_reconcile:
+            steps.ensure_additional_networks(db_session, svc, None)
+        mock_reconcile.assert_not_called()
+
+    def test_empty_list_converges(self, db_session, tmp_data_dir):
+        # [] is an explicit desired state: converge (disconnect unmanaged nets).
+        svc = create_service_db(db_session, additional_networks=[])
+        with patch(self._P_RECONCILE) as mock_reconcile:
+            steps.ensure_additional_networks(db_session, svc, None)
+        mock_reconcile.assert_called_once_with(
+            svc.edge_container_name, svc.network_name, [], None
+        )
+        assert db_session.get(ServiceStatus, svc.id).phase == "ensuring_additional_networks"
+
+    def test_configured_networks_converge(self, db_session, tmp_data_dir):
+        networks = [{"name": "opencloud_net", "aliases": ["cloud.example.com"]}]
+        svc = create_service_db(db_session, additional_networks=networks)
+        with patch(self._P_RECONCILE) as mock_reconcile:
+            steps.ensure_additional_networks(db_session, svc, None)
+        mock_reconcile.assert_called_once_with(
+            svc.edge_container_name, svc.network_name, networks, None
+        )
+
+
 class TestEnsureCertStep:
     _P_EXPIRY = "app.certs.cert_manager.get_cert_expiry"
     _P_MATCH = "app.certs.cert_manager.cert_key_pair_matches"

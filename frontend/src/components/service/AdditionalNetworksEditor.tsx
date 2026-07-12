@@ -29,8 +29,11 @@ export function AdditionalNetworksEditor({
       {value.map((item, index) => {
         const normalizedName = item.name.trim()
         const nameInvalid = normalizedName !== "" && !isDockerNetworkName(normalizedName)
-        const aliasesInvalid = item.aliases.some((alias) => !isHostnameAlias(alias))
-        const aliasesEmpty = normalizedName !== "" && item.aliases.length === 0
+        // Ignore in-progress empty tokens (a trailing separator the user just
+        // typed) so a red error doesn't flash between aliases; empties are
+        // dropped on submit by normalizeAdditionalNetworks.
+        const aliasesInvalid = item.aliases.some((alias) => alias !== "" && !isHostnameAlias(alias))
+        const aliasesEmpty = normalizedName !== "" && item.aliases.every((alias) => alias === "")
         return (
           <div key={index} className="space-y-1 rounded-md bg-zinc-50 p-2">
             <div className="flex gap-2">
@@ -63,10 +66,12 @@ export function AdditionalNetworksEditor({
                 type="text"
                 value={item.aliases.join(", ")}
                 onChange={(e) => update(index, {
+                  // Keep empty tokens so a trailing separator survives the
+                  // controlled re-render; filtering here would strip the space/
+                  // comma the user just typed and make a second alias untypable.
                   aliases: e.target.value
                     .split(/[\s,]+/)
-                    .map((alias) => alias.trim().toLowerCase())
-                    .filter(Boolean),
+                    .map((alias) => alias.trim().toLowerCase()),
                 })}
                 placeholder="cloud.example.com"
                 aria-label={`Aliases for additional network ${index + 1}`}
