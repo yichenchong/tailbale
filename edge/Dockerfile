@@ -3,9 +3,16 @@ FROM tailscale/tailscale:v1.98.8
 ARG TARGETARCH=amd64
 ARG TARGETVARIANT
 
+# curl is a RUNTIME dependency: the orchestrator's HTTPS health probe execs
+# `curl` inside this container via `docker exec` (see backend/app/health/probe.py,
+# which relies on curl's exit-code semantics — busybox wget can't distinguish
+# 4xx from connection failures). It must survive in the final image, so install
+# it as a normal package rather than a build-only virtual dep.
+RUN apk add --no-cache curl
+
 # Install Caddy from the pinned official GitHub release (reproducible build)
 ARG CADDY_VERSION=2.11.4
-RUN apk add --no-cache --virtual .build-deps curl tar \
+RUN apk add --no-cache --virtual .build-deps tar \
     && case "${TARGETARCH}/${TARGETVARIANT}" in \
         amd64/*) caddy_arch="amd64" ;; \
         arm64/*) caddy_arch="arm64" ;; \
