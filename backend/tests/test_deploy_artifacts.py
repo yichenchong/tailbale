@@ -114,14 +114,20 @@ def test_edge_dockerfile_pins_caddy_and_tailscale():
     assert 'caddy_arch="armv7"' in dockerfile
     assert 'caddy_arch="armv6"' in dockerfile
 
-def test_edge_dockerfile_removes_build_tools():
-    """curl/tar are only needed to fetch+unpack Caddy at build time. They must
-    not linger in the runtime edge image (attack surface + size), mirroring the
-    root Dockerfile which purges curl. They are installed as a removable
-    ``.build-deps`` virtual package and deleted in the same layer."""
+def test_edge_dockerfile_ships_curl_but_purges_build_tar():
+    """curl is a RUNTIME dependency: the HTTPS health probe execs ``curl`` inside
+    each edge container (app/health/probe.py), which relies on curl's exit-code
+    semantics, so it must persist in the final image. tar is only needed to
+    unpack Caddy at build time and is installed as a removable ``.build-deps``
+    virtual package deleted in the same layer."""
     dockerfile = (ROOT / "edge" / "Dockerfile").read_text(encoding="utf-8")
 
-    assert "--virtual .build-deps curl tar" in dockerfile
+    # curl installed as a persistent (non-virtual) runtime package for the probe.
+    assert "apk add --no-cache curl" in dockerfile
+    # curl must NOT sit in the throwaway build-deps group (it would be purged).
+    assert "--virtual .build-deps curl" not in dockerfile
+    # tar stays build-only and is purged after Caddy is unpacked.
+    assert "--virtual .build-deps tar" in dockerfile
     assert "apk del .build-deps" in dockerfile
 
 def test_env_example_documents_login_rate_limit_settings():
