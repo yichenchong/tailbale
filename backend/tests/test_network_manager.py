@@ -10,6 +10,7 @@ from app.edge.network_manager import (
     connect_container,
     create_network,
     ensure_network,
+    reconcile_additional_edge_networks,
     remove_network,
 )
 
@@ -338,3 +339,113 @@ class TestEnsureNetwork:
         assert result == ("net_existing", "app_cid")
         mock_client.networks.create.assert_not_called()
         existing_net.connect.assert_not_called()
+
+
+class TestReconcileAdditionalEdgeNetworks:
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_connects_edge_to_existing_network_with_aliases(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_container = MagicMock()
+        mock_container.id = "edge_cid"
+        mock_container.name = "edge_opencloud"
+        mock_container.attrs = {
+            "Name": "/edge_opencloud",
+            "NetworkSettings": {"Networks": {"edge_net_opencloud": {}}},
+        }
+        mock_client.containers.get.return_value = mock_container
+        additional = MagicMock()
+        additional.name = "opencloud_opencloud-net"
+        mock_client.networks.get.return_value = additional
+
+        reconcile_additional_edge_networks(
+            "edge_opencloud",
+            "edge_net_opencloud",
+            [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}],
+        )
+
+        mock_client.networks.create.assert_not_called()
+        additional.connect.assert_called_once_with(
+            mock_container,
+            aliases=["cloud.example.com"],
+        )
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_reconnects_when_aliases_change(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_container = MagicMock()
+        mock_container.id = "edge_cid"
+        mock_container.name = "edge_opencloud"
+        mock_container.attrs = {
+            "Name": "/edge_opencloud",
+            "NetworkSettings": {
+                "Networks": {
+                    "edge_net_opencloud": {},
+                    "opencloud_opencloud-net": {"Aliases": ["old.example.com"]},
+                },
+            },
+        }
+        mock_client.containers.get.return_value = mock_container
+        additional = MagicMock()
+        additional.name = "opencloud_opencloud-net"
+        mock_client.networks.get.return_value = additional
+
+        reconcile_additional_edge_networks(
+            "edge_opencloud",
+            "edge_net_opencloud",
+            [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}],
+        )
+
+        additional.disconnect.assert_called_once_with(mock_container, force=True)
+        additional.connect.assert_called_once_with(
+            mock_container,
+            aliases=["cloud.example.com"],
+        )
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_disconnects_unconfigured_non_primary_networks(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_container = MagicMock()
+        mock_container.id = "edge_cid"
+        mock_container.name = "edge_opencloud"
+        mock_container.attrs = {
+            "Name": "/edge_opencloud",
+            "NetworkSettings": {
+                "Networks": {
+                    "edge_net_opencloud": {},
+                    "old_opencloud-net": {"Aliases": ["old.example.com"]},
+                },
+            },
+        }
+        mock_client.containers.get.return_value = mock_container
+        old_network = MagicMock()
+        old_network.name = "old_opencloud-net"
+        mock_client.networks.get.return_value = old_network
+
+        reconcile_additional_edge_networks("edge_opencloud", "edge_net_opencloud", [])
+
+        old_network.disconnect.assert_called_once_with(mock_container, force=True)
+        old_network.connect.assert_not_called()
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_never_disconnects_primary_network(self, mock_cls):
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_container = MagicMock()
+        mock_container.id = "edge_cid"
+        mock_container.name = "edge_opencloud"
+        mock_container.attrs = {
+            "Name": "/edge_opencloud",
+            "NetworkSettings": {
+                "Networks": {
+                    "edge_net_opencloud": {"Aliases": ["edge_opencloud"]},
+                },
+            },
+        }
+        mock_client.containers.get.return_value = mock_container
+
+        reconcile_additional_edge_networks("edge_opencloud", "edge_net_opencloud", [])
+
+        mock_client.networks.get.assert_not_called()

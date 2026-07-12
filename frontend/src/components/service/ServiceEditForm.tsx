@@ -1,10 +1,13 @@
 import { useId, useState } from "react"
 import { Loader2, Save } from "lucide-react"
+import { AdditionalNetworksEditor } from "./AdditionalNetworksEditor"
+import { formatAdditionalNetworks } from "@/lib/additionalNetworks"
 import { api, type ServiceItem, type ServiceUpdateRequest } from "@/lib/api"
 import {
   SERVICE_NAME_REQUIRED_MESSAGE,
   SERVICE_NAME_LENGTH_MESSAGE,
   UPSTREAM_PORT_MESSAGE,
+  normalizeAdditionalNetworks,
 } from "@/lib/validation"
 import { Row } from "./Row"
 import { type ServiceEditState } from "@/lib/serviceTypes"
@@ -33,7 +36,7 @@ export function ServiceEditForm({
   const [saving, setSaving] = useState(false)
   const nameErrorId = useId()
   const nameError = edit.normalizedName !== "" && !edit.nameValid
-  const canSave = edit.nameValid && edit.portValid && !saving
+  const canSave = edit.nameValid && edit.portValid && edit.additionalNetworksValid && !saving
 
   const handleSave = async () => {
     if (!edit.normalizedName) {
@@ -48,6 +51,10 @@ export function ServiceEditForm({
       setError(UPSTREAM_PORT_MESSAGE)
       return
     }
+    if (!edit.additionalNetworksValid) {
+      setError("Additional edge networks require a valid Docker network name and at least one valid hostname alias")
+      return
+    }
     setSaving(true)
     setError(null)
     try {
@@ -58,6 +65,7 @@ export function ServiceEditForm({
         healthcheck_path: edit.healthcheck.trim() || null,
         preserve_host_header: edit.preserveHost,
         custom_caddy_snippet: edit.snippet || null,
+        additional_networks: normalizeAdditionalNetworks(edit.additionalNetworks),
       }
       const svc = await api.services.update(id ?? "", body)
       applyServiceUpdate(svc)
@@ -121,6 +129,7 @@ export function ServiceEditForm({
             <textarea value={edit.snippet} onChange={(e) => edit.setSnippet(e.target.value)} rows={2}
               className="mt-1 block w-full rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm font-mono focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500" />
           </label>
+          <AdditionalNetworksEditor value={edit.additionalNetworks} onChange={edit.setAdditionalNetworks} />
           <div className="flex gap-2">
             <button onClick={handleSave} disabled={!canSave}
               className="inline-flex items-center gap-1 rounded-md bg-zinc-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-50">
@@ -143,6 +152,7 @@ export function ServiceEditForm({
           <Row label="Healthcheck" value={service.healthcheck_path || "—"} />
           <Row label="Preserve Host" value={service.preserve_host_header ? "Yes" : "No"} />
           <Row label="App Profile" value={service.app_profile || "—"} />
+          <Row label="Additional Networks" value={formatAdditionalNetworks(service.additional_networks)} />
         </dl>
       )}
     </div>

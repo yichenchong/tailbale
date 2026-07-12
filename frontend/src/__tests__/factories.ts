@@ -63,6 +63,7 @@ export interface ServiceFixture {
   preserve_host_header: boolean
   custom_caddy_snippet: string | null
   app_profile: string | null
+  additional_networks: { name: string; aliases: string[] }[] | null
   status: ServiceStatusFixture | null
   created_at: string
   updated_at: string
@@ -87,6 +88,7 @@ export function makeService(overrides: Partial<ServiceFixture> = {}): ServiceFix
     preserve_host_header: true,
     custom_caddy_snippet: null,
     app_profile: "nextcloud",
+    additional_networks: null,
     status: makeServiceStatus(),
     created_at: "2026-04-05T00:00:00",
     updated_at: "2026-04-05T00:00:00",

@@ -5,7 +5,7 @@ from sqlalchemy import Boolean, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
-from app.models.types import NaiveUTCDateTime
+from app.models.types import JSONEncodedDict, NaiveUTCDateTime
 
 
 def generate_id() -> str:
@@ -39,6 +39,7 @@ class Service(Base):
     preserve_host_header: Mapped[bool] = mapped_column(Boolean, default=True)
     custom_caddy_snippet: Mapped[str | None] = mapped_column(Text, nullable=True)
     app_profile: Mapped[str | None] = mapped_column(String, nullable=True)
+    additional_networks: Mapped[list[dict] | None] = mapped_column(JSONEncodedDict, nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(

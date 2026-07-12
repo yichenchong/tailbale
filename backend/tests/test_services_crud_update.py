@@ -151,6 +151,41 @@ class TestUpdateService:
         assert data["custom_caddy_snippet"] == "log { output stdout }"
         assert data["app_profile"] == "nextcloud"
 
+    def test_update_additional_networks(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={
+            "additional_networks": [
+                {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+            ],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] == [
+            {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+        ]
+
+    def test_update_additional_networks_schedules_reconcile(self, client):
+        svc_id = _create_service(client).json()["id"]
+        with patch("app.reconciler.reconcile_loop.reconcile_one") as mock_reconcile:
+            resp = client.put(f"/api/services/{svc_id}", json={
+                "additional_networks": [
+                    {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+                ],
+            })
+        assert resp.status_code == 200
+        mock_reconcile.assert_called_once()
+
+    def test_update_additional_networks_same_value_no_reconcile(self, client):
+        additional_networks = [
+            {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+        ]
+        svc_id = _create_service(client, additional_networks=additional_networks).json()["id"]
+        with patch("app.reconciler.reconcile_loop.reconcile_one") as mock_reconcile:
+            resp = client.put(f"/api/services/{svc_id}", json={
+                "additional_networks": additional_networks,
+            })
+        assert resp.status_code == 200
+        mock_reconcile.assert_not_called()
+
     def test_update_nonexistent(self, client):
         resp = client.put("/api/services/svc_nonexistent", json={"name": "X"})
         assert resp.status_code == 404

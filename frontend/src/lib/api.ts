@@ -27,6 +27,7 @@ export type { VersionResponse } from "./api/meta"
 export type { AppProfile, ProfileDetectResponse } from "./api/profiles"
 export type {
   EdgeVersionResponse,
+  EdgeNetworkAttachment,
   RenewCertResponse,
   ServiceCreateRequest,
   ServiceItem,

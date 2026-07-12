@@ -1,5 +1,7 @@
 import { Loader2, ArrowLeft, CheckCircle, Info } from "lucide-react"
 import { useExposeForm } from "./useExposeForm"
+import { AdditionalNetworksEditor } from "@/components/service/AdditionalNetworksEditor"
+import { formatAdditionalNetworks } from "@/lib/additionalNetworks"
 
 export default function ExposeService() {
   const {
@@ -26,6 +28,8 @@ export default function ExposeService() {
     setCustomSnippet,
     enabled,
     setEnabled,
+    additionalNetworks,
+    setAdditionalNetworks,
     normalizedHostnamePrefix,
     hostnamePrefixValid,
     fullHostname,
@@ -193,6 +197,8 @@ export default function ExposeService() {
           />
         </label>
 
+        <AdditionalNetworksEditor value={additionalNetworks} onChange={setAdditionalNetworks} />
+
         {/* Preview */}
         <div className="rounded-md border border-zinc-200 bg-zinc-50 p-4">
           <h3 className="text-sm font-medium text-zinc-700">Review</h3>
@@ -212,6 +218,10 @@ export default function ExposeService() {
             <div className="flex gap-2">
               <dt className="text-zinc-500">Network:</dt>
               <dd className="font-medium text-zinc-700">edge_net_{edgeSlug}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="text-zinc-500">Additional networks:</dt>
+              <dd className="font-medium text-zinc-700">{formatAdditionalNetworks(additionalNetworks)}</dd>
             </div>
           </dl>
         </div>

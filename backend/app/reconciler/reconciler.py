@@ -94,6 +94,7 @@ def _reconcile_service_locked(
         steps.ensure_cert(db, service, cert_path)
         stage = steps.render_and_stage_config(db, service, paths.generated_dir, cert_path)
         steps.ensure_edge(db, service, ts_authkey, paths, socket_path)
+        steps.ensure_additional_networks(db, service, socket_path)
 
         ts_ip = steps.detect_and_persist_ip(db, service, socket_path)
         if ts_ip:

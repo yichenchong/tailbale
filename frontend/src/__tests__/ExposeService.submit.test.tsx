@@ -341,6 +341,9 @@ describe("ExposeService page - submit", () => {
     fireEvent.change(screen.getByRole("textbox", { name: "Healthcheck Path (optional)" }), { target: { value: "/custom-health" } })
     fireEvent.click(screen.getByRole("checkbox", { name: "Enable immediately" }))
     fireEvent.change(screen.getByPlaceholderText("Additional Caddy directives..."), { target: { value: "header X-Test 1" } })
+    fireEvent.click(screen.getByRole("button", { name: "Add network" }))
+    fireEvent.change(screen.getByRole("textbox", { name: "Additional Docker network 1" }), { target: { value: "opencloud_opencloud-net" } })
+    fireEvent.change(screen.getByRole("textbox", { name: "Aliases for additional network 1" }), { target: { value: "cloud.example.com" } })
 
     fireEvent.click(screen.getByText("Create Service"))
 
@@ -360,6 +363,9 @@ describe("ExposeService page - submit", () => {
         enabled: false,
         custom_caddy_snippet: "header X-Test 1",
         preserve_host_header: false,
+        additional_networks: [
+          { name: "opencloud_opencloud-net", aliases: ["cloud.example.com"] },
+        ],
       })
     })
   })

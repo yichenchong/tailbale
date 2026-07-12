@@ -10,6 +10,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("service_status", "probe_retry_attempt", "INTEGER"),
     ("service_status", "last_probe_at", "DATETIME"),
     ("users", "token_version", "INTEGER NOT NULL DEFAULT 0"),
+    ("services", "additional_networks", "TEXT"),
 )
 
 # (table, index name, column) — index names match SQLAlchemy's default

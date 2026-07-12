@@ -23,6 +23,7 @@ export const mockCreatedService = {
   preserve_host_header: true,
   custom_caddy_snippet: null,
   app_profile: null,
+  additional_networks: null,
   healthcheck_path: null,
   status: { phase: "pending", message: "Awaiting first reconciliation", tailscale_ip: null, edge_container_id: null, last_reconciled_at: null, health_checks: null, cert_expires_at: null },
   created_at: "2026-04-05T00:00:00",

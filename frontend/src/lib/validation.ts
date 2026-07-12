@@ -160,6 +160,56 @@ export function isServiceName(value: string): boolean {
 }
 
 /**
+ * Docker network name. Mirrors backend/app/schemas/services.py
+ * `_validate_network_name`: Docker's practical network-name charset
+ * `[a-zA-Z0-9][a-zA-Z0-9_.-]*`.
+ */
+export function isDockerNetworkName(value: string): boolean {
+  return /^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(value.trim())
+}
+
+/**
+ * Hostname alias for Docker embedded DNS. Mirrors backend `_validate_hostname`:
+ * lowercase RFC-1035-ish labels, whole hostname <=253 chars, labels <=63 chars.
+ */
+export function isHostnameAlias(value: string): boolean {
+  const alias = value.trim().toLowerCase()
+  if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(alias)) {
+    return false
+  }
+  return alias.length <= 253 && alias.split(".").every((label) => label.length <= 63)
+}
+
+export interface AdditionalNetworkLike {
+  name: string
+  aliases: string[]
+}
+
+export function normalizeAdditionalNetworks<T extends AdditionalNetworkLike>(items: T[]): T[] {
+  return items.map((item) => ({
+    ...item,
+    name: item.name.trim(),
+    aliases: item.aliases.map((alias) => alias.trim().toLowerCase()).filter(Boolean),
+  }))
+}
+
+export function areAdditionalNetworksValid(items: AdditionalNetworkLike[]): boolean {
+  const normalized = normalizeAdditionalNetworks(items)
+  const names = new Set<string>()
+  for (const item of normalized) {
+    if (!isDockerNetworkName(item.name) || names.has(item.name)) return false
+    names.add(item.name)
+    if (item.aliases.length === 0) return false
+    const aliases = new Set<string>()
+    for (const alias of item.aliases) {
+      if (!isHostnameAlias(alias) || aliases.has(alias)) return false
+      aliases.add(alias)
+    }
+  }
+  return true
+}
+
+/**
  * Shared, single-source validation messages for the service forms (ExposeService
  * + ServiceDetail), so the twin copies can't drift. Each pairs with the matching
  * {@link isServiceName}/{@link isUpstreamPort} guard above.

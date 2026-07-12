@@ -22,9 +22,12 @@ function makeEditState(overrides: Partial<ServiceEditState> = {}): ServiceEditSt
     setPreserveHost: vi.fn(),
     snippet: "",
     setSnippet: vi.fn(),
+    additionalNetworks: [],
+    setAdditionalNetworks: vi.fn(),
     normalizedName: name.trim(),
     nameValid: true,
     portValid: true,
+    additionalNetworksValid: true,
     reset: vi.fn(),
     ...overrides,
   }
