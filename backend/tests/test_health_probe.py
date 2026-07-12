@@ -82,8 +82,13 @@ class TestCheckHttpsProbe:
         container.exec_run.assert_called_once()
         command = container.exec_run.call_args.args[0]
         assert "curl" in command
-        assert "https://localhost:443/" in command
-        assert "tls.example.com" in " ".join(command)
+        assert "https://tls.example.com:443/" in command
+        assert "--resolve" in command
+        assert "tls.example.com:443:127.0.0.1" in command
+        # SNI/Host must be the real hostname, never localhost, so Caddy selects
+        # its per-site cert during the TLS handshake instead of failing on an
+        # unmatched SNI.
+        assert not any("localhost" in part for part in command)
 
     def test_uses_configured_healthcheck_path(self):
         service = _service(
@@ -97,7 +102,7 @@ class TestCheckHttpsProbe:
         probe.check_https_probe(service, "100.64.0.1", client=client)
 
         command = container.exec_run.call_args.args[0]
-        assert "https://localhost:443/readyz" in command
+        assert "https://tls.example.com:443/readyz" in command
 
     def test_5xx_is_failure(self, caplog):
         client = _client_with_edge(_running_edge(0, b"502"))
