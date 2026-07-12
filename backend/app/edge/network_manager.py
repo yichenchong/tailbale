@@ -169,7 +169,12 @@ def _custom_aliases(container, network_name: str) -> set[str]:
     """Return non-automatic aliases Docker reports for a container endpoint."""
     networks = container.attrs.get("NetworkSettings", {}).get("Networks", {})
     endpoint = networks.get(network_name) or {}
-    aliases = set(endpoint.get("Aliases") or [])
+    # Union the deprecated per-endpoint ``Aliases`` with ``DNSNames`` (Docker
+    # Engine 25+). Relying on ``Aliases`` alone would make the steady-state
+    # comparison always fail on an engine that only populates ``DNSNames``,
+    # forcing a disconnect/reconnect churn on every reconcile. The automatic
+    # names (container name/id/hostname) are subtracted below either way.
+    aliases = set(endpoint.get("Aliases") or []) | set(endpoint.get("DNSNames") or [])
     automatic = {
         getattr(container, "name", ""),
         getattr(container, "id", ""),
@@ -269,7 +274,19 @@ def reconcile_additional_edge_networks(
                 network = client.networks.get(name)
             except docker.errors.NotFound:
                 continue
-            network.disconnect(container, force=True)
+            try:
+                network.disconnect(container, force=True)
+            except docker.errors.APIError:
+                # Best-effort prune: a transient daemon error detaching a network
+                # the operator never asked us to manage must not fail the whole
+                # service reconcile. Log and move on; the next pass retries.
+                logger.warning(
+                    "Failed to disconnect edge container %s from unmanaged network %s",
+                    edge_container_name,
+                    name,
+                    exc_info=True,
+                )
+                continue
             logger.info(
                 "Disconnected edge container %s from unmanaged additional network %s",
                 edge_container_name,

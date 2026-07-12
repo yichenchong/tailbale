@@ -94,7 +94,6 @@ def _reconcile_service_locked(
         steps.ensure_cert(db, service, cert_path)
         stage = steps.render_and_stage_config(db, service, paths.generated_dir, cert_path)
         steps.ensure_edge(db, service, ts_authkey, paths, socket_path)
-        steps.ensure_additional_networks(db, service, socket_path)
 
         ts_ip = steps.detect_and_persist_ip(db, service, socket_path)
         if ts_ip:
@@ -110,6 +109,13 @@ def _reconcile_service_locked(
         result["phase"] = phase
 
         steps.maybe_schedule_probe_retry(checks, phase, service_id, socket_path)
+
+        # Auxiliary edge-network attachments converge LAST, after DNS/cert/
+        # Caddy-reload/health have already committed (each _persist_status commit
+        # is independent). A missing/typo'd operator-owned network still fails
+        # the reconcile loudly, but no longer blocks the service's core
+        # convergence the way it would if it ran before those steps.
+        steps.ensure_additional_networks(db, service, socket_path)
 
     except ReconcileError as e:
         rollback_with_lock(db)

@@ -203,9 +203,25 @@ class TestUpdateService:
         assert resp.status_code == 200
         assert resp.json()["additional_networks"] is None
 
-    def test_update_null_clears_additional_networks_to_none(self, client):
+    def test_update_null_on_managed_service_rejected(self, client):
+        # Clearing a managed service must go through [] (converge/disconnect);
+        # null would skip the reconcile step and leave the edge attached while
+        # reporting none, so it is rejected.
         networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
         svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
+        assert resp.status_code == 422
+
+    def test_update_null_on_unmanaged_service_allowed(self, client):
+        # A service with no configured networks (NULL) may receive null (no-op).
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] is None
+
+    def test_update_null_on_empty_managed_service_allowed(self, client):
+        # [] -> null is harmless: nothing is attached, so no divergence.
+        svc_id = _create_service(client, additional_networks=[]).json()["id"]
         resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
         assert resp.status_code == 200
         assert resp.json()["additional_networks"] is None

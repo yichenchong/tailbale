@@ -449,3 +449,67 @@ class TestReconcileAdditionalEdgeNetworks:
         reconcile_additional_edge_networks("edge_opencloud", "edge_net_opencloud", [])
 
         mock_client.networks.get.assert_not_called()
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_steady_state_via_dnsnames_does_not_reconnect(self, mock_cls):
+        # Docker Engine 25+ reports aliases via DNSNames; the steady-state check
+        # must recognize them so it does not churn (disconnect/reconnect) when
+        # the desired aliases already match.
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_container = MagicMock()
+        mock_container.id = "edge_cid"
+        mock_container.name = "edge_opencloud"
+        mock_container.attrs = {
+            "Name": "/edge_opencloud",
+            "NetworkSettings": {
+                "Networks": {
+                    "edge_net_opencloud": {},
+                    "opencloud_opencloud-net": {
+                        "Aliases": None,
+                        "DNSNames": ["cloud.example.com", "edge_opencloud", "edge_cid"[:12]],
+                    },
+                },
+            },
+        }
+        mock_client.containers.get.return_value = mock_container
+        additional = MagicMock()
+        additional.name = "opencloud_opencloud-net"
+        mock_client.networks.get.return_value = additional
+
+        reconcile_additional_edge_networks(
+            "edge_opencloud",
+            "edge_net_opencloud",
+            [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}],
+        )
+
+        additional.disconnect.assert_not_called()
+        additional.connect.assert_not_called()
+
+    @patch("app.edge.network_manager.docker.DockerClient")
+    def test_prune_disconnect_apierror_is_best_effort(self, mock_cls):
+        # A transient daemon error detaching an unmanaged network must not abort
+        # the reconcile (it would otherwise fail the whole service).
+        mock_client = MagicMock()
+        mock_cls.from_env.return_value = mock_client
+        mock_container = MagicMock()
+        mock_container.id = "edge_cid"
+        mock_container.name = "edge_opencloud"
+        mock_container.attrs = {
+            "Name": "/edge_opencloud",
+            "NetworkSettings": {
+                "Networks": {
+                    "edge_net_opencloud": {},
+                    "old_opencloud-net": {"Aliases": ["old.example.com"]},
+                },
+            },
+        }
+        mock_client.containers.get.return_value = mock_container
+        old_network = MagicMock()
+        old_network.name = "old_opencloud-net"
+        old_network.disconnect.side_effect = docker.errors.APIError("daemon busy")
+        mock_client.networks.get.return_value = old_network
+
+        # Must not raise despite the disconnect failure.
+        reconcile_additional_edge_networks("edge_opencloud", "edge_net_opencloud", [])
+        old_network.disconnect.assert_called_once_with(mock_container, force=True)

@@ -109,7 +109,9 @@ class TestEnsureAdditionalNetworksStep:
         mock_reconcile.assert_called_once_with(
             svc.edge_container_name, svc.network_name, [], None
         )
-        assert db_session.get(ServiceStatus, svc.id).phase == "ensuring_additional_networks"
+        # The step runs last and must NOT write a terminal phase (that would
+        # clobber the health step's phase); create_service_db seeds "pending".
+        assert db_session.get(ServiceStatus, svc.id).phase == "pending"
 
     def test_configured_networks_converge(self, db_session, tmp_data_dir):
         networks = [{"name": "opencloud_net", "aliases": ["cloud.example.com"]}]
@@ -652,3 +654,38 @@ class TestIntermediatePhaseVisibility:
         assert all(p in committed_phases for p in expected_order), committed_phases
         assert seen_positions == sorted(seen_positions), committed_phases
         assert committed_phases[-1] == "healthy"
+
+    def test_additional_network_failure_runs_after_core_convergence(self, db_session, tmp_data_dir):
+        # Blast-radius guard: an auxiliary additional-network failure must not
+        # block the service's core convergence. ensure_additional_networks runs
+        # LAST, so DNS/Caddy-reload/health execute and commit first; the missing
+        # network then surfaces as a failed reconcile (loud, but non-blocking).
+        svc = create_service_db(
+            db_session,
+            additional_networks=[{"name": "missing_net", "aliases": ["x.example.com"]}],
+        )
+        with (
+            patch(_P_SECRET, return_value="ts-key"),
+            patch(_P_RENDER, return_value="caddyfile content"),
+            patch(_P_WRITE),
+            patch(_P_CERT),
+            patch(_P_NETWORK, return_value=("net123", "upstream123")),
+            patch(_P_CREATE_EDGE, return_value="cid"),
+            patch(_P_FIND_EDGE, return_value=None),
+            patch(_P_START),
+            patch(_P_TS_IP, return_value="100.64.0.1"),
+            patch(_P_RELOAD) as mock_reload,
+            patch(_P_AGGREGATE, return_value="healthy"),
+            patch(_P_HEALTH, return_value={"edge_container_running": True}) as mock_health,
+            patch(
+                "app.edge.network_manager.reconcile_additional_edge_networks",
+                side_effect=docker.errors.NotFound("no such network"),
+            ),
+        ):
+            result = reconcile_service(db_session, svc)
+
+        # Core steps ran before the auxiliary failure...
+        mock_health.assert_called_once()
+        mock_reload.assert_called_once()
+        # ...and the missing network still surfaces loudly.
+        assert result["phase"] == "failed"
