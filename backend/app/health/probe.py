@@ -131,9 +131,12 @@ def check_https_probe(
     upstream may require auth) from connection failures. curl exits 0 for
     any HTTP response and non-zero only for network/TLS failures.
 
-    A ``Host`` header matching the configured hostname is sent so Caddy
-    routes the request through its reverse_proxy rather than returning 421
-    for the unmatched ``localhost`` default.
+    curl connects with ``--resolve`` pinning *service.hostname* to loopback and
+    requests ``https://<hostname>`` so the TLS SNI matches the certificate Caddy
+    serves for that site (Caddy keys certs on SNI). A plain ``Host`` header does
+    NOT set SNI — hitting ``localhost`` sends ``SNI=localhost``, which the site
+    has no cert for, so the TLS handshake fails (curl exit 35) before HTTP is
+    ever reached.
     """
     if not tailscale_ip:
         log_https_probe_failure(service, "missing Tailscale IP", tailscale_ip=None)
@@ -174,9 +177,9 @@ def check_https_probe(
                 "/dev/null",
                 "-w",
                 "%{http_code}",
-                "-H",
-                f"Host: {service.hostname}",
-                f"https://localhost:443{probe_path(service)}",
+                "--resolve",
+                f"{service.hostname}:443:127.0.0.1",
+                f"https://{service.hostname}:443{probe_path(service)}",
             ],
             environment={"HOME": "/tmp"},
         )
