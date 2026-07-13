@@ -16,6 +16,14 @@ export function AdditionalNetworksEditor({
   const remove = (index: number) => {
     onChange(value.filter((_, i) => i !== index))
   }
+  // Count trimmed network names so duplicate rows can be flagged inline. The
+  // shared validator (areAdditionalNetworksValid) rejects duplicates, which
+  // otherwise disables Save with no visible reason.
+  const nameCounts = value.reduce<Record<string, number>>((acc, item) => {
+    const name = item.name.trim()
+    if (name) acc[name] = (acc[name] ?? 0) + 1
+    return acc
+  }, {})
 
   return (
     <div className="space-y-2 rounded-md border border-zinc-200 p-3">
@@ -34,6 +42,9 @@ export function AdditionalNetworksEditor({
         // dropped on submit by normalizeAdditionalNetworks.
         const aliasesInvalid = item.aliases.some((alias) => alias !== "" && !isHostnameAlias(alias))
         const aliasesEmpty = normalizedName !== "" && item.aliases.every((alias) => alias === "")
+        const nameDuplicate = normalizedName !== "" && nameCounts[normalizedName] > 1
+        const nonEmptyAliases = item.aliases.filter((alias) => alias !== "")
+        const aliasesDuplicate = new Set(nonEmptyAliases).size !== nonEmptyAliases.length
         return (
           <div key={index} className="space-y-1 rounded-md bg-zinc-50 p-2">
             <div className="flex gap-2">
@@ -60,6 +71,9 @@ export function AdditionalNetworksEditor({
             {nameInvalid && (
               <p className="text-xs text-red-600">Network names may contain letters, numbers, underscores, periods, and hyphens.</p>
             )}
+            {!nameInvalid && nameDuplicate && (
+              <p className="text-xs text-red-600">This Docker network is already listed above.</p>
+            )}
             <label className="block">
               <span className="text-xs font-medium text-zinc-600">Aliases</span>
               <input
@@ -80,6 +94,9 @@ export function AdditionalNetworksEditor({
             </label>
             {(aliasesInvalid || aliasesEmpty) && (
               <p className="text-xs text-red-600">Add at least one lowercase hostname alias; aliases must be valid DNS names.</p>
+            )}
+            {!aliasesInvalid && !aliasesEmpty && aliasesDuplicate && (
+              <p className="text-xs text-red-600">Aliases must be unique within a network.</p>
             )}
           </div>
         )
