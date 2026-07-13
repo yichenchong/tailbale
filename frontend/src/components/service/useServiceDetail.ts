@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { api, type ServiceItem } from "@/lib/api"
+import { api, type ServiceItem, type EdgeNetworkAttachment } from "@/lib/api"
 import { useResource } from "@/lib/useResource"
-import { isServiceName, isUpstreamPort } from "@/lib/validation"
+import { areAdditionalNetworksValid, isServiceName, isUpstreamPort } from "@/lib/validation"
 import { type ServiceEditState } from "@/lib/serviceTypes"
 
 
@@ -30,6 +30,7 @@ export function useServiceDetail(id: string | undefined): UseServiceDetailResult
   const [healthcheck, setHealthcheck] = useState("")
   const [preserveHost, setPreserveHost] = useState(true)
   const [snippet, setSnippet] = useState("")
+  const [additionalNetworks, setAdditionalNetworks] = useState<EdgeNetworkAttachment[]>([])
   const editingRef = useRef(false)
 
   const seedFrom = useCallback((svc: ServiceItem) => {
@@ -39,6 +40,7 @@ export function useServiceDetail(id: string | undefined): UseServiceDetailResult
     setHealthcheck(svc.healthcheck_path || "")
     setPreserveHost(svc.preserve_host_header)
     setSnippet(svc.custom_caddy_snippet || "")
+    setAdditionalNetworks(svc.additional_networks || [])
   }, [])
 
   const fetcher = useCallback(() => api.services.get(id ?? ""), [id])
@@ -83,6 +85,7 @@ export function useServiceDetail(id: string | undefined): UseServiceDetailResult
   const normalizedName = name.trim()
   const nameValid = isServiceName(name)
   const portValid = isUpstreamPort(port)
+  const additionalNetworksValid = areAdditionalNetworksValid(additionalNetworks)
 
   return {
     service,
@@ -106,9 +109,12 @@ export function useServiceDetail(id: string | undefined): UseServiceDetailResult
       setPreserveHost,
       snippet,
       setSnippet,
+      additionalNetworks,
+      setAdditionalNetworks,
       normalizedName,
       nameValid,
       portValid,
+      additionalNetworksValid,
       reset,
     },
   }

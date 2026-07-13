@@ -129,3 +129,17 @@ class UpstreamApiError(ServiceError):
 
     status_code = 502
     detail = "Upstream service request failed"
+
+
+class AdditionalNetworkInvalid(ServiceError):
+    """An additional edge network attachment is invalid -> 422.
+
+    Raised when a configured additional network cannot be validated against the
+    derived service state that the request-body schema cannot see — currently
+    when it names the service's own primary per-service network (``network_name``
+    is derived after schema validation), which the reconciler would silently skip
+    while the API/UI would still show it as configured.
+    """
+
+    status_code = 422
+    detail = "Invalid additional edge network"

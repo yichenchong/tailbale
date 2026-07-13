@@ -151,6 +151,97 @@ class TestUpdateService:
         assert data["custom_caddy_snippet"] == "log { output stdout }"
         assert data["app_profile"] == "nextcloud"
 
+    def test_update_additional_networks(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={
+            "additional_networks": [
+                {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+            ],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] == [
+            {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+        ]
+
+    def test_update_additional_networks_schedules_reconcile(self, client):
+        svc_id = _create_service(client).json()["id"]
+        with patch("app.reconciler.reconcile_loop.reconcile_one") as mock_reconcile:
+            resp = client.put(f"/api/services/{svc_id}", json={
+                "additional_networks": [
+                    {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+                ],
+            })
+        assert resp.status_code == 200
+        mock_reconcile.assert_called_once()
+
+    def test_update_additional_networks_same_value_no_reconcile(self, client):
+        additional_networks = [
+            {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+        ]
+        svc_id = _create_service(client, additional_networks=additional_networks).json()["id"]
+        with patch("app.reconciler.reconcile_loop.reconcile_one") as mock_reconcile:
+            resp = client.put(f"/api/services/{svc_id}", json={
+                "additional_networks": additional_networks,
+            })
+        assert resp.status_code == 200
+        mock_reconcile.assert_not_called()
+
+    def test_update_omitting_additional_networks_preserves_existing(self, client):
+        # An unrelated edit (no additional_networks key) must leave the stored
+        # value untouched — never silently rewrite it to [] and opt the service
+        # into edge-network convergence.
+        networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
+        svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"name": "Renamed"})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] == networks
+
+    def test_update_omitting_preserves_null(self, client):
+        # A legacy/NULL service edited on an unrelated field stays NULL.
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"upstream_port": 8080})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] is None
+
+    def test_update_null_on_managed_service_rejected(self, client):
+        # Clearing a managed service must go through [] (converge/disconnect);
+        # null would skip the reconcile step and leave the edge attached while
+        # reporting none, so it is rejected.
+        networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
+        svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
+        assert resp.status_code == 422
+
+    def test_update_null_on_unmanaged_service_allowed(self, client):
+        # A service with no configured networks (NULL) may receive null (no-op).
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] is None
+
+    def test_update_null_on_empty_managed_service_allowed(self, client):
+        # [] -> null is harmless: nothing is attached, so no divergence.
+        svc_id = _create_service(client, additional_networks=[]).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": None})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] is None
+
+    def test_update_empty_list_clears_additional_networks_to_empty(self, client):
+        networks = [{"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]}]
+        svc_id = _create_service(client, additional_networks=networks).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={"additional_networks": []})
+        assert resp.status_code == 200
+        assert resp.json()["additional_networks"] == []
+
+    def test_update_additional_network_primary_name_rejected(self, client):
+        svc_id = _create_service(client).json()["id"]
+        resp = client.put(f"/api/services/{svc_id}", json={
+            "additional_networks": [
+                {"name": "edge_net_nextcloud", "aliases": ["cloud.example.com"]},
+            ],
+        })
+        assert resp.status_code == 422
+
     def test_update_nonexistent(self, client):
         resp = client.put("/api/services/svc_nonexistent", json={"name": "X"})
         assert resp.status_code == 404

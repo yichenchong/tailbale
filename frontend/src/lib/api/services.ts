@@ -1,5 +1,10 @@
 import { del, get, post, put } from "./core"
 
+export interface EdgeNetworkAttachment {
+  name: string
+  aliases: string[]
+}
+
 export interface ServiceStatus {
   phase: string
   message: string | null
@@ -30,6 +35,7 @@ export interface ServiceItem {
   preserve_host_header: boolean
   custom_caddy_snippet: string | null
   app_profile: string | null
+  additional_networks: EdgeNetworkAttachment[] | null
   status: ServiceStatus | null
   created_at: string
   updated_at: string
@@ -50,6 +56,7 @@ export interface ServiceUpdateRequest {
   preserve_host_header?: boolean
   custom_caddy_snippet?: string | null
   app_profile?: string | null
+  additional_networks?: EdgeNetworkAttachment[] | null
 }
 
 export interface ServiceCreateRequest {
@@ -64,6 +71,7 @@ export interface ServiceCreateRequest {
   preserve_host_header: boolean
   custom_caddy_snippet: string | null
   app_profile: string | null
+  additional_networks: EdgeNetworkAttachment[] | null
 }
 
 export interface EdgeVersionResponse {

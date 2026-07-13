@@ -110,6 +110,13 @@ def _reconcile_service_locked(
 
         steps.maybe_schedule_probe_retry(checks, phase, service_id, socket_path)
 
+        # Auxiliary edge-network attachments converge LAST, after DNS/cert/
+        # Caddy-reload/health have already committed (each _persist_status commit
+        # is independent). A missing/typo'd operator-owned network still fails
+        # the reconcile loudly, but no longer blocks the service's core
+        # convergence the way it would if it ran before those steps.
+        steps.ensure_additional_networks(db, service, socket_path)
+
     except ReconcileError as e:
         rollback_with_lock(db)
         logger.error("Reconcile failed for %s: %s", service_id, e)

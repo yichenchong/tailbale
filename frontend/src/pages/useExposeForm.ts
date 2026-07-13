@@ -1,11 +1,13 @@
 import { useCallback, useState, useEffect, useMemo, useRef, type FormEvent } from "react"
 import { useNavigate, useSearchParams } from "react-router-dom"
-import { api, type AllSettings, type ContainerPort, type AppProfile } from "@/lib/api"
+import { api, type AllSettings, type ContainerPort, type AppProfile, type EdgeNetworkAttachment } from "@/lib/api"
 import {
   slugify,
   hostnamePrefix as defaultHostnamePrefix,
   isUpstreamPort,
   isServiceName,
+  areAdditionalNetworksValid,
+  normalizeAdditionalNetworks,
   SERVICE_NAME_REQUIRED_MESSAGE,
   SERVICE_NAME_LENGTH_MESSAGE,
   UPSTREAM_PORT_MESSAGE,
@@ -74,6 +76,7 @@ export function useExposeForm() {
   const [customSnippet, setCustomSnippet] = useState("")
   const [enabled, setEnabled] = useState(true)
   const [appProfile, setAppProfile] = useState<string | null>(null)
+  const [additionalNetworks, setAdditionalNetworks] = useState<EdgeNetworkAttachment[]>([])
   const profileRequest = useLatestRequest()
 
   // Reset every field to its default whenever the target container changes.
@@ -91,6 +94,7 @@ export function useExposeForm() {
     setPreserveHost(true)
     setCustomSnippet("")
     setEnabled(true)
+    setAdditionalNetworks([])
   }
 
   // Clear the previously-detected profile the same way, so the old
@@ -151,7 +155,8 @@ export function useExposeForm() {
   const portValid = isUpstreamPort(port)
   const nameValid = isServiceName(name)
   const hasSelectedContainer = Boolean(containerId && containerName)
-  const canSubmit = Boolean(settings) && hasSelectedContainer && nameValid && hostnamePrefixValid && portValid && !saving
+  const additionalNetworksValid = areAdditionalNetworksValid(additionalNetworks)
+  const canSubmit = Boolean(settings) && hasSelectedContainer && nameValid && hostnamePrefixValid && portValid && additionalNetworksValid && !saving
 
   const handleSubmit = async (e?: FormEvent<HTMLFormElement>) => {
     e?.preventDefault()
@@ -185,11 +190,19 @@ export function useExposeForm() {
       setError(UPSTREAM_PORT_MESSAGE)
       return
     }
+    if (!additionalNetworksValid) {
+      setError("Additional edge networks require a valid Docker network name and at least one valid hostname alias")
+      return
+    }
     // Mark in-flight before the first await so a same-batch re-submit is blocked.
     submittingRef.current = true
     setSaving(true)
     setError(null)
     try {
+      // Empty means "no additional networks configured" -> null, so the
+      // reconciler leaves the edge's network attachments untouched. A non-empty
+      // list opts the service into managed edge-network convergence.
+      const normalizedNetworks = normalizeAdditionalNetworks(additionalNetworks)
       const svc = await api.services.create({
         name: normalizedName,
         upstream_container_id: containerId,
@@ -202,6 +215,7 @@ export function useExposeForm() {
         preserve_host_header: preserveHost,
         custom_caddy_snippet: customSnippet || null,
         app_profile: appProfile,
+        additional_networks: normalizedNetworks.length > 0 ? normalizedNetworks : null,
       })
       // Redirect straight to the service detail page
       navigate(`/services/${encodeURIComponent(svc.id)}`)
@@ -238,6 +252,9 @@ export function useExposeForm() {
     setCustomSnippet,
     enabled,
     setEnabled,
+    additionalNetworks,
+    setAdditionalNetworks,
+    additionalNetworksValid,
     normalizedHostnamePrefix,
     hostnamePrefixValid,
     fullHostname,

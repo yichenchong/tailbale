@@ -21,6 +21,7 @@ from app.models.service_status import ServiceStatus
 from app.schemas.services import ServiceResponse
 from app.secrets import cloudflare_credentials
 from app.services.errors import (
+    AdditionalNetworkInvalid,
     HostnameChangeError,
     HostnameInUse,
     HostnameSuffixInvalid,
@@ -31,7 +32,7 @@ from app.services.lifecycle import (
     reconcile_in_background,
     teardown_hostname_resources,
 )
-from app.services.mapping import to_response
+from app.services.mapping import reject_primary_additional_network, to_response
 from app.services.service_fields import CONFIG_AFFECTING_FIELDS, UPDATABLE_FIELDS
 
 
@@ -371,6 +372,18 @@ def update_service(
         if changing_hostname:
             changes.update(_apply_hostname_change(db, svc, body, service_id))
         changes.update(_apply_field_changes(body))
+        if "additional_networks" in changes:
+            new_networks = changes["additional_networks"]
+            reject_primary_additional_network(svc.network_name, new_networks)
+            # Clearing a managed service must go through [] (converge/disconnect),
+            # not null: null skips the reconcile step, so persisting it would
+            # report "no networks" while the edge stays attached with live
+            # aliases — a state divergence. Force the explicit-clear contract.
+            if new_networks is None and svc.additional_networks:
+                raise AdditionalNetworkInvalid(
+                    "Send an empty list to disconnect configured additional "
+                    "networks; null would leave the edge attached"
+                )
 
         disabling_service = "enabled" in changes and changes["enabled"] is False and was_enabled
         enabling_service = "enabled" in changes and changes["enabled"] is True and not was_enabled

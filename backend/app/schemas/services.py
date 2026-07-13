@@ -1,6 +1,7 @@
 """Pydantic schemas for service CRUD operations."""
 
 import re
+from typing import Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -52,6 +53,68 @@ def _validate_container_name(v: str) -> str:
         )
     return v
 
+def _validate_network_name(v: str) -> str:
+    """Validate a Docker network name used for additional edge attachments."""
+    if not _CONTAINER_NAME_RE.fullmatch(v):
+        raise ValueError(
+            "Invalid Docker network name: must match Docker's charset "
+            "'[a-zA-Z0-9][a-zA-Z0-9_.-]*'"
+        )
+    return v
+
+
+class AdditionalNetwork(BaseModel):
+    """Operator-owned Docker network the edge joins with DNS aliases."""
+
+    name: str = Field(..., min_length=1)
+    aliases: list[str] = Field(..., min_length=1)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v: Any) -> Any:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        return _validate_network_name(v)
+
+    @field_validator("aliases", mode="before")
+    @classmethod
+    def normalize_aliases(cls, v: Any) -> Any:
+        if isinstance(v, list):
+            return [alias.strip().lower() if isinstance(alias, str) else alias for alias in v]
+        return v
+
+    @field_validator("aliases")
+    @classmethod
+    def validate_aliases(cls, aliases: list[str]) -> list[str]:
+        seen: set[str] = set()
+        for alias in aliases:
+            _validate_hostname(alias)
+            if alias in seen:
+                raise ValueError("Duplicate alias in additional network")
+            seen.add(alias)
+        return aliases
+
+
+def _validate_additional_networks(v: Any) -> list[dict] | None:
+    """Normalize additional edge network attachments to JSON-serializable dicts."""
+    if v is None:
+        return None
+    if not isinstance(v, list):
+        raise ValueError("Additional networks must be a list")
+    seen: set[str] = set()
+    networks: list[dict] = []
+    for raw in v:
+        network = AdditionalNetwork.model_validate(raw)
+        if network.name in seen:
+            raise ValueError("Duplicate additional network name")
+        seen.add(network.name)
+        networks.append(network.model_dump())
+    return networks
+
+
 
 def _validate_caddy_snippet(v: str) -> str:
     """Validate a rendered custom Caddy snippet for site-block containment.
@@ -78,6 +141,7 @@ class ServiceCreate(BaseModel):
     preserve_host_header: bool = True
     custom_caddy_snippet: str | None = None
     app_profile: str | None = None
+    additional_networks: list[dict] | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -100,6 +164,11 @@ class ServiceCreate(BaseModel):
     def validate_custom_caddy_snippet(cls, v: str | None) -> str | None:
         return _validate_caddy_snippet(v) if v is not None else v
 
+    @field_validator("additional_networks", mode="before")
+    @classmethod
+    def validate_additional_networks(cls, v: Any) -> list[dict] | None:
+        return _validate_additional_networks(v)
+
 
 class ServiceUpdate(BaseModel):
     """Request body for updating a service exposure."""
@@ -113,6 +182,7 @@ class ServiceUpdate(BaseModel):
     preserve_host_header: bool | None = None
     custom_caddy_snippet: str | None = None
     app_profile: str | None = None
+    additional_networks: list[dict] | None = None
 
     @field_validator("name", mode="before")
     @classmethod
@@ -143,6 +213,11 @@ class ServiceUpdate(BaseModel):
     @classmethod
     def validate_custom_caddy_snippet(cls, v: str | None) -> str | None:
         return _validate_caddy_snippet(v) if v is not None else v
+
+    @field_validator("additional_networks", mode="before")
+    @classmethod
+    def validate_additional_networks(cls, v: Any) -> list[dict] | None:
+        return _validate_additional_networks(v)
 
 
 class ServiceStatusResponse(BaseModel):
@@ -181,6 +256,7 @@ class ServiceResponse(BaseModel):
     preserve_host_header: bool
     custom_caddy_snippet: str | None = None
     app_profile: str | None = None
+    additional_networks: list[AdditionalNetwork] | None = None
 
     status: ServiceStatusResponse | None = None
 

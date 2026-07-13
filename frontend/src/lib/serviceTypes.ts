@@ -1,3 +1,5 @@
+import { type EdgeNetworkAttachment } from "@/lib/api"
+
 export interface ServiceEditState {
   editing: boolean
   setEditing: (v: boolean) => void
@@ -13,9 +15,12 @@ export interface ServiceEditState {
   setPreserveHost: (v: boolean) => void
   snippet: string
   setSnippet: (v: string) => void
+  additionalNetworks: EdgeNetworkAttachment[]
+  setAdditionalNetworks: (v: EdgeNetworkAttachment[]) => void
   normalizedName: string
   nameValid: boolean
   portValid: boolean
+  additionalNetworksValid: boolean
   reset: () => void
 }
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest"
 import { fireEvent, screen, waitFor } from "@testing-library/react"
 import { mockService, renderWithRoute } from "./serviceDetailTestUtils"
+import { makeService } from "./factories"
 
 beforeEach(() => {
   vi.restoreAllMocks()
@@ -125,5 +126,84 @@ describe("ServiceDetail page - edit", () => {
     )
     const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")
     expect(JSON.parse(String(putCall?.[1]?.body))).toMatchObject({ name: emojiName })
+  })
+
+  it("omits additional_networks when the service had none and the editor stays empty", async () => {
+    // A legacy/NULL service edited on an unrelated field must NOT be silently
+    // opted into edge-network convergence (the field is left off the PUT).
+    const svc = makeService({ additional_networks: null })
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(svc) })
+      }
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(svc) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Edit"))
+    fireEvent.change(screen.getByLabelText("Upstream Port"), { target: { value: "8080" } })
+    fireEvent.click(screen.getByText("Save"))
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true))
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")
+    const body = JSON.parse(String(putCall?.[1]?.body))
+    expect(body).not.toHaveProperty("additional_networks")
+  })
+
+  it("sends [] to clear a previously-configured additional network", async () => {
+    const svc = makeService({ additional_networks: [{ name: "opencloud_net", aliases: ["cloud.example.com"] }] })
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(makeService({ additional_networks: [] })) })
+      }
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(svc) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Edit"))
+    fireEvent.click(screen.getByLabelText("Remove additional network 1"))
+    fireEvent.click(screen.getByText("Save"))
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true))
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")
+    expect(JSON.parse(String(putCall?.[1]?.body)).additional_networks).toEqual([])
+  })
+
+  it("sends the configured list when a network is added to a service with none", async () => {
+    const svc = makeService({ additional_networks: null })
+    const fetchMock = vi.fn((url: string, init?: RequestInit) => {
+      if (init?.method === "PUT") {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve(svc) })
+      }
+      if (String(url).endsWith("/edge-version")) {
+        return Promise.resolve({ ok: true, json: () => Promise.resolve({ orchestrator_version: "1.0.0", edge_version: "1.0.0", up_to_date: true }) })
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve(svc) })
+    })
+    vi.stubGlobal("fetch", fetchMock)
+    await renderWithRoute("/services/svc_abc123")
+    await waitFor(() => expect(screen.getByText("Edit")).toBeInTheDocument())
+
+    fireEvent.click(screen.getByText("Edit"))
+    fireEvent.click(screen.getByText("Add network"))
+    fireEvent.change(screen.getByLabelText("Additional Docker network 1"), { target: { value: "opencloud_net" } })
+    fireEvent.change(screen.getByLabelText("Aliases for additional network 1"), { target: { value: "cloud.example.com" } })
+    fireEvent.click(screen.getByText("Save"))
+
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(true))
+    const putCall = fetchMock.mock.calls.find(([, init]) => init?.method === "PUT")
+    expect(JSON.parse(String(putCall?.[1]?.body)).additional_networks).toEqual([
+      { name: "opencloud_net", aliases: ["cloud.example.com"] },
+    ])
   })
 })

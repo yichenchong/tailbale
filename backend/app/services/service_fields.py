@@ -32,6 +32,7 @@ CREATE_COPY_FIELDS: frozenset[str] = frozenset(
         "preserve_host_header",
         "custom_caddy_snippet",
         "app_profile",
+        "additional_networks",
     }
 )
 
@@ -56,6 +57,7 @@ RESPONSE_PASSTHROUGH_FIELDS: frozenset[str] = frozenset(
         "preserve_host_header",
         "custom_caddy_snippet",
         "app_profile",
+        "additional_networks",
     }
 )
 
@@ -74,6 +76,7 @@ UPDATABLE_FIELDS: tuple[str, ...] = (
     "preserve_host_header",
     "custom_caddy_snippet",
     "app_profile",
+    "additional_networks",
 )
 
 # Fields whose change requires re-rendering the Caddyfile / re-probing health,
@@ -86,5 +89,6 @@ CONFIG_AFFECTING_FIELDS: frozenset[str] = frozenset(
         "preserve_host_header",
         "custom_caddy_snippet",
         "healthcheck_path",
+        "additional_networks",
     }
 )

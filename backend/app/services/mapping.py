@@ -13,6 +13,7 @@ from app.models.certificate import Certificate
 from app.models.service import Service
 from app.models.service_status import ServiceStatus
 from app.schemas.services import ServiceResponse, ServiceStatusResponse
+from app.services.errors import AdditionalNetworkInvalid
 from app.services.service_fields import RESPONSE_PASSTHROUGH_FIELDS
 from app.timeutil import iso
 
@@ -54,6 +55,26 @@ def ts_hostname(slug: str, prefix: str = "edge") -> str:
 def derive_edge_names(slug: str, ts_prefix: str = "edge") -> tuple[str, str, str]:
     """Return ``(edge_container_name, network_name, ts_hostname)`` for *slug*."""
     return edge_container_name(slug), network_name(slug), ts_hostname(slug, ts_prefix)
+
+
+def reject_primary_additional_network(
+    primary_network_name: str, additional_networks: list[dict] | None
+) -> None:
+    """Reject an additional network that names the service's primary network.
+
+    ``network_name`` is derived after request-body validation, so the schema
+    cannot catch a config that lists the primary per-service network among the
+    additional attachments. The reconciler silently skips such an entry
+    (network_manager.reconcile_additional_edge_networks), so accepting it would
+    persist and surface a network whose aliases are never applied. Reject it at
+    the service layer instead.
+    """
+    for item in additional_networks or []:
+        if item.get("name") == primary_network_name:
+            raise AdditionalNetworkInvalid(
+                f"Additional network '{primary_network_name}' is the service's "
+                "primary network and cannot be attached again"
+            )
 
 
 def unique_slug(db: Session, name: str, ts_prefix: str = "edge") -> str:

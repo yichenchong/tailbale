@@ -16,7 +16,12 @@ from app.models.service_status import ServiceStatus
 from app.schemas.services import ServiceResponse
 from app.services.errors import HostnameInUse
 from app.services.lifecycle import reconcile_in_background
-from app.services.mapping import derive_edge_names, to_response, unique_slug
+from app.services.mapping import (
+    derive_edge_names,
+    reject_primary_additional_network,
+    to_response,
+    unique_slug,
+)
 from app.services.service_fields import CREATE_COPY_FIELDS
 
 
@@ -39,6 +44,7 @@ def create_service(
         ts_prefix = settings_store.get_setting(db, "ts_default_hostname_prefix")
         slug = unique_slug(db, body.name, ts_prefix)
         edge_container_name, network_name, ts_hostname = derive_edge_names(slug, ts_prefix)
+        reject_primary_additional_network(network_name, body.additional_networks)
         svc = Service(
             base_domain=configured_domain,
             edge_container_name=edge_container_name,

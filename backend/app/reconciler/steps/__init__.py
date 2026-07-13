@@ -24,6 +24,7 @@ from __future__ import annotations
 from app.fsutil import atomic_write_text
 from app.health.health_checker import CRITICAL_CHECKS
 from app.reconciler.status import _persist_status, _update_phase
+from app.reconciler.steps.additional_networks_step import ensure_additional_networks
 from app.reconciler.steps.cert_step import ensure_cert
 from app.reconciler.steps.config_step import _cert_fingerprint, render_and_stage_config
 from app.reconciler.steps.dns_step import ensure_dns
@@ -45,6 +46,7 @@ __all__ = [
     "_update_phase",
     "atomic_write_text",
     "detect_and_persist_ip",
+    "ensure_additional_networks",
     "ensure_cert",
     "ensure_dns",
     "ensure_edge",

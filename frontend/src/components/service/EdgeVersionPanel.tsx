@@ -3,6 +3,7 @@ import { type ServiceItem, type EdgeVersionResponse } from "@/lib/api"
 import { formatDateTime } from "@/lib/useTimezone"
 import { formatCertExpiry } from "@/lib/certStatus"
 import { phaseLabel } from "@/lib/statusStyles"
+import { formatAdditionalNetworks } from "@/lib/additionalNetworks"
 import { Row } from "./Row"
 
 /**
@@ -28,6 +29,7 @@ export function EdgeVersionPanel({
       <dl className="mt-3 space-y-2 text-sm">
         <Row label="Edge Container" value={service.edge_container_name} />
         <Row label="Docker Network" value={service.network_name} />
+        <Row label="Additional Networks" value={formatAdditionalNetworks(service.additional_networks)} />
         <Row label="TS Hostname" value={service.ts_hostname} />
         <Row label="Tailscale IP" value={service.status?.tailscale_ip || "—"} />
         <Row label="Cert Expiry" value={cert.text} valueClassName={cert.style} />

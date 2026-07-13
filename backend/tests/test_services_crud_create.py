@@ -83,6 +83,9 @@ class TestCreateService:
             preserve_host_header=False,
             custom_caddy_snippet="header X-Custom true",
             app_profile="jellyfin",
+            additional_networks=[
+                {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+            ],
         )
         assert resp.status_code == 201
         data = resp.json()
@@ -93,6 +96,9 @@ class TestCreateService:
         assert data["preserve_host_header"] is False
         assert data["custom_caddy_snippet"] == "header X-Custom true"
         assert data["app_profile"] == "jellyfin"
+        assert data["additional_networks"] == [
+            {"name": "opencloud_opencloud-net", "aliases": ["cloud.example.com"]},
+        ]
 
     def test_duplicate_hostname_rejected(self, client):
         _create_service(client, hostname="app.example.com")
@@ -114,6 +120,61 @@ class TestCreateService:
 
     def test_invalid_scheme_rejected(self, client):
         resp = _create_service(client, upstream_scheme="ftp")
+        assert resp.status_code == 422
+
+    def test_invalid_additional_network_name_rejected(self, client):
+        resp = _create_service(
+            client,
+            additional_networks=[{"name": "bad network", "aliases": ["cloud.example.com"]}],
+        )
+        assert resp.status_code == 422
+
+    def test_invalid_additional_network_alias_rejected(self, client):
+        resp = _create_service(
+            client,
+            additional_networks=[{"name": "opencloud_net", "aliases": ["Bad Alias"]}],
+        )
+        assert resp.status_code == 422
+
+    def test_duplicate_additional_network_rejected(self, client):
+        resp = _create_service(
+            client,
+            additional_networks=[
+                {"name": "opencloud_net", "aliases": ["cloud.example.com"]},
+                {"name": "opencloud_net", "aliases": ["collabora.example.com"]},
+            ],
+        )
+        assert resp.status_code == 422
+
+    def test_create_without_additional_networks_stores_null(self, client):
+        # Omitting the field must persist NULL (feature not configured), NOT [].
+        # The reconciler skips NULL entirely, so unmanaged edge network
+        # attachments are left untouched; [] would mean "converge / disconnect".
+        resp = _create_service(client)
+        assert resp.status_code == 201
+        assert resp.json()["additional_networks"] is None
+
+    def test_create_explicit_null_additional_networks_stays_null(self, client):
+        resp = _create_service(client, additional_networks=None)
+        assert resp.status_code == 201
+        assert resp.json()["additional_networks"] is None
+
+    def test_create_empty_additional_networks_stays_empty(self, client):
+        # An explicit [] opts the service into managed convergence and must round
+        # trip as [], distinct from the NULL "not configured" state above.
+        resp = _create_service(client, additional_networks=[])
+        assert resp.status_code == 201
+        assert resp.json()["additional_networks"] == []
+
+    def test_create_additional_network_primary_name_rejected(self, client):
+        # "Nextcloud" derives network_name "edge_net_nextcloud"; listing it as an
+        # additional network would be silently skipped by the reconciler.
+        resp = _create_service(
+            client,
+            additional_networks=[
+                {"name": "edge_net_nextcloud", "aliases": ["cloud.example.com"]},
+            ],
+        )
         assert resp.status_code == 422
 
     def test_missing_required_fields(self, client):
