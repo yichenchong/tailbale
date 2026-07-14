@@ -30,7 +30,7 @@ export function AdditionalNetworksEditor({
       <div>
         <span className="text-sm font-medium text-zinc-700">Additional Edge Networks</span>
         <p className="mt-1 text-xs text-zinc-500">
-          Attach the edge container to existing Docker networks and register hostname aliases there, e.g. <code>cloud.example.com</code> on <code>opencloud_opencloud-net</code>.
+          Attach the edge container to one or more existing Docker networks and register hostname aliases there, so other containers on those networks resolve the alias to this edge — useful when an app makes server-to-server calls to its own (or a sibling's) public hostname from inside Docker. Example: alias <code>app.example.com</code> on network <code>my-app-net</code>.
         </p>
       </div>
 
@@ -54,7 +54,7 @@ export function AdditionalNetworksEditor({
                   type="text"
                   value={item.name}
                   onChange={(e) => update(index, { name: e.target.value })}
-                  placeholder="opencloud_opencloud-net"
+                  placeholder="my-app-net"
                   aria-label={`Additional Docker network ${index + 1}`}
                   className="mt-1 block w-full rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
                 />
@@ -87,7 +87,7 @@ export function AdditionalNetworksEditor({
                     .split(/[\s,]+/)
                     .map((alias) => alias.trim().toLowerCase()),
                 })}
-                placeholder="cloud.example.com"
+                placeholder="app.example.com"
                 aria-label={`Aliases for additional network ${index + 1}`}
                 className="mt-1 block w-full rounded-md border border-zinc-300 px-2.5 py-1.5 text-sm focus:border-zinc-500 focus:outline-none focus:ring-1 focus:ring-zinc-500"
               />
