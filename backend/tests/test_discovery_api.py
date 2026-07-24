@@ -151,10 +151,11 @@ class TestListContainers:
         assert data["containers"][0]["name"] == "myapp"
 
     @patch("app.services.diagnostics.docker.DockerClient")
-    def test_hides_main_orchestrator_container(self, mock_docker_cls, client):
+    def test_shows_main_orchestrator_container(self, mock_docker_cls, client):
         """The tailBale orchestrator itself (labeled tailbale.main=true, per
-        docker-compose) must never be offered as an exposure candidate. It carries
-        tailbale.main, NOT tailbale.managed, so checking only the latter leaked it."""
+        docker-compose) IS offered as an exposure candidate so the admin UI can be
+        wrapped as a service under a custom domain. Only edge containers
+        (tailbale.managed) are hidden; tailbale.main is intentionally discoverable."""
         mock_client = MagicMock()
         mock_docker_cls.return_value = mock_client
         mock_client.containers.list.return_value = [
@@ -164,8 +165,9 @@ class TestListContainers:
 
         resp = client.get("/api/discovery/containers?hide_managed=true")
         data = resp.json()
-        assert data["total"] == 1
-        assert data["containers"][0]["name"] == "myapp"
+        assert data["total"] == 2
+        names = {c["name"] for c in data["containers"]}
+        assert names == {"myapp", "tailbale"}
 
     @patch("app.services.diagnostics.docker.DockerClient")
     def test_shows_managed_when_not_hidden(self, mock_docker_cls, client):

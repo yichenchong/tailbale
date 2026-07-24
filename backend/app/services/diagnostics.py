@@ -174,12 +174,13 @@ def trigger_manual_reconcile(db: Session, service_id: str) -> dict:
     return reconcile_loop.spawn_reconcile(service_id, socket)
 
 
-# Labels marking a container the orchestrator owns and that must never be
-# offered as an upstream to expose: edge containers carry
-# ``tailbale.managed=true`` and the orchestrator's own (main) container carries
-# ``tailbale.main=true`` (docker-compose.*.yml). A container matching ANY of
-# these is hidden.
-MANAGED_LABELS = {"tailbale.managed": "true", "tailbale.main": "true"}
+# Labels marking an edge runtime container the orchestrator creates and that
+# must never be offered as an upstream to expose: edge containers carry
+# ``tailbale.managed=true``. The orchestrator's own (main) container carries
+# ``tailbale.main=true`` (docker-compose.*.yml) but is deliberately NOT hidden,
+# so it can be wrapped as a service and reached under a custom domain
+# (admin-UI self-exposure).
+MANAGED_LABELS = {"tailbale.managed": "true"}
 
 
 def _parse_ports(container) -> list[ContainerPortInfo]:
@@ -213,9 +214,10 @@ def _parse_networks(container) -> list[str]:
 
 
 def _is_managed(container) -> bool:
-    """True if the container is one the orchestrator owns — an edge container
-    (``tailbale.managed``) or the orchestrator/main container itself
-    (``tailbale.main``). Such containers must not appear as exposure candidates."""
+    """True if the container is an orchestrator-created edge container
+    (``tailbale.managed``). Such containers must never appear as exposure
+    candidates. The main container (``tailbale.main``) is deliberately excluded
+    here so the admin UI can be self-exposed as a service under a custom domain."""
     labels = container.labels or {}
     return any(labels.get(key) == value for key, value in MANAGED_LABELS.items())
 
