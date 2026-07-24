@@ -133,4 +133,4 @@ npx vitest run
 
 ## License
 
-Private — all rights reserved.
+Released under the [MIT License](LICENSE).
